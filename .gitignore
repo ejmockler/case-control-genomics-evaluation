@@ -127,3 +127,19 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# environment variables
+env*
+
+# data files
+*.txt
+*.xlsx
+*.csv
+*.tsv
+sampleResults
+globalFeatureImportance
+shapExplanations*
+*Labels
+
+# neptune.ai
+.neptune
