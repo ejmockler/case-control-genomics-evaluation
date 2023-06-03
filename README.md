@@ -4,8 +4,6 @@ Model stacking workflow to evaluate genomic variants that distinguish cases from
 
 Development occurs with an interactive environment, so each workflow step can be easily debugged.
 
-Workflow frameworks can be configured/orchestrated to scale up on compute clusters.
-
 ## Tools
 
 - Python >=3.9
