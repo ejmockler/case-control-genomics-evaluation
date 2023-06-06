@@ -1,6 +1,6 @@
 from prefect import task, flow, unmapped
 from prefect_ray.task_runners import RayTaskRunner
-import ray
+import os
 import logging
 
 from lion_pytorch import Lion
@@ -15,6 +15,7 @@ from skopt import BayesSearchCV
 from fastnumbers import check_real
 
 from types import SimpleNamespace
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
@@ -360,22 +361,31 @@ def optimizeHyperparameters(
     return optimizer
 
 
+@task()
+def download_file(run_id, field="sampleResults", extension="csv"):
+    path = f"./{field}/{run_id}.{extension}"
+    if os.path.isfile(path):
+        return
+    if not os.path.exists(f"./{field}"):
+        os.makedirs(f"./{field}")
+    run = neptune.init_run(
+        with_id=run_id,
+        project=config["entity"] + "/" + config["project"],
+        api_token=config["neptuneApiToken"],
+    )
+    run[field].download(destination=path)
+    run.stop()
+
+
 def serializeDataFrame(dataframe):
     stream = StringIO()
     dataframe.to_csv(stream)
     return File.from_stream(stream, extension="csv")
 
 
-parallelRunner = ray.init(
-    configure_logging=True,
-    logging_level=logging.ERROR,
-)
-
-
 @flow(
     task_runner=RayTaskRunner(
         init_kwargs={
-            "address": parallelRunner.address_info["address"],
             "configure_logging": True,
             "logging_level": logging.WARN,
         }
@@ -388,6 +398,7 @@ async def classify(
     controlIDs,
     clinicalData,
 ):
+    matplotlib.use("agg")
     outerCvIterator = StratifiedKFold(
         n_splits=config["sampling"]["crossValIterations"], shuffle=False
     )
@@ -689,53 +700,74 @@ async def classify(
             runTracker.stop()
 
     labelsProbabilitiesByModelName = dict()
-    for modelName in results[0].keys():
-        labelsProbabilitiesByModelName[modelName] = [[], []]
-        for k in range(config["sampling"]["bootstrapIterations"]):
-            # append labels
-            labelsProbabilitiesByModelName[modelName][0] = np.hstack(
-                [
-                    labelsProbabilitiesByModelName[modelName][0],
-                    np.concatenate(results[k][modelName]["testLabels"]),
-                ]
-            )
-            # append probabilities
-            labelsProbabilitiesByModelName[modelName][1] = np.hstack(
-                [
-                    labelsProbabilitiesByModelName[modelName][1],
-                    np.concatenate(results[k][modelName]["probabilities"])[:, 1]
-                    if len(results[k][modelName]["probabilities"][0].shape) >= 1
-                    else np.concatenate(results[k][modelName]["probabilities"]),
-                ]
-            )
-
-    seenCaseCount, seenControlCount = 0, 0
-    sampleResults = []
-
-    for sampleID in results["samples"].keys():
-        flattenedProbabilities = np.array(
-            [
-                result[1] if len(caseExplanations.values.shape) > 2 else result
-                for foldResult in results["samples"][sampleID]
-                for result in foldResult
-            ]
-        )
-        sampleResults += [
-            {
-                "probability": results["samples"][sampleID][:1],
-                "accuracy": np.mean(
+    if len(results == config["sampling"]["bootstrapIterations"]):
+        for modelName in results[0].keys():
+            labelsProbabilitiesByModelName[modelName] = [[], []]
+            for k in range(config["sampling"]["bootstrapIterations"]):
+                # append labels
+                labelsProbabilitiesByModelName[modelName][0] = np.hstack(
                     [
-                        np.ceil(caseProbability) == results["labels"][sampleID]
-                        for caseProbability in flattenedProbabilities
+                        labelsProbabilitiesByModelName[modelName][0],
+                        np.concatenate(results[k][modelName]["testLabels"]),
                     ]
-                ),
-                "id": sampleID,
-            }
+                )
+                # append probabilities
+                labelsProbabilitiesByModelName[modelName][1] = np.hstack(
+                    [
+                        labelsProbabilitiesByModelName[modelName][1],
+                        np.concatenate(results[k][modelName]["probabilities"])[:, 1]
+                        if len(results[k][modelName]["probabilities"][0].shape) >= 1
+                        else np.concatenate(results[k][modelName]["probabilities"]),
+                    ]
+                )
+
+        seenCaseCount, seenControlCount = 0, 0
+        sampleResults = []
+
+        for sampleID in results["samples"].keys():
+            flattenedProbabilities = np.array(
+                [
+                    result[1] if len(caseExplanations.values.shape) > 2 else result
+                    for foldResult in results["samples"][sampleID]
+                    for result in foldResult
+                ]
+            )
+            sampleResults += [
+                {
+                    "probability": results["samples"][sampleID][:1],
+                    "accuracy": np.mean(
+                        [
+                            np.ceil(caseProbability) == results["labels"][sampleID]
+                            for caseProbability in flattenedProbabilities
+                        ]
+                    ),
+                    "id": sampleID,
+                }
+            ]
+            if results["labels"][sampleID] == 1:
+                seenCaseCount += 1
+            else:
+                seenControlCount += 1
+    else:  # fetch results from Neptune
+        import multiprocess as multiprocessing
+
+        runs_table_df = projectTracker.fetch_runs_table().to_pandas()
+        # Get the number of available CPUs
+        cpu_count = multiprocessing.cpu_count()
+
+        # Create a list of tuples containing the run ID and the corresponding function call
+        sample_probability_tasks = [
+            (download_file, run["sys/id"]) for _, run in runs_table_df.iterrows()
         ]
-        if results["labels"][sampleID] == 1:
-            seenCaseCount += 1
-        else:
-            seenControlCount += 1
+        sample_label_tasks = [
+            (download_file, run["sys/id"], "testLabels", "pkl")
+            for _, run in runs_table_df.iterrows()
+        ]
+
+        with multiprocessing.Pool(cpu_count) as pool:
+            # Use the multiprocessing Pool to map the tasks to different processes
+            pool.starmap(lambda func, *args: func(*args), sample_probability_tasks)
+            pool.starmap(lambda func, *args: func(*args), sample_label_tasks)
 
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
   {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants

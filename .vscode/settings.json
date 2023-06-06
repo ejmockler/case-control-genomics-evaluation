@@ -1,9 +1,10 @@
 {
   "python.linting.pylintEnabled": false,
-  "python.linting.pylamaEnabled": true,
+  "python.linting.pylamaEnabled": false,
   "python.linting.enabled": true,
   "[python]": {
     "editor.defaultFormatter": "ms-python.black-formatter"
   },
-  "python.formatting.provider": "none"
+  "python.formatting.provider": "none",
+  "python.linting.banditEnabled": true
 }

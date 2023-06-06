@@ -136,6 +136,7 @@ env*
 *.xlsx
 *.csv
 *.tsv
+*.html
 sampleResults
 globalFeatureImportance
 shapExplanations*
