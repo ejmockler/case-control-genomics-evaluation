@@ -65,7 +65,7 @@ config = {
         ],  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
     },
     "sampling": {
-        "bootstrapIterations": 1,
+        "bootstrapIterations": 2000,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
