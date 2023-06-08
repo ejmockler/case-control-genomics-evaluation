@@ -35,8 +35,7 @@ from predict import (
 from neptune.types import File
 from config import config
 
-if not ray.is_initialized():
-    parallelRunner = ray.init()  # TODO use cluster
+import gc
 
 
 # parallel task runner patch https://github.com/PrefectHQ/prefect/issues/7319
@@ -44,7 +43,7 @@ if not ray.is_initialized():
 async def build_subflow(name, args):
     if name == "classify":
 
-        @flow(task_runner=RayTaskRunner(parallelRunner.address_info["address"]))
+        @flow(task_runner=RayTaskRunner())
         async def classify(
             caseGenotypes,
             controlGenotypes,
@@ -54,6 +53,7 @@ async def build_subflow(name, args):
             innerCvIterator,
             outerCvIterator,
         ):
+            gc.collect()
             results = {}
             results["samples"] = {}
             results["labels"] = {}
@@ -422,7 +422,6 @@ async def build_subflow(name, args):
                             waterfallList[j].append(waterfallPlot)
                             plt.close(waterfallPlot)
             plt.close("all")
-
             if config["tracking"]["remote"]:
                 runTracker = neptune.init_run(
                     project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
@@ -461,7 +460,7 @@ async def build_subflow(name, args):
                         heatmapList[j].savefig(f"{shapelyPath}/{j+1}_heatmap.svg")
                         if waterfallList[j]:
                             samplePlotPath = f"{runPath}/featureImportances/shapelyExplanations/samples/{j+1}"
-                            os.mkdirs(samplePlotPath)
+                            os.makedirs(samplePlotPath, exist_ok=True)
                             for k in range(len(current["testIDs"][j])):
                                 try:
                                     waterfallList[j][k].savefig(
@@ -471,6 +470,7 @@ async def build_subflow(name, args):
                                     print(
                                         f"""failed to plot: {traceback.format_exc()}"""
                                     )
+            plt.close("all")
 
     await trackVisualizations(*args)
 
@@ -479,7 +479,7 @@ async def build_subflow(name, args):
 def download_file(run_id, field="sampleResults", extension="csv"):
     path = f"./{field}/{run_id}.{extension}"
     if not os.path.exists(field):
-        os.mkdir(field)
+        os.makedirs(field, exist_ok=True)
     if os.path.isfile(path):
         return
     run = neptune.init_run(
@@ -517,7 +517,7 @@ def load_fold_dataframe(args):
         pass
 
 
-@flow(task_runner=RayTaskRunner(parallelRunner.address_info["address"]))
+@flow(task_runner=RayTaskRunner())
 async def bootstrapSampling():
     (
         caseGenotypes,
@@ -584,70 +584,101 @@ async def bootstrapSampling():
         if (
             config["sampling"]["lastIteration"] > 0
             and j < config["sampling"]["lastIteration"]
-            and config["tracking"]["remote"]
         ):
-            # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
-            for j in range(0, config["sampling"]["lastIteration"]):
-                results[i][j] = {}
-                # get bootstrap runs for model
-                currentRuns = pastRuns.loc[
-                    (pastRuns["bootstrapIteration"] == j)
-                    & (pastRuns["model"] == modelName)
-                ]
-                results[i][j]["trainCount"] = np.around(
-                    currentRuns["nTrain"].unique()[0]
-                )
-                results[i][j]["testCount"] = np.around(currentRuns["nTest"].unique()[0])
-                samplesResultsByFold = [
-                    load_fold_dataframe(("sampleResults", runID))
-                    for runID in currentRuns["sys/id"].unique()
-                ]
-                loadedSamples = pd.concat(samplesResultsByFold).set_index(
-                    "id", drop=True
-                )
-                # unique run ID ordering matches label_args_list
-                currentRunIDIndices = np.where(
-                    pastRuns["sys/id"].unique() == currentRuns.loc["sys/id"]
-                )
-                loadedLabels = [
-                    load_fold_dataframe(args)
-                    for k in currentRunIDIndices
-                    for args in label_args_list[k]
-                ]
-                for sampleID in loadedSamples.index:
-                    if sampleID not in results["samples"]:
-                        results["samples"][sampleID] = loadedSamples.loc[sampleID][
-                            "probability"
-                        ].to_numpy()
-                    else:
-                        results["samples"][sampleID] = np.append(
-                            loadedSamples.loc[sampleID]["probability"].to_numpy(),
-                            results["samples"][sampleID],
-                        )
-                    if sampleID not in results["labels"]:
-                        results["labels"][sampleID] = loadedSamples.loc[sampleID][
-                            "label"
-                        ].unique()[
-                            0
-                        ]  # all labels should be same for sample ID
-                results[i][j]["testLabels"] = loadedLabels
-                results[i][j]["probabilities"] = samplesResultsByFold
-                # TODO use conditional to check if run has feature explanations
-                try:
-                    results[i][j]["globalExplanations"] = [
-                        load_fold_dataframe(
-                            ("featureImportance/modelCoefficients", runID)
-                        )
+            if config["tracking"]["remote"]:
+                # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
+                for j in range(0, config["sampling"]["lastIteration"]):
+                    results[i][j] = {}
+                    # get bootstrap runs for model
+                    currentRuns = pastRuns.loc[
+                        (pastRuns["bootstrapIteration"] == j)
+                        & (pastRuns["model"] == modelName)
+                    ]
+                    results[i][j]["trainCount"] = np.around(
+                        currentRuns["nTrain"].unique()[0]
+                    )
+                    results[i][j]["testCount"] = np.around(
+                        currentRuns["nTest"].unique()[0]
+                    )
+                    samplesResultsByFold = [
+                        load_fold_dataframe(("sampleResults", runID))
                         for runID in currentRuns["sys/id"].unique()
                     ]
-                except:
-                    pass
-                try:
-                    results[i][j]["averageShapelyExplanations"] = load_fold_dataframe(
-                        ("featureImportance/shapelyExplanations/average", runID)
+                    loadedSamples = pd.concat(samplesResultsByFold).set_index(
+                        "id", drop=True
                     )
-                except:
-                    pass
+                    # unique run ID ordering matches label_args_list
+                    currentRunIDIndices = np.where(
+                        pastRuns["sys/id"].unique() == currentRuns.loc["sys/id"]
+                    )
+                    loadedLabels = [
+                        load_fold_dataframe(args)
+                        for k in currentRunIDIndices
+                        for args in label_args_list[k]
+                    ]
+                    for sampleID in loadedSamples.index:
+                        if sampleID not in results["samples"]:
+                            results["samples"][sampleID] = loadedSamples.loc[sampleID][
+                                "probability"
+                            ].to_numpy()
+                        else:
+                            results["samples"][sampleID] = np.append(
+                                loadedSamples.loc[sampleID]["probability"].to_numpy(),
+                                results["samples"][sampleID],
+                            )
+                        if sampleID not in results["labels"]:
+                            results["labels"][sampleID] = loadedSamples.loc[sampleID][
+                                "label"
+                            ].unique()[
+                                0
+                            ]  # all labels should be same for sample ID
+                    results[i][j]["testLabels"] = loadedLabels
+                    results[i][j]["probabilities"] = samplesResultsByFold
+                    # TODO use conditional to check if run has feature explanations
+                    try:
+                        results[i][j]["globalExplanations"] = [
+                            load_fold_dataframe(
+                                ("featureImportance/modelCoefficients", runID)
+                            )
+                            for runID in currentRuns["sys/id"].unique()
+                        ]
+                    except:
+                        pass
+                    try:
+                        results[i][j][
+                            "averageShapelyExplanations"
+                        ] = load_fold_dataframe(
+                            ("featureImportance/shapelyExplanations/average", runID)
+                        )
+                    except:
+                        pass
+
+            else:
+                bootstrapFolders = os.listdir(
+                    f"{config['tracking']['project']}/bootstraps"
+                )
+                # convert to int
+                bootstrapFolders = [int(folder) for folder in bootstrapFolders]
+                bootstrapFolders.sort()
+                assert (
+                    max(bootstrapFolders) == config["sampling"]["lastIteration"]
+                )  # TODO automatically determine last iteration by max
+                for j in range(0, config["sampling"]["lastIteration"]):
+                    results[i][j] = {}
+                    currentBootstrap = bootstrapFolders[j]
+                    modelFolders = os.listdir(
+                        f"{config['tracking']['project']}/bootstraps/{currentBootstrap}"
+                    )
+                    currentFolder = modelFolders.index(modelName)
+                    currentFiles = os.listdir(
+                        f"{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentFolder}"
+                    )
+                    for fileName in currentFiles:
+                        if "testCount" in fileName:
+                            results[i][j]["testCount"] = fileName.split("_")[1]
+                        elif "trainCount" in fileName:
+                            results[i][j]["trainCount"] = fileName.split("_")[1]
+                        # TODO handle rest of local files
 
         modelResult = results[i]
 
@@ -686,7 +717,6 @@ async def bootstrapSampling():
                     ]
                 )
 
-        # TODO handle interrupted local runs
         if modelName not in labelsProbabilitiesByModelName:
             labelsProbabilitiesByModelName[modelName] = [[], []]
         globalExplanationsList = []
@@ -730,7 +760,8 @@ async def bootstrapSampling():
                 )
             else:
                 os.makedirs(
-                    f"{config['tracking']['project']}/averageModelCoefficients/"
+                    f"{config['tracking']['project']}/averageModelCoefficients/",
+                    exist_ok=True,
                 )
                 averageGlobalExplanationsDataFrame.to_csv(
                     f"{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
@@ -770,7 +801,10 @@ async def bootstrapSampling():
                 serializeDataFrame(averageShapelyExplanationsDataFrame)
             )
         else:
-            os.makedirs(f"{config['tracking']['project']}/averageShapelyExplanations/")
+            os.makedirs(
+                f"{config['tracking']['project']}/averageShapelyExplanations/",
+                exist_ok=True,
+            )
             averageShapelyExplanationsDataFrame.to_csv(
                 f"{config['tracking']['project']}/averageShapelyExplanations.csv"
             )

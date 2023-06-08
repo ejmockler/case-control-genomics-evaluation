@@ -25,6 +25,8 @@ import numpy as np
 import neptune
 import shap
 
+import gc
+
 
 @task()
 def getFeatureImportances(model, data, featureLabels):
@@ -340,7 +342,7 @@ async def beginTracking(model, runNumber, embedding, clinicalData, deserializedI
     else:
         runPath = f"{config['tracking']['project']}/bootstraps/{runNumber+1}/{model.__class__.__name__}"
         if not os.path.exists(runPath):
-            os.makedirs(runPath)
+            os.makedirs(runPath, exist_ok=True)
         with open(f"{runPath}/config.pkl", "wb") as file:
             pickle.dump(config, file)
         embeddingDF.to_csv(f"{runPath}/embedding.csv")
@@ -462,62 +464,67 @@ async def trackResults(runID, current):
         runTracker.stop()
     else:
         runPath = runID
-        if config["model"]["hyperparameterOptimization"]:
-            for k in range(config["sampling"]["crossValIterations"]):
+        for k in range(config["sampling"]["crossValIterations"]):
+            if config["model"]["hyperparameterOptimization"]:
                 hyperparameterDir = f"{runPath}/hyperparameters/{k+1}"
-                os.mkdirs(hyperparameterDir)
+                os.makedirs(hyperparameterDir, exist_ok=True)
                 with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
                     json.dump(current["fittedOptimizers"][k].best_params_, file)
 
-                testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
-                trainLabelsSeries = pd.Series(
-                    current["trainLabels"][k], name="trainLabel"
+            testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
+            trainLabelsSeries = pd.Series(current["trainLabels"][k], name="trainLabel")
+            testLabelsSeries.index = current["testIDs"][k]
+            testLabelsSeries.index.name = "id"
+            trainLabelsSeries.index = current["trainIDs"][k]
+            trainLabelsSeries.index.name = "id"
+
+            os.makedirs(f"{runPath}/trainIDs", exist_ok=True)
+            os.makedirs(f"{runPath}/testIDs", exist_ok=True)
+            os.makedirs(f"{runPath}/testLabels", exist_ok=True)
+            os.makedirs(f"{runPath}/trainLabels", exist_ok=True)
+
+            pd.Series(current["trainIDs"][k]).to_csv(
+                f"{runPath}/trainIDs/{k+1}.csv", header=False
+            )
+            pd.Series(current["testIDs"][k]).to_csv(
+                f"{runPath}/testIDs/{k+1}.csv", header=False
+            )
+
+            pd.Series(testLabelsSeries).to_csv(f"{runPath}/testLabels/{k+1}.csv")
+            pd.Series(trainLabelsSeries).to_csv(f"{runPath}/trainLabels/{k+1}.csv")
+
+            if current["globalExplanations"][k] is not None:
+                os.makedirs(
+                    f"{runPath}/featureImportance/modelCoefficients", exist_ok=True
                 )
-                testLabelsSeries.index = current["testIDs"][k]
-                testLabelsSeries.index.name = "id"
-                trainLabelsSeries.index = current["trainIDs"][k]
-                trainLabelsSeries.index.name = "id"
-
-                os.mkdirs(f"{runPath}/trainIDs")
-                pd.Series(current["trainIDs"][k]).to_csv(
-                    f"{runPath}/trainIDs/{k+1}.csv"
+                current["globalExplanations"][k].to_csv(
+                    f"{runPath}/featureImportance/modelCoefficients/{k+1}.csv"
                 )
-                pd.Series(current["testIDs"][k]).to_csv(f"{runPath}/testIDs/{k+1}.csv")
 
-                os.mkdirs(f"{runPath}/testLabels")
-                pd.Series(testLabelsSeries).to_csv(f"{runPath}/testLabels/{k+1}.csv")
-                pd.Series(trainLabelsSeries).to_csv(f"{runPath}/trainLabels/{k+1}.csv")
+            if config["model"]["calculateShapelyExplanations"]:
+                os.makedirs(
+                    f"{runPath}/featureImportance/shapelyExplanations", exist_ok=True
+                )
 
-                if current["globalExplanations"][k] is not None:
-                    os.mkdirs(f"{runPath}/featureImportance/modelCoefficients")
-                    current["globalExplanations"][k].to_csv(
-                        f"{runPath}/featureImportance/modelCoefficients/{k+1}.csv"
-                    )
-
-                if config["model"]["calculateShapelyExplanations"]:
-                    os.mkdirs(f"{runPath}/featureImportance/shapelyExplanations")
-
-                    pd.DataFrame.from_dict(
-                        {
-                            "feature_name": [
-                                name
-                                for name in current["localExplanations"][
-                                    0
-                                ].feature_names
-                            ],
-                            "value": [
-                                np.mean(
-                                    current["localExplanations"][k].values[featureIndex]
-                                )
-                                for featureIndex in range(
-                                    len(current["localExplanations"][0].feature_names)
-                                )
-                            ],
-                        },
-                        dtype=object,
-                    ).set_index("feature_name").to_csv(
-                        f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv"
-                    )
+                pd.DataFrame.from_dict(
+                    {
+                        "feature_name": [
+                            name
+                            for name in current["localExplanations"][0].feature_names
+                        ],
+                        "value": [
+                            np.mean(
+                                current["localExplanations"][k].values[featureIndex]
+                            )
+                            for featureIndex in range(
+                                len(current["localExplanations"][0].feature_names)
+                            )
+                        ],
+                    },
+                    dtype=object,
+                ).set_index("feature_name").to_csv(
+                    f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv"
+                )
 
             sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
 
@@ -540,12 +547,13 @@ async def trackResults(runID, current):
         with open(f"{runPath}/meanAUC_{np.mean(current['testAUC'])}", "w") as file:
             pass
         with open(
-            f"{runPath}/trainCount_{int(np.around(np.mean([len(idList) for idList in current['trainIDs']])))}",
+            f"{runPath}/trainCount_{np.mean([len(idList) for idList in current['trainIDs']])}",
             "w",
         ) as file:
             pass
         with open(
-            f"{runPath}/testCount_{int(np.around(np.mean([len(idList) for idList in current['testIDs']])))}",
+            f"{runPath}/testCount_{np.mean([len(idList) for idList in current['testIDs']])}",
             "w",
         ) as file:
             pass
+    gc.collect()
