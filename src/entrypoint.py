@@ -35,13 +35,16 @@ from predict import (
 from neptune.types import File
 from config import config
 
+if not ray.is_initialized():
+    parallelRunner = ray.init()  # TODO use cluster
+
 
 # parallel task runner patch https://github.com/PrefectHQ/prefect/issues/7319
 # TODO build task runners only
 async def build_subflow(name, args):
     if name == "classify":
 
-        @flow(task_runner=RayTaskRunner())
+        @flow(task_runner=RayTaskRunner(parallelRunner.address_info["address"]))
         async def classify(
             caseGenotypes,
             controlGenotypes,
@@ -514,7 +517,7 @@ def load_fold_dataframe(args):
         pass
 
 
-@flow(task_runner=RayTaskRunner())
+@flow(task_runner=RayTaskRunner(parallelRunner.address_info["address"]))
 async def bootstrapSampling():
     (
         caseGenotypes,
