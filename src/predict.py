@@ -540,10 +540,12 @@ async def trackResults(runID, current):
         with open(f"{runPath}/meanAUC_{np.mean(current['testAUC'])}", "w") as file:
             pass
         with open(
-            f"{runPath}/trainCount_{np.mean([len(idList) for idList in current['trainIDs']])}"
-        ):
+            f"{runPath}/trainCount_{int(np.around(np.mean([len(idList) for idList in current['trainIDs']])))}",
+            "w",
+        ) as file:
             pass
         with open(
-            f"{runPath}/testCount_{np.mean([len(idList) for idList in current['testIDs']])}"
-        ):
+            f"{runPath}/testCount_{int(np.around(np.mean([len(idList) for idList in current['testIDs']])))}",
+            "w",
+        ) as file:
             pass
