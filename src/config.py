@@ -37,6 +37,7 @@ config = {
         "project": "ALS-NUPS-2000",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "token": neptune_api_token,
+        "remote": False,  # if True, log to Neptune
     },
     "clinicalTable": {
         "path": "../notebook/ACWM.xlsx",  # clinical data as Excel spreadsheet
@@ -64,9 +65,10 @@ config = {
         ],  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
     },
     "sampling": {
-        "bootstrapIterations": 2,
+        "bootstrapIterations": 1,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
+        "lastIteration": 0,
     },
     "model": {
         "stack": {

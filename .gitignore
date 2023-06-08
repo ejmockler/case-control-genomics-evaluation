@@ -137,6 +137,7 @@ env*
 *.csv
 *.tsv
 *.html
+*.pkl
 sampleResults
 globalFeatureImportance
 shapExplanations*

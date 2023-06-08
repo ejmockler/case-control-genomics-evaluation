@@ -1,17 +1,21 @@
 import asyncio
 from inspect import isclass
 import pickle
+import os
 import traceback
 import numpy as np
 import neptune
 import pandas as pd
 import ray
 import plotly.express as px
+import matplotlib
+
+matplotlib.use("agg")
 import matplotlib.pyplot as plt
 import shap
 
 from prefect_ray.task_runners import RayTaskRunner
-from prefect import flow
+from prefect import flow, task
 from prefect.task_runners import ConcurrentTaskRunner
 from sklearn.metrics import roc_auc_score
 from types import SimpleNamespace
@@ -43,7 +47,7 @@ async def build_subflow(name, args):
             controlGenotypes,
             clinicalData,
             model,
-            parameterSpace,
+            hyperParameterSpace,
             innerCvIterator,
             outerCvIterator,
         ):
@@ -51,7 +55,10 @@ async def build_subflow(name, args):
             results["samples"] = {}
             results["labels"] = {}
             results["model"] = model.__class__.__name__
-            for runNumber in range(config["sampling"]["bootstrapIterations"]):
+            for runNumber in range(
+                config["sampling"]["lastIteration"],
+                config["sampling"]["bootstrapIterations"],
+            ):
                 trainIDs = set()
                 testIDs = set()
                 results[runNumber] = {}
@@ -72,23 +79,18 @@ async def build_subflow(name, args):
                 # check if model is initialized
                 if isclass(model):
                     if model.__name__ == "TabNetClassifier":
+                        #  model = model(verbose=False, optimizer_fn=Lion)
                         pass
-                        # model = model(verbose=False, optimizer_fn=Lion)
                 print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
                 runID = await beginTracking.submit(
                     model, runNumber, embedding, clinicalData, deserializedIDs
                 )
                 # outer cross-validation
-                crossValIndices = np.array(
-                    [
-                        (cvTrainIndices, cvTestIndices)
-                        for (cvTrainIndices, cvTestIndices) in outerCvIterator.split(
-                            embedding["samples"], embedding["labels"]
-                        )
-                    ]
+                crossValIndices = list(
+                    outerCvIterator.split(embedding["samples"], embedding["labels"])
                 )
-                current["trainIndices"] = crossValIndices[:, 0]
-                current["testIndices"] = crossValIndices[:, 1]
+                current["trainIndices"] = [train for train, _ in crossValIndices]
+                current["testIndices"] = [test for _, test in crossValIndices]
                 trainIDs.update(
                     *[
                         np.array(embedding["sampleIndex"])[indices]
@@ -114,7 +116,7 @@ async def build_subflow(name, args):
                                     embedding["samples"],
                                     embedding["variantIndex"],
                                     embedding["sampleIndex"],
-                                    parameterSpace,
+                                    hyperParameterSpace,
                                     innerCvIterator,
                                 ),
                             )
@@ -211,11 +213,11 @@ async def build_subflow(name, args):
 
                 # plot AUC & hyperparameter convergence
                 plotSubtitle = f"""
-              {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
-              Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
-              
-              {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
-              {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+                    {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+                    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                    
+                    {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
+                    {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
                 results[runNumber] = current
 
                 # record sample metrics
@@ -254,7 +256,7 @@ async def build_subflow(name, args):
             samples,
             variantIndex,
             sampleIndex,
-            parameterSpace,
+            hyperParameterSpace,
             cvIterator,
         ):
             if config["model"]["hyperparameterOptimization"]:
@@ -262,7 +264,7 @@ async def build_subflow(name, args):
                     samples[trainIndices],
                     labels[trainIndices],
                     model,
-                    parameterSpace,
+                    hyperParameterSpace,
                     cvIterator,
                     "neg_mean_squared_error",
                 )
@@ -306,17 +308,12 @@ async def build_subflow(name, args):
 
         @flow(task_runner=ConcurrentTaskRunner())
         async def trackVisualizations(runID, plotSubtitle, modelName, current):
-            runTracker = neptune.init_run(
-                project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-                with_id=runID,
-                api_token=config["tracking"]["token"],
-            )
-            runTracker["plots/aucPlot"] = await plotAUC.submit(
+            aucPlot = await plotAUC(
                 f"""
-          Receiver Operating Characteristic (ROC) Curve
-          {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
-          {plotSubtitle}
-          """,
+                    Receiver Operating Characteristic (ROC) Curve
+                    {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
+                    {plotSubtitle}
+                    """,
                 {
                     f"Fold {k+1}": (
                         current["testLabels"][k],
@@ -328,12 +325,12 @@ async def build_subflow(name, args):
                 },
             )
             if config["model"]["hyperparameterOptimization"]:
-                runTracker["plots/convergencePlot"] = await plotOptimizer.submit(
+                optimizerPlot = await plotOptimizer(
                     f"""
-          Hyperparameter convergence, mean squared error
-          {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
-          {plotSubtitle}
-          """,
+                    Hyperparameter convergence, mean squared error
+                    {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
+                    {plotSubtitle}
+                    """,
                     {
                         f"Fold {k+1}": [
                             result
@@ -345,8 +342,12 @@ async def build_subflow(name, args):
                     },
                 )
 
-            # plot shapely feature importance
             if config["model"]["calculateShapelyExplanations"]:
+                heatmapList = []
+                waterfallList = []
+                stdDeviation = np.std(
+                    (labelsProbabilities[1] - labelsProbabilities[0]) ** 2
+                )
                 for j in range(config["sampling"]["crossValIterations"]):
                     localExplanations = current["localExplanations"][j]
                     caseExplanations = localExplanations
@@ -358,13 +359,13 @@ async def build_subflow(name, args):
                     heatmap = plt.figure()
                     plt.title(
                         f"""
-            Shapely explanations from {modelName}
-            Fold {j+1}
-            {plotSubtitle}
-            """
+                        Shapely explanations from {modelName}
+                        Fold {j+1}
+                        {plotSubtitle}
+                        """
                     )
                     shap.plots.heatmap(caseExplanations, show=False)
-                    runTracker[f"plots/featureHeatmap/{j+1}"] = heatmap
+                    heatmapList.append(heatmap)
                     plt.close(heatmap)
                     labelsProbabilities = (
                         (
@@ -374,9 +375,7 @@ async def build_subflow(name, args):
                         if len(current["probabilities"][j][0].shape) >= 1
                         else (current["testLabels"][j], current["probabilities"][j])
                     )
-                    stdDeviation = np.std(
-                        (labelsProbabilities[1] - labelsProbabilities[0]) ** 2
-                    )
+                    waterfallList.append([])
                     for k in range(len(current["testIDs"][j])):
                         probability = (
                             labelsProbabilities[1][k]
@@ -396,11 +395,11 @@ async def build_subflow(name, args):
                             waterfallPlot = plt.figure()
                             plt.title(
                                 f"""
-                {sampleID}
-                Shapely explanations from {modelName}
-                Fold {j+1}
-                {plotSubtitle}
-                """
+                                {sampleID}
+                                Shapely explanations from {modelName}
+                                Fold {j+1}
+                                {plotSubtitle}
+                                """
                             )
                             # patch parameter bug: https://github.com/slundberg/shap/issues/2362
                             to_pass = SimpleNamespace(
@@ -417,19 +416,102 @@ async def build_subflow(name, args):
                                 }
                             )
                             shap.plots.waterfall(to_pass, show=False)
-                            try:
-                                runTracker[
-                                    f"plots/samples/{j+1}/{sampleID}"
-                                ] = waterfallPlot
-                            except Exception:
-                                runTracker[
-                                    f"plots/samples/{j+1}/{sampleID}"
-                                ] = f"""failed to plot: {traceback.format_exc()}"""
+                            waterfallList[j].append(waterfallPlot)
                             plt.close(waterfallPlot)
             plt.close("all")
-            runTracker.stop()
 
-        await trackVisualizations(*args)
+            if config["tracking"]["remote"]:
+                runTracker = neptune.init_run(
+                    project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
+                    with_id=runID,
+                    api_token=config["tracking"]["token"],
+                    capture_stdout=False,
+                )
+                runTracker["plots/aucPlot"] = aucPlot
+                if config["model"]["hyperparameterOptimization"]:
+                    runTracker["plots/convergencePlot"] = optimizerPlot
+
+                # plot shapely feature importance
+                if config["model"]["calculateShapelyExplanations"]:
+                    for j in range(config["sampling"]["crossValIterations"]):
+                        runTracker[f"plots/featureHeatmap/{j+1}"] = heatmapList[j]
+                        if waterfallList[0]:
+                            for k in range(len(current["testIDs"][j])):
+                                try:
+                                    runTracker[
+                                        f"plots/samples/{j+1}/{sampleID}"
+                                    ] = waterfallList[j][k]
+                                except Exception:
+                                    runTracker[
+                                        f"plots/samples/{j+1}/{sampleID}"
+                                    ] = f"""failed to plot: {traceback.format_exc()}"""
+                runTracker.stop()
+            else:  # store plots locally
+                runPath = runID
+                aucPlot.savefig(f"{runPath}/aucPlot.svg")
+                if config["model"]["hyperparameterOptimization"]:
+                    optimizerPlot.savefig(f"{runPath}/optimizerPlot.svg")
+
+                if config["model"]["calculateShapelyExplanations"]:
+                    shapelyPath = f"{runPath}/featureImportances/shapelyExplanations"
+                    for j in range(config["sampling"]["crossValIterations"]):
+                        heatmapList[j].savefig(f"{shapelyPath}/{j+1}_heatmap.svg")
+                        if waterfallList[j]:
+                            samplePlotPath = f"{runPath}/featureImportances/shapelyExplanations/samples/{j+1}"
+                            os.mkdirs(samplePlotPath)
+                            for k in range(len(current["testIDs"][j])):
+                                try:
+                                    waterfallList[j][k].savefig(
+                                        f"{samplePlotPath}/{sampleID}.svg"
+                                    )
+                                except Exception:
+                                    print(
+                                        f"""failed to plot: {traceback.format_exc()}"""
+                                    )
+
+    await trackVisualizations(*args)
+
+
+@task()
+def download_file(run_id, field="sampleResults", extension="csv"):
+    path = f"./{field}/{run_id}.{extension}"
+    if not os.path.exists(field):
+        os.mkdir(field)
+    if os.path.isfile(path):
+        return
+    run = neptune.init_run(
+        with_id=run_id,
+        project=config["entity"] + "/" + config["project"],
+        api_token=config["neptuneApiToken"],
+    )
+    try:
+        if field == "globalFeatureImportance" or field == "testLabels":
+            for i in range(11):
+                path = f"./{field}/{run_id}_{i}.{extension}"
+                run[f"{field}/{i}"].download(destination=path)
+            averageResultsPath = f"./{field}/{run_id}_average.{extension}"
+            run[f"{field}/average"].download(destination=averageResultsPath)
+        else:
+            run[field].download(destination=path)
+    except:
+        pass
+    run.stop()
+
+
+@task()
+def load_fold_dataframe(args):
+    field, runID = args
+    try:
+        if field == "testLabels" or field == "featureImportance/modelCoefficients":
+            return pd.concat(
+                [pd.read_csv(f"{field}/{runID}_{i}.csv") for i in range(1, 11)]
+            )
+        elif "average" in field.lower():
+            return pd.read_csv(f"{field}/{runID}_average.csv")
+        else:
+            return pd.read_csv(f"{field}/{runID}.csv")
+    except:
+        pass
 
 
 @flow(task_runner=RayTaskRunner())
@@ -445,10 +527,11 @@ async def bootstrapSampling():
         n_splits=config["sampling"]["crossValIterations"], shuffle=False
     )
     innerCvIterator = outerCvIterator
-    projectTracker = neptune.init_project(
-        project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-        api_token=config["tracking"]["token"],
-    )
+    if config["tracking"]["remote"]:
+        projectTracker = neptune.init_project(
+            project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
+            api_token=config["tracking"]["token"],
+        )
 
     results = await asyncio.gather(
         *[
@@ -459,12 +542,12 @@ async def bootstrapSampling():
                     controlGenotypes,
                     clinicalData,
                     model,
-                    hyperparameterSpace,
+                    hyperParameterSpace,
                     innerCvIterator,
                     outerCvIterator,
                 ),
             )
-            for (model, hyperparameterSpace) in list(config["model"]["stack"].items())
+            for (model, hyperParameterSpace) in list(config["model"]["stack"].items())
         ]
     )
 
@@ -473,9 +556,96 @@ async def bootstrapSampling():
     lastVariantCount = 0
     sampleResults = {}
 
+    if (
+        config["sampling"]["lastIteration"] > 0
+        and j < config["sampling"]["lastIteration"]
+        and config["tracking"]["remote"]
+    ):
+        runsTable = projectTracker.fetch_runs_table().to_pandas()
+        pastRuns = runsTable[
+            runsTable["bootstrapIteration"] < config["sampling"]["lastIteration"]
+        ]
+        label_args_list = [
+            ("testLabels", runID) for runID in pastRuns["sys/id"].unique()
+        ]
+        for runID in pastRuns["sys/id"].unique():
+            download_file(runID, "testLabels", "csv")
+            download_file(runID, "sampleResults", "csv")
+            download_file(runID, "featureImportance/modelCoefficients", "csv")
+            download_file(runID, "featureImportance/shapelyExplanations/average", "csv")
+
     # asyncio.gather preserves order
     for i, model in enumerate(config["model"]["stack"]):
         modelName = model.__class__.__name__
+
+        if (
+            config["sampling"]["lastIteration"] > 0
+            and j < config["sampling"]["lastIteration"]
+            and config["tracking"]["remote"]
+        ):
+            # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
+            for j in range(0, config["sampling"]["lastIteration"]):
+                results[i][j] = {}
+                # get bootstrap runs for model
+                currentRuns = pastRuns.loc[
+                    (pastRuns["bootstrapIteration"] == j)
+                    & (pastRuns["model"] == modelName)
+                ]
+                results[i][j]["trainCount"] = np.around(
+                    currentRuns["nTrain"].unique()[0]
+                )
+                results[i][j]["testCount"] = np.around(currentRuns["nTest"].unique()[0])
+                samplesResultsByFold = [
+                    load_fold_dataframe(("sampleResults", runID))
+                    for runID in currentRuns["sys/id"].unique()
+                ]
+                loadedSamples = pd.concat(samplesResultsByFold).set_index(
+                    "id", drop=True
+                )
+                # unique run ID ordering matches label_args_list
+                currentRunIDIndices = np.where(
+                    pastRuns["sys/id"].unique() == currentRuns.loc["sys/id"]
+                )
+                loadedLabels = [
+                    load_fold_dataframe(args)
+                    for k in currentRunIDIndices
+                    for args in label_args_list[k]
+                ]
+                for sampleID in loadedSamples.index:
+                    if sampleID not in results["samples"]:
+                        results["samples"][sampleID] = loadedSamples.loc[sampleID][
+                            "probability"
+                        ].to_numpy()
+                    else:
+                        results["samples"][sampleID] = np.append(
+                            loadedSamples.loc[sampleID]["probability"].to_numpy(),
+                            results["samples"][sampleID],
+                        )
+                    if sampleID not in results["labels"]:
+                        results["labels"][sampleID] = loadedSamples.loc[sampleID][
+                            "label"
+                        ].unique()[
+                            0
+                        ]  # all labels should be same for sample ID
+                results[i][j]["testLabels"] = loadedLabels
+                results[i][j]["probabilities"] = samplesResultsByFold
+                # TODO use conditional to check if run has feature explanations
+                try:
+                    results[i][j]["globalExplanations"] = [
+                        load_fold_dataframe(
+                            ("featureImportance/modelCoefficients", runID)
+                        )
+                        for runID in currentRuns["sys/id"].unique()
+                    ]
+                except:
+                    pass
+                try:
+                    results[i][j]["averageShapelyExplanations"] = load_fold_dataframe(
+                        ("featureImportance/shapelyExplanations/average", runID)
+                    )
+                except:
+                    pass
+
         modelResult = results[i]
 
         for sampleID in modelResult["samples"].keys():
@@ -513,6 +683,7 @@ async def bootstrapSampling():
                     ]
                 )
 
+        # TODO handle interrupted local runs
         if modelName not in labelsProbabilitiesByModelName:
             labelsProbabilitiesByModelName[modelName] = [[], []]
         globalExplanationsList = []
@@ -550,17 +721,34 @@ async def bootstrapSampling():
                 .groupby("features")
                 .mean()
             )
-            projectTracker[f"averageModelCoefficients/{modelName}"].upload(
-                serializeDataFrame(averageGlobalExplanationsDataFrame)
-            )
+            if config["tracking"]["remote"]:
+                projectTracker[f"averageModelCoefficients/{modelName}"].upload(
+                    serializeDataFrame(averageGlobalExplanationsDataFrame)
+                )
+            else:
+                os.makedirs(
+                    f"{config['tracking']['project']}/averageModelCoefficients/"
+                )
+                averageGlobalExplanationsDataFrame.to_csv(
+                    f"{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
+                )
 
     sampleResultsDataFrame = pd.DataFrame.from_dict(
         sampleResults, orient="index", columns=["label", "probability", "accuracy"]
     )
     sampleResultsDataFrame.index.name = "id"
 
-    projectTracker["sampleResults"].upload(serializeDataFrame(sampleResultsDataFrame))
-    projectTracker["sampleResultsObject"].upload(File.as_pickle(sampleResultsDataFrame))
+    if config["tracking"]["remote"]:
+        projectTracker["sampleResults"].upload(
+            serializeDataFrame(sampleResultsDataFrame)
+        )
+        projectTracker["sampleResultsObject"].upload(
+            File.as_pickle(sampleResultsDataFrame)
+        )
+    else:
+        sampleResultsDataFrame.to_csv(
+            f"{config['tracking']['project']}/sampleResults.csv"
+        )
 
     if config["model"]["calculateShapelyExplanations"]:
         averageShapelyExplanationsDataFrame = (
@@ -574,9 +762,15 @@ async def bootstrapSampling():
             .groupby("feature_name")
             .mean()
         )
-        projectTracker["averageShapelyExplanations"].upload(
-            serializeDataFrame(averageShapelyExplanationsDataFrame)
-        )
+        if config["tracking"]["remote"]:
+            projectTracker["averageShapelyExplanations"].upload(
+                serializeDataFrame(averageShapelyExplanationsDataFrame)
+            )
+        else:
+            os.makedirs(f"{config['tracking']['project']}/averageShapelyExplanations/")
+            averageShapelyExplanationsDataFrame.to_csv(
+                f"{config['tracking']['project']}/averageShapelyExplanations.csv"
+            )
 
     caseAccuracy = sampleResultsDataFrame[sampleResultsDataFrame["label"] == 1][
         "accuracy"
@@ -605,68 +799,74 @@ async def bootstrapSampling():
     )
 
     plotSubtitle = f"""
-  {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-  {config["tracking"]["name"]}, {variantCount} variants
-  Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
-  
-  {sampleResultsDataFrame['label'].value_counts()[1]} cases @ {'{:.1%}'.format(caseAccuracy)} accuracy, {sampleResultsDataFrame['label'].value_counts()[0]} controls @ {'{:.1%}'.format(controlAccuracy)} accuracy
-  {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
+    {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+    {config["tracking"]["name"]}, {variantCount} variants
+    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    projectTracker["sampleAccuracyPlot"].upload(
-        px.histogram(
-            sampleResultsDataFrame,
-            x="accuracy",
-            color="label",
-            pattern_shape="label",
-            range_x=[0, 1],
-            title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
-        )
+    {sampleResultsDataFrame['label'].value_counts()[1]} cases @ {'{:.1%}'.format(caseAccuracy)} accuracy, {sampleResultsDataFrame['label'].value_counts()[0]} controls @ {'{:.1%}'.format(controlAccuracy)} accuracy
+    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
+
+    accuracyHistogram = px.histogram(
+        sampleResultsDataFrame,
+        x="accuracy",
+        color="label",
+        pattern_shape="label",
+        range_x=[0, 1],
+        title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
-
-    projectTracker["aucPlot"].upload(
-        plotAUC(
-            f"""
-    Receiver Operating Characteristic (ROC) Curve
-    {plotSubtitle}
-    """,
-            labelsProbabilitiesByModelName,
-        )
+    aucPlot = await plotAUC(
+        f"""
+            Receiver Operating Characteristic (ROC) Curve
+            {plotSubtitle}
+            """,
+        labelsProbabilitiesByModelName,
     )
-
-    projectTracker["calibrationPlot"].upload(
-        File.as_image(
-            plotCalibration(
-                f"""
-    Calibration Curve
-    {plotSubtitle}
-    """,
-                labelsProbabilitiesByModelName,
-            )
-        )
+    calibrationPlot = await plotCalibration(
+        f"""
+            Calibration Curve
+            {plotSubtitle}
+            """,
+        labelsProbabilitiesByModelName,
     )
-
     if config["model"]["hyperparameterOptimization"]:
-        projectTracker["convergencePlot"].upload(
-            File.as_image(
-                plotOptimizer(
-                    f"""
-      Convergence Plot
-      {plotSubtitle}
-      """,
-                    {
-                        modelName: [
-                            result
-                            for j in range(config["sampling"]["bootstrapIterations"])
-                            for foldOptimizer in results[i][j]["fittedOptimizers"]
-                            for result in foldOptimizer.optimizer_results_
-                        ]
-                        for i, modelName in enumerate(config["model"]["stack"])
-                    },
-                )
-            )
+        convergencePlot = plotOptimizer(
+            f"""
+            Convergence Plot
+            {plotSubtitle}
+            """,
+            {
+                modelName: [
+                    result
+                    for j in range(config["sampling"]["bootstrapIterations"])
+                    for foldOptimizer in results[i][j]["fittedOptimizers"]
+                    for result in foldOptimizer.optimizer_results_
+                ]
+                for i, modelName in enumerate(config["model"]["stack"])
+            },
         )
 
-    projectTracker.stop()
+    if config["tracking"]["remote"]:
+        projectTracker["sampleAccuracyPlot"].upload(accuracyHistogram)
+        projectTracker["aucPlot"].upload(aucPlot)
+
+        if config["model"]["hyperparameterOptimization"]:
+            projectTracker["calibrationPlot"].upload(File.as_image(calibrationPlot))
+
+        if config["model"]["hyperparameterOptimization"]:
+            projectTracker["convergencePlot"].upload(File.as_image(convergencePlot))
+
+        projectTracker.stop()
+    else:
+        accuracyHistogram.save_html(
+            f"{config['tracking']['project']}/accuracyPlot.html"
+        )
+        aucPlot.savefig(f"{config['tracking']['project']}/aucPlot.svg")
+        calibrationPlot.savefig(f"{config['tracking']['project']}/calibrationPlot.svg")
+        if config["model"]["hyperparameterOptimization"]:
+            convergencePlot.savefig(
+                f"{config['tracking']['project']}/convergencePlot.svg"
+            )
+
     return results
 
 
@@ -683,12 +883,13 @@ async def remove_all_flows():
 
 
 if __name__ == "__main__":
+    # TODO replace notebook code with src imports
     ray.shutdown()
     parallelRunner = ray.init()
-
-    results = asyncio.run(bootstrapSampling())
-    pickle.dump(results, open("results.pkl", "wb"))
 
     clearHistory = True
     if clearHistory:
         asyncio.run(remove_all_flows())
+
+    results = asyncio.run(bootstrapSampling())
+    pickle.dump(results, open(f"results_{config['tracking']['project']}.pkl", "wb"))

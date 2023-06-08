@@ -1,5 +1,12 @@
 from io import StringIO
+import json
+import os
+import pickle
 from fastnumbers import check_real
+import matplotlib
+
+matplotlib.use("agg")
+import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
 from neptune.types import File
@@ -17,7 +24,6 @@ import pandas as pd
 import numpy as np
 import neptune
 import shap
-import matplotlib.pyplot as plt
 
 
 @task()
@@ -126,7 +132,7 @@ async def plotAUC(title, labelsPredictionsByInstance):
     # trace AUC for each set of predictions
     tprs = []
     aucs = []
-    mean_fpr = np.linspace(0, 1, 100)
+    mean_filer = np.linspace(0, 1, 100)
 
     fig, ax = plt.subplots(figsize=(10, 10))
     for name, (labels, predictions) in labelsPredictionsByInstance.items():
@@ -143,7 +149,7 @@ async def plotAUC(title, labelsPredictionsByInstance):
             lw=2,
             ax=ax,
         )
-        interp_tpr = np.interp(mean_fpr, viz.fpr, viz.tpr)
+        interp_tpr = np.interp(mean_filer, viz.filer, viz.tpr)
         interp_tpr[0] = 0.0
         tprs.append(interp_tpr)
         aucs.append(viz.roc_auc)
@@ -152,10 +158,10 @@ async def plotAUC(title, labelsPredictionsByInstance):
     ax.plot([0, 1], [0, 1], linestyle="--", lw=2, color="r", label="Chance", alpha=0.8)
     mean_tpr = np.mean(tprs, axis=0)
     mean_tpr[-1] = 1.0
-    mean_auc = auc(mean_fpr, mean_tpr)
+    mean_auc = auc(mean_filer, mean_tpr)
     std_auc = np.std(aucs)
     ax.plot(
-        mean_fpr,
+        mean_filer,
         mean_tpr,
         color="b",
         label=r"Mean ROC (AUC = %0.2f $\pm$ %0.2f)" % (mean_auc, std_auc),
@@ -166,7 +172,7 @@ async def plotAUC(title, labelsPredictionsByInstance):
     tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
     tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
     ax.fill_between(
-        mean_fpr,
+        mean_filer,
         tprs_lower,
         tprs_upper,
         color="grey",
@@ -303,108 +309,190 @@ def serializeDataFrame(dataframe):
 
 @task()
 async def beginTracking(model, runNumber, embedding, clinicalData, deserializedIDs):
-    runTracker = neptune.init_run(
-        project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-        api_token=config["tracking"]["token"],
-    )
-    runTracker["sys/tags"].add(model.__class__.__name__)
-    runTracker["bootstrapIteration"] = runNumber + 1
-    runTracker["config"] = {
-        key: (item if check_real(item) or isinstance(item, str) else str(item))
-        for key, item in config.items()
-    }
-
     embeddingDF = pd.DataFrame(
         data=embedding["samples"],
         columns=embedding["variantIndex"],
         index=embedding["sampleIndex"],
     )
     embeddingDF.index.name = "id"
-    runTracker["embedding"].upload(serializeDataFrame(embeddingDF))
-    runTracker["clinicalData"].upload(
-        serializeDataFrame(clinicalData.loc[clinicalData.index.isin(deserializedIDs)])
-    )
+    if config["tracking"]["remote"]:
+        runTracker = neptune.init_run(
+            project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
+            api_token=config["tracking"]["token"],
+        )
+        runTracker["sys/tags"].add(model.__class__.__name__)
+        runTracker["bootstrapIteration"] = runNumber + 1
+        runTracker["config"] = {
+            key: (item if check_real(item) or isinstance(item, str) else str(item))
+            for key, item in config.items()
+        }
 
-    runTracker["nVariants"] = len(embedding["variantIndex"])
-    runID = runTracker["sys/id"].fetch()
-    runTracker.stop()
+        runTracker["embedding"].upload(serializeDataFrame(embeddingDF))
+        runTracker["clinicalData"].upload(
+            serializeDataFrame(
+                clinicalData.loc[clinicalData.index.isin(deserializedIDs)]
+            )
+        )
+
+        runTracker["nVariants"] = len(embedding["variantIndex"])
+        runID = runTracker["sys/id"].fetch()
+        runTracker.stop()
+    else:
+        runPath = f"{config['tracking']['project']}/bootstraps/{runNumber+1}/{model.__class__.__name__}"
+        if not os.path.exists(runPath):
+            os.makedirs(runPath)
+        with open(f"{runPath}/config.json", "w") as file:
+            json.dump(config, file)
+        embeddingDF.to_csv(f"{runPath}/embedding.csv")
+        clinicalData.loc[clinicalData.index.isin(deserializedIDs)].to_csv(
+            f"{runPath}/clinicalData.csv"
+        )
+        # hack to log metrics as filenames
+        with open(f"{runPath}/nVariants_{len(embedding['variantIndex'])}", "w") as file:
+            pass
+        runID = runPath
     return runID
 
 
 @task()
 async def trackResults(runID, current):
-    runTracker = neptune.init_run(
-        project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-        with_id=runID,
-        api_token=config["tracking"]["token"],
-    )
-    if config["model"]["hyperparameterOptimization"]:
-        runTracker["modelParams"] = {
-            k + 1: current["fittedOptimizers"][k].best_params_
-            for k in range(config["sampling"]["crossValIterations"])
-        }
+    sampleResultsDataframe = pd.DataFrame.from_dict(
+        {
+            "probability": [
+                probability[1]
+                for foldResults in current["probabilities"]
+                for probability in foldResults
+            ],
+            "id": [id for foldResults in current["testIDs"] for id in foldResults],
+        },
+        dtype=object,
+    ).set_index("id")
 
-    runTracker["sampleResults"].upload(
-        serializeDataFrame(
-            pd.DataFrame.from_dict(
-                {
-                    "probability": [
-                        probability[1]
-                        for foldResults in current["probabilities"]
-                        for probability in foldResults
-                    ],
-                    "id": [
-                        id for foldResults in current["testIDs"] for id in foldResults
-                    ],
-                },
-                dtype=object,
-            ).set_index("id")
+    if config["tracking"]["remote"]:
+        runTracker = neptune.init_run(
+            project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
+            with_id=runID,
+            api_token=config["tracking"]["token"],
         )
-    )
+        if config["model"]["hyperparameterOptimization"]:
+            runTracker["modelParams"] = {
+                k + 1: current["fittedOptimizers"][k].best_params_
+                for k in range(config["sampling"]["crossValIterations"])
+            }
 
-    if config["model"]["calculateShapelyExplanations"]:
-        runTracker["shapExplanationsPerFold"].upload(
-            File.as_pickle(current["localExplanations"])
-        )
-        runTracker["shapExplainersPerFold"].upload(
-            File.as_pickle(current["shapExplainers"])
-        )
-        runTracker["shapMaskersPerFold"].upload(File.as_pickle(current["shapMaskers"]))
-        runTracker["featureImportance/shapelyExplanations/average"].upload(
-            serializeDataFrame(current["averageShapelyValues"])
-        )
+        runTracker["sampleResults"].upload(serializeDataFrame(sampleResultsDataframe))
 
-    if current["globalExplanations"][0] is not None:
-        runTracker[f"featureImportance/modelCoefficients/average"].upload(
-            serializeDataFrame(current["averageGlobalExplanations"])
-        )
-
-    for k in range(config["sampling"]["crossValIterations"]):
-        testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
-        trainLabelsSeries = pd.Series(current["trainLabels"][k], name="trainLabel")
-        testLabelsSeries.index = current["testIDs"][k]
-        testLabelsSeries.index.name = "id"
-        trainLabelsSeries.index = current["trainIDs"][k]
-        trainLabelsSeries.index.name = "id"
-        runTracker[f"trainIDs/{k+1}"].upload(
-            serializeDataFrame(pd.Series(current["trainIDs"][k]))
-        )
-        runTracker[f"testIDs/{k+1}"].upload(
-            serializeDataFrame(pd.Series(current["testIDs"][k]))
-        )
-        runTracker[f"testLabels/{k+1}"].upload(
-            serializeDataFrame(pd.Series(testLabelsSeries))
-        )
-        runTracker[f"trainLabels/{k+1}"].upload(
-            serializeDataFrame(pd.Series(trainLabelsSeries))
-        )
-        if current["globalExplanations"][k] is not None:
-            runTracker[f"featureImportance/modelCoefficients/{k+1}"].upload(
-                serializeDataFrame(current["globalExplanations"][k])
-            )
         if config["model"]["calculateShapelyExplanations"]:
-            runTracker[f"featureImportance/shapelyExplanations/{k+1}"].upload(
-                serializeDataFrame(
+            runTracker["shapExplanationsPerFold"].upload(
+                File.as_pickle(current["localExplanations"])
+            )
+            runTracker["shapExplainersPerFold"].upload(
+                File.as_pickle(current["shapExplainers"])
+            )
+            runTracker["shapMaskersPerFold"].upload(
+                File.as_pickle(current["shapMaskers"])
+            )
+            runTracker["featureImportance/shapelyExplanations/average"].upload(
+                serializeDataFrame(current["averageShapelyValues"])
+            )
+
+        if current["globalExplanations"][0] is not None:
+            runTracker[f"featureImportance/modelCoefficients/average"].upload(
+                serializeDataFrame(current["averageGlobalExplanations"])
+            )
+
+        for k in range(config["sampling"]["crossValIterations"]):
+            testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
+            trainLabelsSeries = pd.Series(current["trainLabels"][k], name="trainLabel")
+            testLabelsSeries.index = current["testIDs"][k]
+            testLabelsSeries.index.name = "id"
+            trainLabelsSeries.index = current["trainIDs"][k]
+            trainLabelsSeries.index.name = "id"
+            runTracker[f"trainIDs/{k+1}"].upload(
+                serializeDataFrame(pd.Series(current["trainIDs"][k]))
+            )
+            runTracker[f"testIDs/{k+1}"].upload(
+                serializeDataFrame(pd.Series(current["testIDs"][k]))
+            )
+            runTracker[f"testLabels/{k+1}"].upload(
+                serializeDataFrame(pd.Series(testLabelsSeries))
+            )
+            runTracker[f"trainLabels/{k+1}"].upload(
+                serializeDataFrame(pd.Series(trainLabelsSeries))
+            )
+            if current["globalExplanations"][k] is not None:
+                runTracker[f"featureImportance/modelCoefficients/{k+1}"].upload(
+                    serializeDataFrame(current["globalExplanations"][k])
+                )
+            if config["model"]["calculateShapelyExplanations"]:
+                runTracker[f"featureImportance/shapelyExplanations/{k+1}"].upload(
+                    serializeDataFrame(
+                        pd.DataFrame.from_dict(
+                            {
+                                "feature_name": [
+                                    name
+                                    for name in current["localExplanations"][
+                                        0
+                                    ].feature_names
+                                ],
+                                "value": [
+                                    np.mean(
+                                        current["localExplanations"][k].values[
+                                            featureIndex
+                                        ]
+                                    )
+                                    for featureIndex in range(
+                                        len(
+                                            current["localExplanations"][
+                                                0
+                                            ].feature_names
+                                        )
+                                    )
+                                ],
+                            },
+                            dtype=object,
+                        ).set_index("feature_name")
+                    )
+                )
+
+        runTracker["meanAUC"] = np.mean(current["testAUC"])
+        # average sample count across folds
+        runTracker["nTrain"] = np.mean([len(idList) for idList in current["trainIDs"]])
+        runTracker["nTest"] = np.mean([len(idList) for idList in current["testIDs"]])
+        runTracker.stop()
+    else:
+        runPath = runID
+        if config["model"]["hyperparameterOptimization"]:
+            for k in range(config["sampling"]["crossValIterations"]):
+                hyperparameterDir = f"{runPath}/hyperparameters/{k+1}"
+                os.mkdirs(hyperparameterDir)
+                with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
+                    json.dump(current["fittedOptimizers"][k].best_params_, file)
+
+                testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
+                trainLabelsSeries = pd.Series(
+                    current["trainLabels"][k], name="trainLabel"
+                )
+                testLabelsSeries.index = current["testIDs"][k]
+                testLabelsSeries.index.name = "id"
+                trainLabelsSeries.index = current["trainIDs"][k]
+                trainLabelsSeries.index.name = "id"
+                
+                os.mkdirs(f"{runPath}/trainIDs")
+                pd.Series(current["trainIDs"][k]).to_csv(f"{runPath}/trainIDs/{k+1}.csv")
+                pd.Series(current["testIDs"][k])).to_csv(f"{runPath}/testIDs/{k+1}.csv")
+                
+                os.mkdirs(f"{runPath}/testLabels")
+                pd.Series(testLabelsSeries).to_csv(f"{runPath}/testLabels/{k+1}.csv")
+                pd.Series(trainLabelsSeries).to_csv(f"{runPath}/trainLabels/{k+1}.csv")
+
+                if current["globalExplanations"][k] is not None:
+                    os.mkdirs(f"{runPath}/featureImportance/modelCoefficients")
+                    current["globalExplanations"][k].to_csv(f"{runPath}/featureImportance/modelCoefficients/{k+1}.csv")
+                   
+                if config["model"]["calculateShapelyExplanations"]:
+                    os.mkdirs(f"{runPath}/featureImportance/shapelyExplanations")
+                    
                     pd.DataFrame.from_dict(
                         {
                             "feature_name": [
@@ -415,20 +503,43 @@ async def trackResults(runID, current):
                             ],
                             "value": [
                                 np.mean(
-                                    current["localExplanations"][k].values[featureIndex]
+                                    current["localExplanations"][k].values[
+                                        featureIndex
+                                    ]
                                 )
                                 for featureIndex in range(
-                                    len(current["localExplanations"][0].feature_names)
+                                    len(
+                                        current["localExplanations"][
+                                            0
+                                        ].feature_names
+                                    )
                                 )
                             ],
                         },
                         dtype=object,
-                    ).set_index("feature_name")
-                )
+                    ).set_index("feature_name").to_csv(f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv")
+                    
+            sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
+
+        if config["model"]["calculateShapelyExplanations"]:
+            with open(f"{runPath}/shapExplanationsPerFold.pkl", "wb") as file:
+                pickle.dump(current["localExplanations"], file)
+            with open(f"{runPath}/shapExplainersPerFold.pkl", "wb") as file:
+                pickle.dump(current["shapExplainers"], file)
+            with open(f"{runPath}/shapMaskersPerFold.pkl", "wb") as file:
+                pickle.dump(current["shapMaskers"], file)
+            current["averageShapelyValues"].to_csv(
+                f"{runPath}/averageShapelyValues.csv"
             )
 
-    runTracker["meanAUC"] = np.mean(current["testAUC"])
-    # average sample count across folds
-    runTracker["nTrain"] = np.mean([len(idList) for idList in current["trainIDs"]])
-    runTracker["nTest"] = np.mean([len(idList) for idList in current["testIDs"]])
-    runTracker.stop()
+        if current["globalExplanations"][0] is not None:
+            current["averageGlobalExplanations"].to_csv(
+                f"{runPath}/averageGlobalExplanations.csv"
+            )
+        
+        with open(f"{runPath}/meanAUC_{np.mean(current['testAUC'])}", "w") as file:
+            pass
+        with open(f"{runPath}/trainCount_{np.mean([len(idList) for idList in current['trainIDs']])}"):
+            pass
+        with open(f"{runPath}/testCount_{np.mean([len(idList) for idList in current['testIDs']])}"):
+            pass
