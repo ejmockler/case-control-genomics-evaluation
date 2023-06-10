@@ -29,7 +29,9 @@ prefect config set PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://pos
 
 `prefect config set PREFECT_API_URL="http://127.0.0.1:4200/api"`
 
-Set concurrency limits in [src/config.py](src/config.py) to not overschedule resources.
+Increase database timeout if server throws timeout errors when loading parallel subflows:
+
+`prefect config set PREFECT_API_DATABASE_TIMEOUT=720`
 
 ## Interactive entrypoint
 

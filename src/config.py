@@ -69,7 +69,6 @@ config = {
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 993,
-        "concurrencyLimit": 8,  # bootstrap iterations to run in parallel; set to "unlimited" if not required
     },
     "model": {
         "stack": {
@@ -101,6 +100,5 @@ config = {
         },
         "hyperparameterOptimization": False,
         "calculateShapelyExplanations": False,
-        "concurrencyLimit": 2,  # number of models to train in parallel; set to "unlimited" if not required
     },
 }

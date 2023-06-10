@@ -38,19 +38,6 @@ from config import config
 import gc
 
 
-# limit subflow concurrency
-async def limited_gather(tasks, limit):
-    if limit == "unlimited":
-        return await asyncio.gather(*tasks)
-    semaphore = asyncio.Semaphore(limit)
-
-    async def bound_task(task):
-        async with semaphore:
-            return await task
-
-    return await asyncio.gather(*(bound_task(task) for task in tasks))
-
-
 # parallel task runner patch https://github.com/PrefectHQ/prefect/issues/7319
 # TODO build task runners only
 async def build_subflow(name, args):
@@ -68,243 +55,199 @@ async def build_subflow(name, args):
         ):
             gc.collect()
             results = {}
-            results["model"] = model.__class__.__name__
-
-            bootstrap_tasks = [
-                build_subflow(
-                    "bootstrap",
-                    (
-                        model,
-                        hyperParameterSpace,
-                        caseGenotypes,
-                        controlGenotypes,
-                        clinicalData,
-                        outerCvIterator,
-                        innerCvIterator,
-                        runNumber,
-                    ),
-                )
-                for runNumber in range(
-                    config["sampling"]["lastIteration"],
-                    config["sampling"]["bootstrapIterations"],
-                )
-            ]
-
-            results["bootstraps"] = await limited_gather(
-                bootstrap_tasks, config["sampling"]["concurrencyLimit"]
-            )
-
             results["samples"] = {}
             results["labels"] = {}
+            results["model"] = model.__class__.__name__
+            # TODO parallelize
             for runNumber in range(
                 config["sampling"]["lastIteration"],
                 config["sampling"]["bootstrapIterations"],
             ):
-                # record sample metrics
-                for fold in range(config["sampling"]["crossValIterations"]):
-                    for j, sampleID in enumerate(
-                        results["bootstraps"][runNumber]["testIDs"][fold]
-                    ):
-                        try:
-                            results["samples"][sampleID].append(
-                                results["bootstraps"][runNumber]["probabilities"][fold][
-                                    j
-                                ]
-                            )
-                        except KeyError:
-                            results["samples"][sampleID] = [
-                                results["bootstraps"][runNumber]["probabilities"][fold][
-                                    j
-                                ]
-                            ]
-                        finally:
-                            results["labels"][sampleID] = results["bootstraps"][
-                                runNumber
-                            ]["testLabels"][fold][j]
-            return results
-
-        return await classify(*args)
-
-    if name == "bootstrap":
-
-        @flow(task_runner=RayTaskRunner())
-        async def bootstrap(
-            model,
-            hyperParameterSpace,
-            caseGenotypes,
-            controlGenotypes,
-            clinicalData,
-            outerCvIterator,
-            innerCvIterator,
-            runNumber,
-        ):
-            trainIDs = set()
-            testIDs = set()
-            results = {}
-            embedding = prepareDatasets(
-                caseGenotypes,
-                controlGenotypes,
-                verbose=(True if runNumber == 0 else False),
-            )
-            deserializedIDs = list()
-            for id in embedding["sampleIndex"]:
-                deserializedIDs.extend(id.split("__"))
-            totalSampleCount = len(embedding["samples"])
-            caseCount = np.count_nonzero(embedding["labels"])
-            print(f"{totalSampleCount} samples\n")
-            print(f"{caseCount} cases\n")
-            print(f"{totalSampleCount - caseCount} controls\n")
-            current = {}
-            # check if model is initialized
-            if isclass(model):
-                if model.__name__ == "TabNetClassifier":
-                    #  model = model(verbose=False, optimizer_fn=Lion)
-                    pass
-            print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
-            runID = await beginTracking.submit(
-                model, runNumber, embedding, clinicalData, deserializedIDs
-            )
-            # outer cross-validation
-            crossValIndices = list(
-                outerCvIterator.split(embedding["samples"], embedding["labels"])
-            )
-            current["trainIndices"] = [train for train, _ in crossValIndices]
-            current["testIndices"] = [test for _, test in crossValIndices]
-            trainIDs.update(
-                *[
-                    np.array(embedding["sampleIndex"])[indices]
-                    for indices in current["trainIndices"]
-                ]
-            )
-            testIDs.update(
-                *[
-                    np.array(embedding["sampleIndex"])[indices]
-                    for indices in current["testIndices"]
-                ]
-            )
-            outerCrossValResults = zip(
-                *await asyncio.gather(
+                trainIDs = set()
+                testIDs = set()
+                results[runNumber] = {}
+                embedding = prepareDatasets(
+                    caseGenotypes,
+                    controlGenotypes,
+                    verbose=(True if runNumber == 0 else False),
+                )
+                deserializedIDs = list()
+                for id in embedding["sampleIndex"]:
+                    deserializedIDs.extend(id.split("__"))
+                totalSampleCount = len(embedding["samples"])
+                caseCount = np.count_nonzero(embedding["labels"])
+                print(f"{totalSampleCount} samples\n")
+                print(f"{caseCount} cases\n")
+                print(f"{totalSampleCount - caseCount} controls\n")
+                current = {}
+                # check if model is initialized
+                if isclass(model):
+                    if model.__name__ == "TabNetClassifier":
+                        #  model = model(verbose=False, optimizer_fn=Lion)
+                        pass
+                print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
+                runID = await beginTracking.submit(
+                    model, runNumber, embedding, clinicalData, deserializedIDs
+                )
+                # outer cross-validation
+                crossValIndices = list(
+                    outerCvIterator.split(embedding["samples"], embedding["labels"])
+                )
+                current["trainIndices"] = [train for train, _ in crossValIndices]
+                current["testIndices"] = [test for _, test in crossValIndices]
+                trainIDs.update(
                     *[
-                        build_subflow(
-                            "evaluate",
-                            (
-                                trainIndices,
-                                testIndices,
-                                model,
-                                embedding["labels"],
-                                embedding["samples"],
-                                embedding["variantIndex"],
-                                embedding["sampleIndex"],
-                                hyperParameterSpace,
-                                innerCvIterator,
-                            ),
-                        )
-                        for trainIndices, testIndices in zip(
-                            current["trainIndices"], current["testIndices"]
+                        np.array(embedding["sampleIndex"])[indices]
+                        for indices in current["trainIndices"]
+                    ]
+                )
+                testIDs.update(
+                    *[
+                        np.array(embedding["sampleIndex"])[indices]
+                        for indices in current["testIndices"]
+                    ]
+                )
+                outerCrossValResults = zip(
+                    *await asyncio.gather(
+                        *[
+                            build_subflow(
+                                "evaluate",
+                                (
+                                    trainIndices,
+                                    testIndices,
+                                    model,
+                                    embedding["labels"],
+                                    embedding["samples"],
+                                    embedding["variantIndex"],
+                                    embedding["sampleIndex"],
+                                    hyperParameterSpace,
+                                    innerCvIterator,
+                                ),
+                            )
+                            for trainIndices, testIndices in zip(
+                                current["trainIndices"], current["testIndices"]
+                            )
+                        ]
+                    )
+                )
+                resultNames = [
+                    "globalExplanations",
+                    "localExplanations",
+                    "probabilities",
+                    "predictions",
+                    "testLabels",
+                    "trainLabels",
+                    "trainIDs",
+                    "testIDs",
+                    "fittedOptimizers",
+                    "shapExplainers",
+                    "shapMaskers",
+                ]
+                current = {
+                    **current,
+                    **{
+                        name: result
+                        for name, result in zip(resultNames, outerCrossValResults)
+                    },
+                }
+                current["testAUC"] = [
+                    roc_auc_score(
+                        labels,
+                        (
+                            probabilities[:, 1]
+                            if len(probabilities.shape) > 1
+                            else probabilities
+                        ),
+                    )
+                    for labels, probabilities in zip(
+                        current["testLabels"], current["probabilities"]
+                    )
+                ]
+
+                if config["model"]["calculateShapelyExplanations"]:
+                    current["averageShapelyValues"] = pd.DataFrame.from_dict(
+                        {
+                            "feature_name": [
+                                name
+                                for name in current["localExplanations"][
+                                    0
+                                ].feature_names
+                            ],
+                            "value": [
+                                np.mean(
+                                    np.hstack(
+                                        [
+                                            np.mean(
+                                                localExplanations.values[
+                                                    :, featureIndex
+                                                ]
+                                            )
+                                            for localExplanations in current[
+                                                "localExplanations"
+                                            ]
+                                        ]
+                                    )
+                                )
+                                for featureIndex in range(
+                                    len(current["localExplanations"][0].feature_names)
+                                )
+                            ],
+                        },
+                        dtype=object,
+                    ).set_index("feature_name")
+
+                if current["globalExplanations"][0] is not None:
+                    current["averageGlobalExplanations"] = (
+                        pd.concat(current["globalExplanations"])
+                        .reset_index()
+                        .groupby("features")
+                        .mean()
+                    )
+
+                caseAccuracy = np.mean(
+                    [
+                        np.divide(np.count_nonzero(labels == predictions), len(labels))
+                        for predictions, labels in zip(
+                            current["predictions"], current["testLabels"]
                         )
                     ]
                 )
-            )
-            resultNames = [
-                "globalExplanations",
-                "localExplanations",
-                "probabilities",
-                "predictions",
-                "testLabels",
-                "trainLabels",
-                "trainIDs",
-                "testIDs",
-                "fittedOptimizers",
-                "shapExplainers",
-                "shapMaskers",
-            ]
-            current = {
-                **current,
-                **{
-                    name: result
-                    for name, result in zip(resultNames, outerCrossValResults)
-                },
-            }
-            current["testAUC"] = [
-                roc_auc_score(
-                    labels,
-                    (
-                        probabilities[:, 1]
-                        if len(probabilities.shape) > 1
-                        else probabilities
-                    ),
-                )
-                for labels, probabilities in zip(
-                    current["testLabels"], current["probabilities"]
-                )
-            ]
+                controlAccuracy = 1 - caseAccuracy
+                await trackResults.submit(runID, current)
 
-            if config["model"]["calculateShapelyExplanations"]:
-                current["averageShapelyValues"] = pd.DataFrame.from_dict(
-                    {
-                        "feature_name": [
-                            name
-                            for name in current["localExplanations"][0].feature_names
-                        ],
-                        "value": [
-                            np.mean(
-                                np.hstack(
-                                    [
-                                        np.mean(
-                                            localExplanations.values[:, featureIndex]
-                                        )
-                                        for localExplanations in current[
-                                            "localExplanations"
-                                        ]
-                                    ]
-                                )
+                # plot AUC & hyperparameter convergence
+                plotSubtitle = f"""
+                    {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+                    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                    
+                    {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
+                    {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+                results[runNumber] = current
+
+                # record sample metrics
+                for fold in range(config["sampling"]["crossValIterations"]):
+                    for j, sampleID in enumerate(current["testIDs"][fold]):
+                        try:
+                            results["samples"][sampleID].append(
+                                current["probabilities"][fold][j]
                             )
-                            for featureIndex in range(
-                                len(current["localExplanations"][0].feature_names)
-                            )
-                        ],
-                    },
-                    dtype=object,
-                ).set_index("feature_name")
+                        except KeyError:
+                            results["samples"][sampleID] = [
+                                current["probabilities"][fold][j]
+                            ]
+                        finally:
+                            results["labels"][sampleID] = current["testLabels"][fold][j]
 
-            if current["globalExplanations"][0] is not None:
-                current["averageGlobalExplanations"] = (
-                    pd.concat(current["globalExplanations"])
-                    .reset_index()
-                    .groupby("features")
-                    .mean()
+                await build_subflow(
+                    "trackVisualizations",
+                    (runID, plotSubtitle, model.__class__.__name__, current),
                 )
 
-            caseAccuracy = np.mean(
-                [
-                    np.divide(np.count_nonzero(labels == predictions), len(labels))
-                    for predictions, labels in zip(
-                        current["predictions"], current["testLabels"]
-                    )
-                ]
-            )
-            controlAccuracy = 1 - caseAccuracy
-            await trackResults.submit(runID, current)
-
-            # plot AUC & hyperparameter convergence
-            plotSubtitle = f"""
-                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
-                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
-                
-                {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
-                {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
-            results = current
-
-            await build_subflow(
-                "trackVisualizations",
-                (runID, plotSubtitle, model.__class__.__name__, current),
-            )
-
-            results["testCount"] = len(trainIDs)
-            results["trainCount"] = len(testIDs)
+                results[runNumber]["testCount"] = len(trainIDs)
+                results[runNumber]["trainCount"] = len(testIDs)
             return results
 
-        return await bootstrap(*args)
+        return await classify(*args)
 
     elif name == "evaluate":
 
@@ -594,24 +537,22 @@ async def main():
             api_token=config["tracking"]["token"],
         )
 
-    classification_tasks = [
-        build_subflow(
-            "classify",
-            (
-                caseGenotypes,
-                controlGenotypes,
-                clinicalData,
-                model,
-                hyperParameterSpace,
-                innerCvIterator,
-                outerCvIterator,
-            ),
-        )
-        for (model, hyperParameterSpace) in list(config["model"]["stack"].items())
-    ]
-
-    results = await limited_gather(
-        classification_tasks, config["model"]["concurrencyLimit"]
+    results = await asyncio.gather(
+        *[
+            build_subflow(
+                "classify",
+                (
+                    caseGenotypes,
+                    controlGenotypes,
+                    clinicalData,
+                    model,
+                    hyperParameterSpace,
+                    innerCvIterator,
+                    outerCvIterator,
+                ),
+            )
+            for (model, hyperParameterSpace) in list(config["model"]["stack"].items())
+        ]
     )
 
     labelsProbabilitiesByModelName = dict()
@@ -648,16 +589,16 @@ async def main():
             if config["tracking"]["remote"]:
                 # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
                 for j in range(0, config["sampling"]["lastIteration"]):
-                    results["bootstraps"][i][j] = {}
+                    results[i][j] = {}
                     # get bootstrap runs for model
                     currentRuns = pastRuns.loc[
                         (pastRuns["bootstrapIteration"] == j)
                         & (pastRuns["model"] == modelName)
                     ]
-                    results["bootstraps"][i][j]["trainCount"] = np.around(
+                    results[i][j]["trainCount"] = np.around(
                         currentRuns["nTrain"].unique()[0]
                     )
-                    results["bootstraps"][i][j]["testCount"] = np.around(
+                    results[i][j]["testCount"] = np.around(
                         currentRuns["nTest"].unique()[0]
                     )
                     samplesResultsByFold = [
@@ -692,11 +633,11 @@ async def main():
                             ].unique()[
                                 0
                             ]  # all labels should be same for sample ID
-                    results["bootstraps"][i][j]["testLabels"] = loadedLabels
-                    results["bootstraps"][i][j]["probabilities"] = samplesResultsByFold
+                    results[i][j]["testLabels"] = loadedLabels
+                    results[i][j]["probabilities"] = samplesResultsByFold
                     # TODO use conditional to check if run has feature explanations
                     try:
-                        results["bootstraps"][i][j]["globalExplanations"] = [
+                        results[i][j]["globalExplanations"] = [
                             load_fold_dataframe(
                                 ("featureImportance/modelCoefficients", runID)
                             )
@@ -724,7 +665,7 @@ async def main():
                     max(bootstrapFolders) == config["sampling"]["lastIteration"]
                 )  # TODO automatically determine last iteration by max
                 for j in range(0, config["sampling"]["lastIteration"]):
-                    results["bootstraps"][i][j] = {}
+                    results[i][j] = {}
                     currentBootstrap = bootstrapFolders[j]
                     modelFolders = os.listdir(
                         f"{config['tracking']['project']}/bootstraps/{currentBootstrap}"
@@ -735,16 +676,12 @@ async def main():
                     )
                     for fileName in currentFiles:
                         if "testCount" in fileName:
-                            results["bootstraps"][i][j]["testCount"] = fileName.split(
-                                "_"
-                            )[1]
+                            results[i][j]["testCount"] = fileName.split("_")[1]
                         elif "trainCount" in fileName:
-                            results["bootstraps"][i][j]["trainCount"] = fileName.split(
-                                "_"
-                            )[1]
+                            results[i][j]["trainCount"] = fileName.split("_")[1]
                         # TODO handle rest of local files
 
-        modelResult = results["bootstraps"][i]
+        modelResult = results[i]
 
         for sampleID in modelResult["samples"].keys():
             flattenedProbabilities = np.array(
@@ -939,7 +876,7 @@ async def main():
                 modelName: [
                     result
                     for j in range(config["sampling"]["bootstrapIterations"])
-                    for foldOptimizer in results["bootstraps"][i][j]["fittedOptimizers"]
+                    for foldOptimizer in results[i][j]["fittedOptimizers"]
                     for result in foldOptimizer.optimizer_results_
                 ]
                 for i, modelName in enumerate(config["model"]["stack"])
