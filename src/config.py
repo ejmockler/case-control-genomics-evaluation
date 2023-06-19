@@ -34,9 +34,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "Nucleoporin genes, cases >= 97.5% accuracy",  # name of the experiment
+        "name": "Nucleoporin genes, cases <= 2.5% accuracy",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPS-60-accurateCases",
+        "project": "ALS-NUPS-60-discordantCases",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "token": neptune_api_token,
         "remote": False,  # if True, log to Neptune
@@ -57,7 +57,7 @@ config = {
     "externalTables": {
         "path": [
             "../notebook/igsr-1000 genomes phase 3 release.tsv",
-            "../notebook/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
+            "../notebook/ALS-NUPS-2000__discordantSamples_<=2.5%.csv",
             "../notebook/ACWM_ethnicallyVariable.tsv",
             "../notebook/ACWM_ethnicallyVariable.tsv",
             "../notebook/igsr-1000 genomes phase 3 release.tsv",
@@ -80,8 +80,8 @@ config = {
         "filters": [
             "`Superpopulation code`=='EUR' & `Population name`!='Finnish'",  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
             "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND'",
-            "`Subject Group`=='Non-Neurological Control'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
             "`Superpopulation code`!='EUR' & `Population name`!='Finnish'",
         ],
     },

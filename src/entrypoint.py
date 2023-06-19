@@ -14,7 +14,7 @@ import matplotlib
 matplotlib.use("agg")
 
 from prefect_ray.task_runners import RayTaskRunner
-from prefect import flow, task
+from prefect import flow, task, unmapped
 from prefect.task_runners import ConcurrentTaskRunner
 from sklearn.metrics import roc_auc_score
 from types import SimpleNamespace
@@ -136,15 +136,25 @@ def classify(
             current["trainIndices"], current["testIndices"]
         )
     ]
-    # outerCrossValResults = zip(
-    #     *Parallel(n_jobs=-1)(delayed(evaluate)(*args) for args in evaluate_args)
-    # )
-    outerCrossValResults = []
-    for args in evaluate_args:
-        result = evaluate(*args)
-        outerCrossValResults.append(result)
-    # Transposing results if needed, equivalent to zip(*results) for parallel version
-    outerCrossValResults = list(map(list, zip(*outerCrossValResults)))
+    outerCrossValFutures = evaluate.map(
+        current["trainIndices"],
+        current["testIndices"],
+        unmapped(model),
+        unmapped(embedding),
+        unmapped(hyperParameterSpace),
+        unmapped(innerCvIterator),
+    )
+
+    outerCrossValResults = list(
+        zip(*[future.result() for future in outerCrossValFutures])
+    )
+
+    # outerCrossValResults = []
+    # for args in evaluate_args:
+    #     result = evaluate(*args)
+    #     outerCrossValResults.append(result)
+    # # Transposing results if needed, equivalent to zip(*results) for parallel version
+    # outerCrossValResults = list(map(list, zip(*outerCrossValResults)))
 
     # TODO implement object to structure these results
     resultNames = [
@@ -499,11 +509,11 @@ async def main():
         for model, hyperParameterSpace in list(config["model"]["stack"].items())
     ]
 
-    # results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+    results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
 
-    results = []
-    for args in bootstrap_args:
-        results.append(bootstrap(*args))
+    # results = []
+    # for args in bootstrap_args:
+    #     results.append(bootstrap(*args))
 
     testLabelsProbabilitiesByModelName = dict()
     holdoutLabelsProbabilitiesByModelName = dict()
@@ -595,7 +605,7 @@ async def main():
 
         if not config["tracking"]["remote"]:
             bootstrapFolders = os.listdir(
-                f"projects/{config['tracking']['project']}bootstraps"
+                f"projects/{config['tracking']['project']}/bootstraps"
             )
             # convert to int
             bootstrapFolders = [int(folder) for folder in bootstrapFolders]
@@ -616,11 +626,11 @@ async def main():
                         results[i][j] = {}
                         currentBootstrap = bootstrapFolders[j]
                         modelFolders = os.listdir(
-                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}"
+                            f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}"
                         )
                         currentModel = modelFolders[modelFolders.index(modelName)]
                         currentFiles = os.listdir(
-                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}"
+                            f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}"
                         )
                         for fileName in currentFiles:
                             if "testCount" in fileName:
@@ -638,7 +648,7 @@ async def main():
                                 or "holdoutIDs" in fileName
                             ):
                                 sampleKeyFiles = os.listdir(
-                                    f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
+                                    f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
                                 )
                                 sampleKeyFiles.sort(
                                     key=lambda fileName: int(fileName.split(".")[0])
@@ -646,7 +656,7 @@ async def main():
                                 results[i][j][fileName] = [
                                     np.ravel(
                                         pd.read_csv(
-                                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{keys}",
+                                            f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{keys}",
                                             index_col=0,
                                         )
                                     )
@@ -654,7 +664,7 @@ async def main():
                                 ]
                             elif "sampleResults" in fileName:
                                 results[i][j]["probabilities"] = pd.read_csv(
-                                    f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}",
+                                    f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}",
                                     index_col="id",
                                 )
                                 if "holdoutIDs" in results[i][j]["holdoutIDs"]:
@@ -671,12 +681,12 @@ async def main():
                             elif "featureImportance" in fileName:
                                 # TODO handle holdout sample shap values
                                 importanceFiles = os.listdir(
-                                    f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
+                                    f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
                                 )
                                 for importanceType in importanceFiles:
                                     if importanceType == "modelCoefficients":
                                         coefficientFiles = os.listdir(
-                                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{importanceType}"
+                                            f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{importanceType}"
                                         )
                                         coefficientFiles.sort(
                                             key=lambda fileName: int(
@@ -685,7 +695,7 @@ async def main():
                                         )  # ascending order by k-fold
                                         results[i][j]["globalExplanations"] = [
                                             pd.read_csv(
-                                                f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{importanceType}/{foldCoefficients}",
+                                                f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{importanceType}/{foldCoefficients}",
                                                 index_col="features",
                                             )
                                             for foldCoefficients in coefficientFiles
@@ -694,7 +704,7 @@ async def main():
                                         results[i][j][
                                             "averageShapelyExplanations"
                                         ] = pd.read_csv(
-                                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/averageLocalExplanations.csv",
+                                            f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/averageLocalExplanations.csv",
                                             index_col="features",
                                         )
                                         if (
@@ -704,7 +714,7 @@ async def main():
                                             results[i][j][
                                                 "averageHoldoutShapelyExplanations"
                                             ] = pd.read_csv(
-                                                f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/averageHoldoutLocalExplanations.csv",
+                                                f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/averageHoldoutLocalExplanations.csv",
                                                 index_col="features",
                                             )
                         results[i][j]["model"] = modelName
@@ -862,11 +872,11 @@ async def main():
                     )
                 else:
                     os.makedirs(
-                        f"projects/{config['tracking']['project']}averageModelCoefficients/",
+                        f"projects/{config['tracking']['project']}/averageModelCoefficients/",
                         exist_ok=True,
                     )
                     averageGlobalExplanationsDataFrame.to_csv(
-                        f"projects/{config['tracking']['project']}averageModelCoefficients/{modelName}.csv"
+                        f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
                     )
 
     sampleResultsDataFrame = pd.DataFrame.from_dict(
@@ -883,7 +893,7 @@ async def main():
         )
     else:
         sampleResultsDataFrame.to_csv(
-            f"projects/{config['tracking']['project']}sampleResults.csv"
+            f"projects/{config['tracking']['project']}/sampleResults.csv"
         )
 
     if config["model"]["calculateShapelyExplanations"]:
@@ -920,15 +930,15 @@ async def main():
                 )
         else:
             os.makedirs(
-                f"projects/{config['tracking']['project']}averageShapelyExplanations/",
+                f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
                 exist_ok=True,
             )
             averageShapelyExplanationsDataFrame.to_csv(
-                f"projects/{config['tracking']['project']}averageShapelyExplanations.csv"
+                f"projects/{config['tracking']['project']}/averageShapelyExplanations.csv"
             )
             if "averageHoldoutShapelyExplanations" in modelResult[j]:
                 averageHoldoutShapelyExplanationsDataFrame.to_csv(
-                    f"projects/{config['tracking']['project']}averageHoldoutShapelyExplanations.csv"
+                    f"projects/{config['tracking']['project']}/averageHoldoutShapelyExplanations.csv"
                 )
 
     seenCases = [id for id in sampleResultsDataFrame.index if id in caseIDs]
@@ -1022,7 +1032,7 @@ async def main():
                 modelName: [
                     result
                     for j in range(config["sampling"]["bootstrapIterations"])
-                    for foldOptimizer in results[i][j]["fittedOptimizers"]
+                    for foldOptimizer in results[i][j]["fittedOptimizer"]
                     for result in foldOptimizer.optimizer_results_
                 ]
                 for i, modelName in enumerate(config["model"]["stack"])
@@ -1082,39 +1092,39 @@ async def main():
         projectTracker.stop()
     else:
         accuracyHistogram.write_html(
-            f"projects/{config['tracking']['project']}accuracyPlot.html"
+            f"projects/{config['tracking']['project']}/accuracyPlot.html"
         )
-        aucPlot.savefig(f"projects/{config['tracking']['project']}aucPlot.svg")
-        aucPlot.savefig(f"projects/{config['tracking']['project']}aucPlot.png")
+        aucPlot.savefig(f"projects/{config['tracking']['project']}/aucPlot.svg")
+        aucPlot.savefig(f"projects/{config['tracking']['project']}/aucPlot.png")
         calibrationPlot.savefig(
-            f"projects/{config['tracking']['project']}calibrationPlot.svg"
+            f"projects/{config['tracking']['project']}/calibrationPlot.svg"
         )
         calibrationPlot.savefig(
-            f"projects/{config['tracking']['project']}calibrationPlot.png"
+            f"projects/{config['tracking']['project']}/calibrationPlot.png"
         )
         if config["model"]["hyperparameterOptimization"]:
             convergencePlot.savefig(
-                f"projects/{config['tracking']['project']}convergencePlot.svg"
+                f"projects/{config['tracking']['project']}/convergencePlot.svg"
             )
             convergencePlot.savefig(
-                f"projects/{config['tracking']['project']}convergencePlot.png"
+                f"projects/{config['tracking']['project']}/convergencePlot.png"
             )
 
         if bootstrapHoldoutCount > 0:
             holdoutAccuracyHistogram.write_html(
-                f"projects/{config['tracking']['project']}holdoutAccuracyPlot.html"
+                f"projects/{config['tracking']['project']}/holdoutAccuracyPlot.html"
             )
             holdoutAucPlot.savefig(
-                f"projects/{config['tracking']['project']}holdoutAucPlot.svg"
+                f"projects/{config['tracking']['project']}/holdoutAucPlot.svg"
             )
             holdoutAucPlot.savefig(
-                f"projects/{config['tracking']['project']}holdoutAucPlot.png"
+                f"projects/{config['tracking']['project']}/holdoutAucPlot.png"
             )
             holdoutCalibrationPlot.savefig(
-                f"projects/{config['tracking']['project']}holdoutCalibrationPlot.svg"
+                f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.svg"
             )
             holdoutCalibrationPlot.savefig(
-                f"projects/{config['tracking']['project']}holdoutCalibrationPlot.png"
+                f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.png"
             )
 
     return results
@@ -1142,4 +1152,10 @@ if __name__ == "__main__":
         asyncio.run(remove_all_flows())
 
     results = asyncio.run(main())
-    pickle.dump(results, open(f"results_{config['tracking']['project']}.pkl", "wb"))
+    pickle.dump(
+        results,
+        open(
+            f"projects/{config['tracking']['project']}/results_{config['tracking']['project']}.pkl",
+            "wb",
+        ),
+    )
