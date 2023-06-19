@@ -1,9 +1,13 @@
 from prefect import unmapped, task, flow
 from prefect.task_runners import ConcurrentTaskRunner
+from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 from config import config
 import pandas as pd
 import numpy as np
+import os
+
+from multiprocess import Pool, Manager
 
 
 @task()
@@ -100,6 +104,149 @@ def load():
     )
 
 
+def balanceCaseControlDatasets(caseGenotypes, controlGenotypes):
+    caseIDs = caseGenotypes.columns
+    controlIDs = controlGenotypes.columns
+    # store number of cases & controls
+    caseControlCounts = [len(caseIDs), len(controlIDs)]
+    # determine which has more samples
+    labeledIDs = [caseIDs, controlIDs]
+    majorIDs = labeledIDs[np.argmax(caseControlCounts)]
+    minorIDs = labeledIDs[np.argmin(caseControlCounts)]
+    # downsample larger group to match smaller group
+    majorIndex = np.random.choice(
+        np.arange(len(majorIDs)), min(caseControlCounts), replace=False
+    )
+
+    excessMajorIDs, balancedMajorIDs = [], []
+    for index, id in enumerate(majorIDs):
+        if index in majorIndex:
+            balancedMajorIDs.append(id)
+        else:
+            excessMajorIDs.append(id)
+
+    return minorIDs, balancedMajorIDs, excessMajorIDs
+
+
+@task()
+def prepareDatasets(
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
+    verbose=True,
+):
+    minorIDs, balancedMajorIDs, excessMajorIDs = balanceCaseControlDatasets(
+        caseGenotypes, controlGenotypes
+    )
+
+    (
+        holdoutMinorIDs,
+        holdoutBalancedMajorIDs,
+        holdoutExcessMajorIDs,
+    ) = balanceCaseControlDatasets(holdoutCaseGenotypes, holdoutControlGenotypes)
+    holdoutCaseIDs = holdoutCaseGenotypes.columns
+
+    allGenotypes = pd.concat(
+        [
+            caseGenotypes,
+            controlGenotypes,
+            holdoutCaseGenotypes,
+            holdoutControlGenotypes,
+        ],
+        axis=1,
+    )
+    caseIDs = caseGenotypes.columns
+
+    excessIDs, crossValGenotypeIDs = [], []
+    holdoutExcessIDs, holdoutTestIDs = [], []
+    trainIDs = balancedMajorIDs + minorIDs
+    holdoutIDs = holdoutBalancedMajorIDs + holdoutMinorIDs
+    for label in tqdm(allGenotypes.columns, desc="Matching IDs", unit="ID"):
+        for setType in ["holdout", "crossval"]:
+            if (
+                setType == "holdout"
+                and len(holdoutCaseGenotypes) <= 0
+                and len(holdoutControlGenotypes) <= 0
+            ):
+                continue
+            for subsetType in ["excess", "toSample"]:
+                idSet = (
+                    (holdoutExcessMajorIDs if setType == "holdout" else excessMajorIDs)
+                    if subsetType == "excess"
+                    else holdoutIDs
+                    if setType == "holdout" and subsetType == "toSample"
+                    else trainIDs
+                )
+                for i, id in enumerate(idSet):
+                    if (id in label) or (label in id):
+                        if setType == "crossval" and subsetType == "toSample":
+                            if label not in crossValGenotypeIDs:
+                                crossValGenotypeIDs.append(label)
+                        elif setType == "crossval" and subsetType == "excess":
+                            if label not in excessIDs:
+                                excessIDs.append(label)
+                        elif setType == "holdout" and subsetType == "toSample":
+                            if label not in holdoutTestIDs:
+                                holdoutTestIDs.append(label)
+                        elif setType == "holdout" and subsetType == "excess":
+                            if label not in holdoutExcessIDs:
+                                holdoutExcessIDs.append(label)
+                        idSet = np.delete(idSet, i)
+                        break
+
+    if verbose:
+        print(f"\n{len(crossValGenotypeIDs)} for training:\n{crossValGenotypeIDs}")
+        print(f"\n{len(excessIDs)} are excess:\n{excessIDs}")
+        if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:
+            print(f"\n{len(holdoutTestIDs)} for holdout:\n{holdoutTestIDs}")
+            print(f"\n{len(holdoutExcessIDs)} are excess holdout:\n{holdoutExcessIDs}")
+        print(f"\nVariant count: {len(allGenotypes.index)}")
+
+    # drop variants with missing values
+    allGenotypes = allGenotypes.dropna(
+        how="any",
+    )
+
+    samples = allGenotypes.loc[:, crossValGenotypeIDs]
+    excessMajorSamples = allGenotypes.loc[:, excessIDs]
+
+    variantIndex = list(samples.index)
+    scaler = MinMaxScaler()
+    embedding = {
+        "sampleIndex": crossValGenotypeIDs,
+        "labels": np.array([1 if id in caseIDs else 0 for id in crossValGenotypeIDs]),
+        "samples": scaler.fit_transform(
+            samples
+        ).transpose(),  # samples are now rows (samples, variants)
+        "excessMajorIndex": excessIDs,
+        "excessMajorLabels": [1 if id in caseIDs else 0 for id in excessIDs],
+        "excessMajorSamples": scaler.fit_transform(excessMajorSamples).transpose(),
+        "variantIndex": variantIndex,
+    }
+    if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:
+        holdoutSamples = allGenotypes.loc[:, holdoutTestIDs]
+        excessHoldoutSamples = allGenotypes.loc[:, holdoutExcessIDs]
+        embedding = {
+            **embedding,
+            **{
+                "holdoutSampleIndex": holdoutTestIDs,
+                "holdoutLabels": np.array(
+                    [1 if id in holdoutCaseIDs else 0 for id in holdoutTestIDs]
+                ),
+                "holdoutSamples": scaler.fit_transform(holdoutSamples).transpose(),
+                "excessHoldoutMajorIndex": holdoutExcessIDs,
+                "excessHoldoutMajorLabels": [
+                    1 if id in holdoutCaseIDs else 0 for id in holdoutExcessIDs
+                ],
+                "excessHoldoutMajorSamples": scaler.fit_transform(
+                    excessHoldoutSamples
+                ).transpose(),
+            },
+        }
+    return embedding
+
+
 @flow(task_runner=ConcurrentTaskRunner(), log_prints=True)
 async def processInputFiles():
     clinicalData, externalSamples, annotatedVCF = load()
@@ -135,13 +282,28 @@ async def processInputFiles():
 
     caseIDs = caseIDsMask[caseIDsMask].index.to_numpy()
     controlIDs = controlIDsMask[controlIDsMask].index.to_numpy()
+    holdoutCaseIDs = np.array([])
+    holdoutControlIDs = np.array([])
     for i, label in enumerate(config["externalTables"]["label"]):
-        if label == config["clinicalTable"]["caseAlias"]:
-            caseIDs = np.append(caseIDs, filteredExternalSamples[i].index.to_numpy())
-        elif label == config["clinicalTable"]["controlAlias"]:
-            controlIDs = np.append(
-                controlIDs, filteredExternalSamples[i].index.to_numpy()
-            )
+        if config["externalTables"]["setType"][i] == "holdout":
+            if label == config["clinicalTable"]["caseAlias"]:
+                holdoutCaseIDs = np.append(
+                    holdoutCaseIDs, filteredExternalSamples[i].index.to_numpy()
+                )
+            elif label == config["clinicalTable"]["controlAlias"]:
+                holdoutControlIDs = np.append(
+                    holdoutControlIDs, filteredExternalSamples[i].index.to_numpy()
+                )
+
+        elif config["externalTables"]["setType"][i] == "crossval":
+            if label == config["clinicalTable"]["caseAlias"]:
+                caseIDs = np.append(
+                    caseIDs, filteredExternalSamples[i].index.to_numpy()
+                )
+            elif label == config["clinicalTable"]["controlAlias"]:
+                controlIDs = np.append(
+                    controlIDs, filteredExternalSamples[i].index.to_numpy()
+                )
 
     # cast genotypes as numeric, drop chromosome positions with missing values
     caseGenotypeFutures, controlGenotypeFutures = applyAlleleModel.map(
@@ -149,6 +311,7 @@ async def processInputFiles():
         unmapped(filteredVCF.columns.to_numpy()),
         genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
     )
+
     caseGenotypeDict, missingCaseIDs, resolvedCaseIDs = caseGenotypeFutures.result()
     (
         controlGenotypeDict,
@@ -156,12 +319,41 @@ async def processInputFiles():
         resolvedControlIDs,
     ) = controlGenotypeFutures.result()
 
-    if len(missingCaseIDs) > 0 or len(missingControlIDs) > 0:
-        for alias, IDs in {
-            "caseAlias": missingCaseIDs,
-            "controlAlias": missingControlIDs,
-        }.items():
-            print(f"\nmissing {len(IDs)} {config['clinicalTable'][alias]} IDs:\n {IDs}")
+    resolvedHoldoutCaseIDs, missingHoldoutCaseIDs = [], []
+    resolvedHoldoutControlIDs, missingHoldoutControlIDs = [], []
+    if len(holdoutCaseIDs) > 0:
+        (
+            holdoutCaseGenotypeFutures,
+            holdoutControlGenotypeFutures,
+        ) = applyAlleleModel.map(
+            unmapped(filteredVCF.to_numpy()),
+            unmapped(filteredVCF.columns.to_numpy()),
+            genotypeIDs=[IDs for IDs in (holdoutCaseIDs, holdoutControlIDs)],
+        )
+        (
+            holdoutCaseGenotypeDict,
+            missingHoldoutCaseIDs,
+            resolvedHoldoutCaseIDs,
+        ) = holdoutCaseGenotypeFutures.result()
+        (
+            holdoutControlGenotypeDict,
+            missingHoldoutControlIDs,
+            resolvedHoldoutControlIDs,
+        ) = holdoutControlGenotypeFutures.result()
+
+    for alias, IDs in {
+        "caseAlias": missingCaseIDs,
+        "controlAlias": missingControlIDs,
+        "holdout cases": missingHoldoutCaseIDs,
+        "holdout controls": missingHoldoutControlIDs,
+    }.items():
+        if len(IDs) > 0:
+            if "holdout" not in alias:
+                print(
+                    f"\nmissing {len(IDs)} {config['clinicalTable'][alias]} IDs:\n {IDs}"
+                )
+            elif "holdout" in alias:
+                print(f"\nmissing {len(IDs)} {alias} IDs:\n {IDs}")
 
     caseGenotypes = pd.DataFrame.from_dict(caseGenotypeDict)
     caseGenotypes.index.name = filteredVCF.index.name
@@ -170,16 +362,43 @@ async def processInputFiles():
     controlGenotypes.index.name = filteredVCF.index.name
     controlGenotypes.index = filteredVCF.index
 
+    holdoutCaseGenotypes = pd.DataFrame()
+    if resolvedHoldoutCaseIDs:
+        holdoutCaseGenotypes = pd.DataFrame.from_dict(holdoutCaseGenotypeDict)
+        holdoutCaseGenotypes.index.name = filteredVCF.index.name
+        holdoutCaseGenotypes.index = filteredVCF.index
+        holdoutCaseIDs = resolvedHoldoutCaseIDs
+
+    holdoutControlGenotypes = pd.DataFrame()
+    if resolvedHoldoutControlIDs:
+        holdoutControlGenotypes = pd.DataFrame.from_dict(holdoutControlGenotypeDict)
+        holdoutControlGenotypes.index.name = filteredVCF.index.name
+        holdoutControlGenotypes.index = filteredVCF.index
+        holdoutControlIDs = resolvedHoldoutControlIDs
+
     caseIDs = resolvedCaseIDs
     controlIDs = resolvedControlIDs
 
     print(f"\n{len(caseIDs)} cases:\n {caseIDs}")
     print(f"\n{len(controlIDs)} controls:\n {controlIDs}")
+
+    columns = [
+        *caseGenotypes.columns,
+        *controlGenotypes.columns,
+        *holdoutCaseGenotypes.columns,
+        *holdoutControlGenotypes.columns,
+    ]
+
+    # Assert there are no duplicate columns
+    assert len(columns) == len(set(columns)), "Duplicate columns exist"
+
     # filter allele frequencies
     allGenotypes = pd.concat(
         [
             caseGenotypes.dropna(how="any", axis=0),
             controlGenotypes.dropna(how="any", axis=0),
+            holdoutCaseGenotypes.dropna(how="any", axis=0),
+            holdoutControlGenotypes.dropna(how="any", axis=0),
         ],
         axis=1,
     )
@@ -195,4 +414,41 @@ async def processInputFiles():
     caseGenotypes = filteredGenotypes.loc[:, caseGenotypes.columns]
     controlGenotypes = filteredGenotypes.loc[:, controlGenotypes.columns]
 
-    return [caseGenotypes, caseIDs, controlGenotypes, controlIDs, filteredClinicalData]
+    if len(holdoutCaseGenotypes) > 0:
+        holdoutCaseGenotypes = filteredGenotypes.loc[:, holdoutCaseGenotypes.columns]
+    if len(holdoutControlGenotypes) > 0:
+        holdoutControlGenotypes = filteredGenotypes.loc[
+            :, holdoutControlGenotypes.columns
+        ]
+
+    return [
+        caseGenotypes,
+        caseIDs,
+        holdoutCaseGenotypes,
+        holdoutCaseIDs,
+        controlGenotypes,
+        controlIDs,
+        holdoutControlGenotypes,
+        holdoutControlIDs,
+        filteredClinicalData,
+    ]
+
+
+def toMultiprocessDict(orig_dict, manager):
+    shared_dict = manager.dict()
+    for key, value in orig_dict.items():
+        if isinstance(value, dict):
+            shared_dict[key] = toMultiprocessDict(
+                value, manager
+            )  # convert inner dict to manager dict
+        else:
+            shared_dict[key] = value
+    return shared_dict
+
+
+def fromMultiprocessDict(shared_dict):
+    orig_dict = {
+        k: fromMultiprocessDict(v) if isinstance(v, Manager().dict) else v
+        for k, v in shared_dict.items()
+    }
+    return orig_dict

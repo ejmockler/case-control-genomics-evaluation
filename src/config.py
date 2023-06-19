@@ -25,16 +25,18 @@ config = {
             "position",
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
-        "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency
+        "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
+        "compoundSampleIdStartIndex": 1,  # index of first sample ID in compound sample ID
+        "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency
         "minAlleleFrequency": 0.05,  # filter out variants with allele frequency less than this
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "Nucleoporin genes",  # name of the experiment
+        "name": "Nucleoporin genes, cases >= 97.5% accuracy",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPS-2000",
+        "project": "ALS-NUPS-60-accurateCases",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "token": neptune_api_token,
         "remote": False,  # if True, log to Neptune
@@ -47,28 +49,47 @@ config = {
         "controlLabels": [
             "Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
-        "caseLabels": ["ALS Spectrum MND"],
+        "caseLabels": [],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
         "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
-            "../notebook/igsr-1000 genomes phase 3 release.tsv"
+            "../notebook/igsr-1000 genomes phase 3 release.tsv",
+            "../notebook/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
+            "../notebook/ACWM_ethnicallyVariable.tsv",
+            "../notebook/ACWM_ethnicallyVariable.tsv",
+            "../notebook/igsr-1000 genomes phase 3 release.tsv",
         ],  # external sample table
         "label": [
-            "control"
-        ],  # case | control | mixed (mixed labels are held out as an external test set)
-        "idColumn": ["Sample name"],  # sample ID header
+            "control",
+            "case",
+            "case",
+            "control",
+            "control",
+        ],  # case | control | TODO mixed
+        "setType": ["crossval", "crossval", "holdout", "holdout", "holdout"],
+        "idColumn": [
+            "Sample name",
+            "id",
+            "ExternalSubjectId",
+            "ExternalSubjectId",
+            "Sample name",
+        ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Population name`!='Finnish'"
-        ],  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
+            "`Superpopulation code`=='EUR' & `Population name`!='Finnish'",  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
+            "`testLabel`==1",
+            "`Subject Group`=='ALS Spectrum MND'",
+            "`Subject Group`=='Non-Neurological Control'",
+            "`Superpopulation code`!='EUR' & `Population name`!='Finnish'",
+        ],
     },
     "sampling": {
-        "bootstrapIterations": 2000,
+        "bootstrapIterations": 60,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
-        "lastIteration": 993,
+        "lastIteration": 0,
     },
     "model": {
         "stack": {
@@ -98,7 +119,7 @@ config = {
                 "n_estimators": Integer(75, 200),
             },
         },
-        "hyperparameterOptimization": False,
-        "calculateShapelyExplanations": False,
+        "hyperparameterOptimization": True,
+        "calculateShapelyExplanations": True,
     },
 }

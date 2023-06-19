@@ -142,8 +142,8 @@ sampleResults
 globalFeatureImportance
 shapExplanations*
 *Labels
-# TODO save projects in a project folder
-ALS-NUPS-2000/
+projects/
+
 
 # neptune.ai
 .neptune

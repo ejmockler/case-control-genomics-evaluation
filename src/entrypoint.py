@@ -3,6 +3,7 @@ from inspect import isclass
 import pickle
 import os
 import traceback
+from fastnumbers import check_real
 import numpy as np
 import neptune
 import pandas as pd
@@ -11,8 +12,6 @@ import plotly.express as px
 import matplotlib
 
 matplotlib.use("agg")
-import matplotlib.pyplot as plt
-import shap
 
 from prefect_ray.task_runners import RayTaskRunner
 from prefect import flow, task
@@ -20,460 +19,404 @@ from prefect.task_runners import ConcurrentTaskRunner
 from sklearn.metrics import roc_auc_score
 from types import SimpleNamespace
 from sklearn.model_selection import StratifiedKFold
-from input import processInputFiles
+from input import (
+    processInputFiles,
+    prepareDatasets,
+    toMultiprocessDict,
+    fromMultiprocessDict,
+)
 from predict import (
     beginTracking,
+    evaluate,
+    get_probabilities,
     getFeatureImportances,
     optimizeHyperparameters,
-    plotAUC,
-    plotCalibration,
-    plotOptimizer,
-    prepareDatasets,
     serializeDataFrame,
     trackResults,
+    processSampleResult,
 )
+from visualize import plotAUC, plotCalibration, plotOptimizer, trackVisualizations
 from neptune.types import File
 from config import config
 
 import gc
+from multiprocess import Pool, Manager
+from joblib import Parallel, delayed
 
 
-# parallel task runner patch https://github.com/PrefectHQ/prefect/issues/7319
-# TODO build task runners only
-async def build_subflow(name, args):
-    if name == "classify":
+@flow(task_runner=RayTaskRunner())
+def classify(
+    runNumber,
+    model,
+    hyperParameterSpace,
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
+    clinicalData,
+    innerCvIterator,
+    outerCvIterator,
+    results,
+):
+    trainIDs = set()
+    testIDs = set()
+    holdoutIDs = set()
+    results[runNumber] = {}
+    embedding = prepareDatasets(
+        caseGenotypes,
+        controlGenotypes,
+        holdoutCaseGenotypes,
+        holdoutControlGenotypes,
+        verbose=(True if runNumber == 0 else False),
+    )
 
-        @flow(task_runner=RayTaskRunner())
-        async def classify(
-            caseGenotypes,
-            controlGenotypes,
-            clinicalData,
-            model,
-            hyperParameterSpace,
-            innerCvIterator,
-            outerCvIterator,
-        ):
-            gc.collect()
-            results = {}
-            results["samples"] = {}
-            results["labels"] = {}
-            results["model"] = model.__class__.__name__
-            # TODO parallelize
-            for runNumber in range(
-                config["sampling"]["lastIteration"],
-                config["sampling"]["bootstrapIterations"],
-            ):
-                trainIDs = set()
-                testIDs = set()
-                results[runNumber] = {}
-                embedding = prepareDatasets(
-                    caseGenotypes,
-                    controlGenotypes,
-                    verbose=(True if runNumber == 0 else False),
-                )
-                deserializedIDs = list()
-                for id in embedding["sampleIndex"]:
-                    deserializedIDs.extend(id.split("__"))
-                totalSampleCount = len(embedding["samples"])
-                caseCount = np.count_nonzero(embedding["labels"])
-                print(f"{totalSampleCount} samples\n")
-                print(f"{caseCount} cases\n")
-                print(f"{totalSampleCount - caseCount} controls\n")
-                current = {}
-                # check if model is initialized
-                if isclass(model):
-                    if model.__name__ == "TabNetClassifier":
-                        #  model = model(verbose=False, optimizer_fn=Lion)
-                        pass
-                print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
-                runID = await beginTracking.submit(
-                    model, runNumber, embedding, clinicalData, deserializedIDs
-                )
-                # outer cross-validation
-                crossValIndices = list(
-                    outerCvIterator.split(embedding["samples"], embedding["labels"])
-                )
-                current["trainIndices"] = [train for train, _ in crossValIndices]
-                current["testIndices"] = [test for _, test in crossValIndices]
-                trainIDs.update(
-                    *[
-                        np.array(embedding["sampleIndex"])[indices]
-                        for indices in current["trainIndices"]
-                    ]
-                )
-                testIDs.update(
-                    *[
-                        np.array(embedding["sampleIndex"])[indices]
-                        for indices in current["testIndices"]
-                    ]
-                )
-                outerCrossValResults = zip(
-                    *await asyncio.gather(
-                        *[
-                            build_subflow(
-                                "evaluate",
-                                (
-                                    trainIndices,
-                                    testIndices,
-                                    model,
-                                    embedding["labels"],
-                                    embedding["samples"],
-                                    embedding["variantIndex"],
-                                    embedding["sampleIndex"],
-                                    hyperParameterSpace,
-                                    innerCvIterator,
-                                ),
-                            )
-                            for trainIndices, testIndices in zip(
-                                current["trainIndices"], current["testIndices"]
-                            )
-                        ]
-                    )
-                )
-                resultNames = [
-                    "globalExplanations",
-                    "localExplanations",
-                    "probabilities",
-                    "predictions",
-                    "testLabels",
-                    "trainLabels",
-                    "trainIDs",
-                    "testIDs",
-                    "fittedOptimizers",
-                    "shapExplainers",
-                    "shapMaskers",
-                ]
-                current = {
-                    **current,
-                    **{
-                        name: result
-                        for name, result in zip(resultNames, outerCrossValResults)
-                    },
-                }
-                current["testAUC"] = [
-                    roc_auc_score(
-                        labels,
-                        (
-                            probabilities[:, 1]
-                            if len(probabilities.shape) > 1
-                            else probabilities
-                        ),
-                    )
-                    for labels, probabilities in zip(
-                        current["testLabels"], current["probabilities"]
-                    )
-                ]
+    clinicalIDs = list()
+    sampleIndex = (
+        embedding["sampleIndex"]
+        if len(embedding["holdoutSamples"]) == 0
+        else embedding["sampleIndex"] + embedding["holdoutSampleIndex"]
+    )
 
-                if config["model"]["calculateShapelyExplanations"]:
-                    current["averageShapelyValues"] = pd.DataFrame.from_dict(
-                        {
-                            "feature_name": [
-                                name
-                                for name in current["localExplanations"][
-                                    0
-                                ].feature_names
-                            ],
-                            "value": [
-                                np.mean(
-                                    np.hstack(
-                                        [
-                                            np.mean(
-                                                localExplanations.values[
-                                                    :, featureIndex
-                                                ]
-                                            )
-                                            for localExplanations in current[
-                                                "localExplanations"
-                                            ]
-                                        ]
-                                    )
-                                )
-                                for featureIndex in range(
-                                    len(current["localExplanations"][0].feature_names)
-                                )
-                            ],
-                        },
-                        dtype=object,
-                    ).set_index("feature_name")
+    for id in sampleIndex:
+        clinicalIDs.extend(id.split("__"))
 
-                if current["globalExplanations"][0] is not None:
-                    current["averageGlobalExplanations"] = (
-                        pd.concat(current["globalExplanations"])
-                        .reset_index()
-                        .groupby("features")
-                        .mean()
-                    )
+    totalSampleCount = len(embedding["samples"])
+    caseCount = np.count_nonzero(embedding["labels"])
+    print(f"{totalSampleCount} samples\n")
+    print(f"{caseCount} cases\n")
+    print(f"{totalSampleCount - caseCount} controls\n")
+    if len(embedding["holdoutSamples"]) > 0:
+        holdoutCaseCount = np.count_nonzero(embedding["holdoutLabels"])
+        print(f"{len(embedding['holdoutSamples'])} holdout samples\n")
+        print(f"{holdoutCaseCount} holdout cases\n")
+        print(
+            f"{len(embedding['holdoutSamples']) - holdoutCaseCount} holdout controls\n"
+        )
 
-                caseAccuracy = np.mean(
-                    [
-                        np.divide(np.count_nonzero(labels == predictions), len(labels))
-                        for predictions, labels in zip(
-                            current["predictions"], current["testLabels"]
-                        )
-                    ]
-                )
-                controlAccuracy = 1 - caseAccuracy
-                await trackResults.submit(runID, current)
+    current = {}
+    # check if model is initialized
+    if isclass(model):
+        if model.__name__ == "TabNetClassifier":
+            #  model = model(verbose=False, optimizer_fn=Lion)
+            pass
+    print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
 
-                # plot AUC & hyperparameter convergence
-                plotSubtitle = f"""
-                    {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
-                    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
-                    
-                    {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
-                    {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
-                results[runNumber] = current
+    runID = beginTracking.submit(model, runNumber, embedding, clinicalData, clinicalIDs)
 
-                # record sample metrics
-                for fold in range(config["sampling"]["crossValIterations"]):
-                    for j, sampleID in enumerate(current["testIDs"][fold]):
-                        try:
-                            results["samples"][sampleID].append(
-                                current["probabilities"][fold][j]
-                            )
-                        except KeyError:
-                            results["samples"][sampleID] = [
-                                current["probabilities"][fold][j]
-                            ]
-                        finally:
-                            results["labels"][sampleID] = current["testLabels"][fold][j]
+    # outer cross-validation
+    crossValIndices = list(
+        outerCvIterator.split(embedding["samples"], embedding["labels"])
+    )
+    current["trainIndices"] = [train for train, _ in crossValIndices]
+    current["testIndices"] = [test for _, test in crossValIndices]
+    trainIDs.update(
+        *[
+            np.array(embedding["sampleIndex"])[indices]
+            for indices in current["trainIndices"]
+        ]
+    )
+    testIDs.update(
+        *[
+            np.array(embedding["sampleIndex"])[indices]
+            for indices in current["testIndices"]
+        ]
+    )
+    holdoutIDs.update(*np.array(embedding["holdoutSampleIndex"]))
 
-                await build_subflow(
-                    "trackVisualizations",
-                    (runID, plotSubtitle, model.__class__.__name__, current),
-                )
-
-                results[runNumber]["testCount"] = len(trainIDs)
-                results[runNumber]["trainCount"] = len(testIDs)
-            return results
-
-        return await classify(*args)
-
-    elif name == "evaluate":
-
-        @flow()
-        async def evaluate(
+    evaluate_args = [
+        (
             trainIndices,
             testIndices,
             model,
-            labels,
-            samples,
-            variantIndex,
-            sampleIndex,
+            embedding,
             hyperParameterSpace,
-            cvIterator,
-        ):
-            if config["model"]["hyperparameterOptimization"]:
-                fittedOptimizer = optimizeHyperparameters(
-                    samples[trainIndices],
-                    labels[trainIndices],
-                    model,
-                    hyperParameterSpace,
-                    cvIterator,
-                    "neg_mean_squared_error",
-                )
-                model.set_params(**fittedOptimizer.best_params_)
-            else:
-                fittedOptimizer = None
-            model.fit(samples[trainIndices], labels[trainIndices])
-            try:
-                probabilities = model.predict_proba(samples[testIndices])
-            except AttributeError:
-                probabilities = model.predict(samples[testIndices])
-                if len(probabilities.shape) <= 1:
-                    probabilities = np.array([[1 - p, p] for p in probabilities])
-            predictions = np.argmax(probabilities, axis=1)
-            modelValues, shapValues, shapExplainer, shapMasker = getFeatureImportances(
-                model, samples[testIndices], variantIndex
+            innerCvIterator,
+        )
+        for trainIndices, testIndices in zip(
+            current["trainIndices"], current["testIndices"]
+        )
+    ]
+    # outerCrossValResults = zip(
+    #     *Parallel(n_jobs=-1)(delayed(evaluate)(*args) for args in evaluate_args)
+    # )
+    outerCrossValResults = []
+    for args in evaluate_args:
+        result = evaluate(*args)
+        outerCrossValResults.append(result)
+    # Transposing results if needed, equivalent to zip(*results) for parallel version
+    outerCrossValResults = list(map(list, zip(*outerCrossValResults)))
+
+    # TODO implement object to structure these results
+    resultNames = [
+        "globalExplanations",
+        "localExplanations",
+        "holdoutLocalExplanations",
+        "probabilities",
+        "holdoutProbabilities",
+        "predictions",
+        "holdoutPredictions",
+        "testLabels",
+        "trainLabels",
+        "holdoutLabels",
+        "trainIDs",
+        "testIDs",
+        "holdoutIDs",
+        "fittedOptimizer",
+        "shapExplainer",
+        "shapMasker",
+    ]
+    current = {
+        **current,
+        **{name: result for name, result in zip(resultNames, outerCrossValResults)},
+    }
+
+    current["testAUC"] = [
+        roc_auc_score(
+            labels,
+            (probabilities[:, 1] if len(probabilities.shape) > 1 else probabilities),
+        )
+        for labels, probabilities in zip(
+            current["testLabels"], current["probabilities"]
+        )
+    ]
+    if len(embedding["holdoutSamples"]) > 0:
+        current["holdoutAUC"] = [
+            roc_auc_score(
+                labels,
+                (
+                    probabilities[:, 1]
+                    if len(probabilities.shape) > 1
+                    else probabilities
+                ),
             )
-            globalExplanations = modelValues
-            localExplanations = shapValues
-            trainLabels = np.array(labels[trainIndices])
-            testLabels = np.array(labels[testIndices])
-            trainIDs = np.array([sampleIndex[i] for i in trainIndices])
-            testIDs = np.array([sampleIndex[i] for i in testIndices])
-            return (
-                globalExplanations,
-                localExplanations,
-                probabilities,
-                predictions,
-                testLabels,
-                trainLabels,
-                trainIDs,
-                testIDs,
-                fittedOptimizer,
-                shapExplainer,
-                shapMasker,
+            for labels, probabilities in zip(
+                current["holdoutLabels"], current["holdoutProbabilities"]
             )
+        ]
 
-        return await evaluate(*args)
-
-    elif name == "trackVisualizations":
-
-        @flow(task_runner=ConcurrentTaskRunner())
-        async def trackVisualizations(runID, plotSubtitle, modelName, current):
-            aucPlot = await plotAUC(
-                f"""
-                    Receiver Operating Characteristic (ROC) Curve
-                    {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
-                    {plotSubtitle}
-                    """,
+    if config["model"]["calculateShapelyExplanations"]:
+        current["averageShapelyExplanations"] = pd.DataFrame.from_dict(
+            {
+                "feature_name": [
+                    name for name in current["localExplanations"][0].feature_names
+                ],
+                "value": [
+                    np.mean(
+                        np.hstack(
+                            [
+                                np.mean(localExplanations.values[:, featureIndex])
+                                for localExplanations in current["localExplanations"]
+                            ]
+                        )
+                    )
+                    for featureIndex in range(
+                        len(current["localExplanations"][0].feature_names)
+                    )
+                ],
+                "standard_deviation": [
+                    np.mean(
+                        np.hstack(
+                            [
+                                np.std(localExplanations.values[:, featureIndex])
+                                for localExplanations in current["localExplanations"]
+                            ]
+                        )
+                    )
+                    for featureIndex in range(
+                        len(current["localExplanations"][0].feature_names)
+                    )
+                ],
+            },
+            dtype=object,
+        ).set_index("feature_name")
+        if len(embedding["holdoutSamples"]) > 0:
+            current["averageHoldoutShapelyExplanations"] = pd.DataFrame.from_dict(
                 {
-                    f"Fold {k+1}": (
-                        current["testLabels"][k],
-                        np.array(current["probabilities"][k])[:, 1],
-                    )
-                    if len(current["probabilities"][k][0].shape) >= 1
-                    else (current["testLabels"][k], current["probabilities"][k])
-                    for k in range(config["sampling"]["crossValIterations"])
-                },
-            )
-            if config["model"]["hyperparameterOptimization"]:
-                optimizerPlot = await plotOptimizer(
-                    f"""
-                    Hyperparameter convergence, mean squared error
-                    {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
-                    {plotSubtitle}
-                    """,
-                    {
-                        f"Fold {k+1}": [
-                            result
-                            for result in current["fittedOptimizers"][
-                                k
-                            ].optimizer_results_
-                        ]
-                        for k in range(config["sampling"]["crossValIterations"])
-                    },
-                )
-
-            if config["model"]["calculateShapelyExplanations"]:
-                heatmapList = []
-                waterfallList = []
-                stdDeviation = np.std(
-                    (labelsProbabilities[1] - labelsProbabilities[0]) ** 2
-                )
-                for j in range(config["sampling"]["crossValIterations"]):
-                    localExplanations = current["localExplanations"][j]
-                    caseExplanations = localExplanations
-                    caseExplanations.values = (
-                        caseExplanations.values[:, :, 1]
-                        if len(caseExplanations.values.shape) > 2
-                        else caseExplanations.values
-                    )
-                    heatmap = plt.figure()
-                    plt.title(
-                        f"""
-                        Shapely explanations from {modelName}
-                        Fold {j+1}
-                        {plotSubtitle}
-                        """
-                    )
-                    shap.plots.heatmap(caseExplanations, show=False)
-                    heatmapList.append(heatmap)
-                    plt.close(heatmap)
-                    labelsProbabilities = (
-                        (
-                            current["testLabels"][j],
-                            np.array(current["probabilities"][j])[:, 1],
-                        )
-                        if len(current["probabilities"][j][0].shape) >= 1
-                        else (current["testLabels"][j], current["probabilities"][j])
-                    )
-                    waterfallList.append([])
-                    for k in range(len(current["testIDs"][j])):
-                        probability = (
-                            labelsProbabilities[1][k]
-                            if isinstance(labelsProbabilities[1][k], np.ndarray)
-                            else labelsProbabilities[1][k]
-                        )
-                        label = (
-                            labelsProbabilities[0][k]
-                            if isinstance(labelsProbabilities[0][k], np.ndarray)
-                            else labelsProbabilities[0][k]
-                        )
-                        if (
-                            config["tracking"]["plotAllSampleImportances"]
-                            or np.absolute((probability - label) ** 2) <= stdDeviation
-                        ):
-                            sampleID = current["testIDs"][j][k]
-                            waterfallPlot = plt.figure()
-                            plt.title(
-                                f"""
-                                {sampleID}
-                                Shapely explanations from {modelName}
-                                Fold {j+1}
-                                {plotSubtitle}
-                                """
-                            )
-                            # patch parameter bug: https://github.com/slundberg/shap/issues/2362
-                            to_pass = SimpleNamespace(
-                                **{
-                                    "values": localExplanations[k].values,
-                                    "data": localExplanations[k].data,
-                                    "display_data": None,
-                                    "feature_names": localExplanations.feature_names,
-                                    "base_values": localExplanations[k].base_values[
-                                        current["testLabels"][j][k]
+                    "feature_name": [
+                        name
+                        for name in current["holdoutLocalExplanations"][0].feature_names
+                    ],
+                    "value": [
+                        np.mean(
+                            np.hstack(
+                                [
+                                    np.mean(localExplanations.values[:, featureIndex])
+                                    for localExplanations in current[
+                                        "holdoutLocalExplanations"
                                     ]
-                                    if len(localExplanations[k].base_values.shape) == 1
-                                    else localExplanations[k].base_values,
-                                }
+                                ]
                             )
-                            shap.plots.waterfall(to_pass, show=False)
-                            waterfallList[j].append(waterfallPlot)
-                            plt.close(waterfallPlot)
-            plt.close("all")
-            if config["tracking"]["remote"]:
-                runTracker = neptune.init_run(
-                    project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-                    with_id=runID,
-                    api_token=config["tracking"]["token"],
-                    capture_stdout=False,
+                        )
+                        for featureIndex in range(
+                            len(current["holdoutLocalExplanations"][0].feature_names)
+                        )
+                    ],
+                    "standard_deviation": [
+                        np.mean(
+                            np.hstack(
+                                [
+                                    np.std(localExplanations.values[:, featureIndex])
+                                    for localExplanations in current[
+                                        "holdoutLocalExplanations"
+                                    ]
+                                ]
+                            )
+                        )
+                        for featureIndex in range(
+                            len(current["holdoutLocalExplanations"][0].feature_names)
+                        )
+                    ],
+                },
+                dtype=object,
+            ).set_index("feature_name")
+
+    if current["globalExplanations"][0] is not None:
+        df = pd.concat(current["globalExplanations"]).reset_index()
+        # calculate mean
+        mean_df = df.groupby("feature_name").mean()
+        # calculate standard deviation
+        std_df = df.groupby("feature_name").std()
+        # rename std_df columns
+        std_df.columns = "stdDev_" + std_df.columns
+        # join mean and std dataframe
+        averageGlobalExplanations = pd.concat([mean_df, std_df], axis=1)
+        current["averageGlobalExplanations"] = averageGlobalExplanations
+
+    caseAccuracy = np.mean(
+        [
+            np.divide(np.count_nonzero(labels == predictions), len(labels))
+            for predictions, labels in zip(
+                current["predictions"], current["testLabels"]
+            )
+        ]
+    )
+    controlAccuracy = 1 - caseAccuracy
+
+    trackResults.submit(runID.result(), current)
+
+    results[runNumber] = current
+
+    # record sample metrics
+    for fold in range(config["sampling"]["crossValIterations"]):
+        with Manager() as m:
+            # initialize the shared state
+            shared_results = toMultiprocessDict(results, m)
+
+            # flatten out the nested structure into list of arguments for each sample
+            args = [
+                (fold, j, sampleID, current, shared_results)
+                for fold in range(config["sampling"]["crossValIterations"])
+                for j, sampleID in enumerate(
+                    [*current["testIDs"][fold], *current["holdoutIDs"][fold]]
                 )
-                runTracker["plots/aucPlot"] = aucPlot
-                if config["model"]["hyperparameterOptimization"]:
-                    runTracker["plots/convergencePlot"] = optimizerPlot
+            ]
 
-                # plot shapely feature importance
-                if config["model"]["calculateShapelyExplanations"]:
-                    for j in range(config["sampling"]["crossValIterations"]):
-                        runTracker[f"plots/featureHeatmap/{j+1}"] = heatmapList[j]
-                        if waterfallList[0]:
-                            for k in range(len(current["testIDs"][j])):
-                                try:
-                                    runTracker[
-                                        f"plots/samples/{j+1}/{sampleID}"
-                                    ] = waterfallList[j][k]
-                                except Exception:
-                                    runTracker[
-                                        f"plots/samples/{j+1}/{sampleID}"
-                                    ] = f"""failed to plot: {traceback.format_exc()}"""
-                runTracker.stop()
-            else:  # store plots locally
-                runPath = runID
-                aucPlot.savefig(f"{runPath}/aucPlot.svg")
-                if config["model"]["hyperparameterOptimization"]:
-                    optimizerPlot.savefig(f"{runPath}/optimizerPlot.svg")
+    # set up a pool of workers and distribute the work
+    with Pool() as pool:
+        pool.map(processSampleResult, args)
+        # for j, sampleID in enumerate(
+        #     [*current["testIDs"][fold], *current["holdoutIDs"][fold]]
+        # ):
+        #     probability = (
+        #         current["probabilities"][fold][j]
+        #         if j < len(current["testIDs"][fold])
+        #         else current["holdoutProbabilities"][fold][
+        #             j - len(current["testIDs"][fold])
+        #         ]
+        #     )
+        #     label = (
+        #         current["testLabels"][fold][j]
+        #         if j < len(current["testIDs"][fold])
+        #         else current["holdoutLabels"][fold][j - len(current["testIDs"][fold])]
+        #     )
+        #     try:
+        #         results["samples"][sampleID].append(probability)
+        #     except KeyError:
+        #         results["samples"][sampleID] = [probability]
+        #     finally:
+        #         results["labels"][sampleID] = label
 
-                if config["model"]["calculateShapelyExplanations"]:
-                    shapelyPath = f"{runPath}/featureImportances/shapelyExplanations"
-                    for j in range(config["sampling"]["crossValIterations"]):
-                        heatmapList[j].savefig(f"{shapelyPath}/{j+1}_heatmap.svg")
-                        if waterfallList[j]:
-                            samplePlotPath = f"{runPath}/featureImportances/shapelyExplanations/samples/{j+1}"
-                            os.makedirs(samplePlotPath, exist_ok=True)
-                            for k in range(len(current["testIDs"][j])):
-                                try:
-                                    waterfallList[j][k].savefig(
-                                        f"{samplePlotPath}/{sampleID}.svg"
-                                    )
-                                except Exception:
-                                    print(
-                                        f"""failed to plot: {traceback.format_exc()}"""
-                                    )
-            plt.close("all")
+    # plot AUC & hyperparameter convergence
+    plotSubtitle = f"""
+            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+            Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+            
+            {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
+            {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
 
-    await trackVisualizations(*args)
+    if len(current["holdoutLabels"]) > 0:
+        holdoutCaseAccuracy = np.mean(
+            [
+                np.divide(np.count_nonzero(labels == predictions), len(labels))
+                for predictions, labels in zip(
+                    current["holdoutPredictions"],
+                    current["holdoutLabels"],
+                )
+            ]
+        )
+        holdoutControlAccuracy = 1 - holdoutCaseAccuracy
+        holdoutPlotSubtitle = f"""
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                
+                Ethnically variable holdout
+                {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
+                {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+        trackVisualizations(
+            runID.result(),
+            holdoutPlotSubtitle,
+            model.__class__.__name__,
+            current,
+            holdout=True,
+        )
+
+    trackVisualizations(runID.result(), plotSubtitle, model.__class__.__name__, current)
+
+    results[runNumber]["testCount"] = len(trainIDs)
+    results[runNumber]["trainCount"] = len(testIDs)
+    results[runNumber]["holdoutCount"] = len(holdoutIDs)
+    return results
+
+
+@flow(task_runner=RayTaskRunner())
+def bootstrap(
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
+    clinicalData,
+    model,
+    hyperParameterSpace,
+    innerCvIterator,
+    outerCvIterator,
+):
+    gc.collect()
+    results = {}
+    results["samples"] = {}
+    results["labels"] = {}
+    results["model"] = model.__class__.__name__
+
+    # parallelize with workflow engine in cluster environment
+    for runNumber in range(
+        config["sampling"]["lastIteration"],
+        config["sampling"]["bootstrapIterations"],
+    ):
+        # update results for every bootstrap iteration
+        results = classify(
+            runNumber,
+            model,
+            hyperParameterSpace,
+            caseGenotypes,
+            controlGenotypes,
+            holdoutCaseGenotypes,
+            holdoutControlGenotypes,
+            clinicalData,
+            innerCvIterator,
+            outerCvIterator,
+            results,
+        )
+
+    return results
 
 
 @task()
@@ -523,8 +466,12 @@ async def main():
     (
         caseGenotypes,
         caseIDs,
+        holdoutCaseGenotypes,
+        holdoutCaseIDs,
         controlGenotypes,
         controlIDs,
+        holdoutControlGenotypes,
+        holdoutControlIDs,
         clinicalData,
     ) = await processInputFiles()
     outerCvIterator = StratifiedKFold(
@@ -537,236 +484,390 @@ async def main():
             api_token=config["tracking"]["token"],
         )
 
-    results = await asyncio.gather(
-        *[
-            build_subflow(
-                "classify",
-                (
-                    caseGenotypes,
-                    controlGenotypes,
-                    clinicalData,
-                    model,
-                    hyperParameterSpace,
-                    innerCvIterator,
-                    outerCvIterator,
-                ),
-            )
-            for (model, hyperParameterSpace) in list(config["model"]["stack"].items())
-        ]
-    )
+    bootstrap_args = [
+        (
+            caseGenotypes,
+            controlGenotypes,
+            holdoutCaseGenotypes,
+            holdoutControlGenotypes,
+            clinicalData,
+            model,
+            hyperParameterSpace,
+            innerCvIterator,
+            outerCvIterator,
+        )
+        for model, hyperParameterSpace in list(config["model"]["stack"].items())
+    ]
 
-    labelsProbabilitiesByModelName = dict()
+    # results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+
+    results = []
+    for args in bootstrap_args:
+        results.append(bootstrap(*args))
+
+    testLabelsProbabilitiesByModelName = dict()
+    holdoutLabelsProbabilitiesByModelName = dict()
     variantCount = 0
     lastVariantCount = 0
     sampleResults = {}
 
-    if (
-        config["sampling"]["lastIteration"] > 0
-        and j < config["sampling"]["lastIteration"]
-        and config["tracking"]["remote"]
-    ):
-        runsTable = projectTracker.fetch_runs_table().to_pandas()
-        pastRuns = runsTable[
-            runsTable["bootstrapIteration"] < config["sampling"]["lastIteration"]
-        ]
-        label_args_list = [
-            ("testLabels", runID) for runID in pastRuns["sys/id"].unique()
-        ]
-        for runID in pastRuns["sys/id"].unique():
-            download_file(runID, "testLabels", "csv")
-            download_file(runID, "sampleResults", "csv")
-            download_file(runID, "featureImportance/modelCoefficients", "csv")
-            download_file(runID, "featureImportance/shapelyExplanations/average", "csv")
+    if config["sampling"]["lastIteration"] > 0 and config["tracking"]["remote"]:
+        # TODO debug, refactor remote logging and downloads
 
-    # asyncio.gather preserves order
-    for i, model in enumerate(config["model"]["stack"]):
-        modelName = model.__class__.__name__
+        # runsTable = projectTracker.fetch_runs_table().to_pandas()
+        # pastRuns = runsTable[
+        #     runsTable["bootstrapIteration"] < config["sampling"]["lastIteration"]
+        # ]
+        # label_args_list = [
+        #     ("testLabels", runID) for runID in pastRuns["sys/id"].unique()
+        # ]
+        # for runID in pastRuns["sys/id"].unique():
+        #     download_file(runID, "testLabels", "csv")
+        #     download_file(runID, "sampleResults", "csv")
+        #     download_file(runID, "featureImportance/modelCoefficients", "csv")
+        #     download_file(runID, "featureImportance/shapelyExplanations/average", "csv")
+        if config["tracking"]["remote"]:
+            # get bootstrap runs for model
+            # currentRuns = pastRuns.loc[
+            #     (pastRuns["bootstrapIteration"] == j)
+            #     & (pastRuns["model"] == modelName)
+            # ]
+            # results[i][j]["trainCount"] = np.around(
+            #     currentRuns["nTrain"].unique()[0]
+            # )
+            # results[i][j]["testCount"] = np.around(
+            #     currentRuns["nTest"].unique()[0]
+            # )
+            # samplesResultsByFold = [
+            #     load_fold_dataframe(("sampleResults", runID))
+            #     for runID in currentRuns["sys/id"].unique()
+            # ]
+            # loadedSamples = pd.concat(samplesResultsByFold).set_index(
+            #     "id", drop=True
+            # )
+            # # unique run ID ordering matches label_args_list
+            # currentRunIDIndices = np.where(
+            #     pastRuns["sys/id"].unique() == currentRuns.loc["sys/id"]
+            # )
+            # loadedLabels = [
+            #     load_fold_dataframe(args)
+            #     for k in currentRunIDIndices
+            #     for args in label_args_list[k]
+            # ]
+            # for sampleID in loadedSamples.index:
+            #     if sampleID not in results[i]["samples"]:
+            #         results[i]["samples"][sampleID] = loadedSamples.loc[
+            #             sampleID
+            #         ]["probability"].to_numpy()
+            #     else:
+            #         results[i]["samples"][sampleID] = np.append(
+            #             loadedSamples.loc[sampleID][
+            #                 "probability"
+            #             ].to_numpy(),
+            #             results["samples"][sampleID],
+            #         )
+            #     if sampleID not in results[i]["labels"]:
+            #         results[i]["labels"][sampleID] = loadedSamples.loc[
+            #             sampleID
+            #         ]["label"].unique()[
+            #             0
+            #         ]  # all labels should be same for sample ID
+            # results[i][j]["testLabels"] = loadedLabels
+            # results[i][j]["probabilities"] = samplesResultsByFold
+            # try:
+            #     results[i][j]["globalExplanations"] = [
+            #         load_fold_dataframe(
+            #             ("featureImportance/modelCoefficients", runID)
+            #         )
+            #         for runID in currentRuns["sys/id"].unique()
+            #     ]
+            # except:
+            #     pass
+            # try:
+            #     results[i][j][
+            #         "averageShapelyExplanations"
+            #     ] = load_fold_dataframe(
+            #         ("featureImportance/shapelyExplanations/average", runID)
+            #     )
+            # except:
+            #     pass
+            pass
 
-        if (
-            config["sampling"]["lastIteration"] > 0
-            and j < config["sampling"]["lastIteration"]
-        ):
-            if config["tracking"]["remote"]:
-                # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
-                for j in range(0, config["sampling"]["lastIteration"]):
-                    results[i][j] = {}
-                    # get bootstrap runs for model
-                    currentRuns = pastRuns.loc[
-                        (pastRuns["bootstrapIteration"] == j)
-                        & (pastRuns["model"] == modelName)
-                    ]
-                    results[i][j]["trainCount"] = np.around(
-                        currentRuns["nTrain"].unique()[0]
-                    )
-                    results[i][j]["testCount"] = np.around(
-                        currentRuns["nTest"].unique()[0]
-                    )
-                    samplesResultsByFold = [
-                        load_fold_dataframe(("sampleResults", runID))
-                        for runID in currentRuns["sys/id"].unique()
-                    ]
-                    loadedSamples = pd.concat(samplesResultsByFold).set_index(
-                        "id", drop=True
-                    )
-                    # unique run ID ordering matches label_args_list
-                    currentRunIDIndices = np.where(
-                        pastRuns["sys/id"].unique() == currentRuns.loc["sys/id"]
-                    )
-                    loadedLabels = [
-                        load_fold_dataframe(args)
-                        for k in currentRunIDIndices
-                        for args in label_args_list[k]
-                    ]
-                    for sampleID in loadedSamples.index:
-                        if sampleID not in results["samples"]:
-                            results["samples"][sampleID] = loadedSamples.loc[sampleID][
-                                "probability"
-                            ].to_numpy()
-                        else:
-                            results["samples"][sampleID] = np.append(
-                                loadedSamples.loc[sampleID]["probability"].to_numpy(),
-                                results["samples"][sampleID],
-                            )
-                        if sampleID not in results["labels"]:
-                            results["labels"][sampleID] = loadedSamples.loc[sampleID][
-                                "label"
-                            ].unique()[
-                                0
-                            ]  # all labels should be same for sample ID
-                    results[i][j]["testLabels"] = loadedLabels
-                    results[i][j]["probabilities"] = samplesResultsByFold
-                    # TODO use conditional to check if run has feature explanations
-                    try:
-                        results[i][j]["globalExplanations"] = [
-                            load_fold_dataframe(
-                                ("featureImportance/modelCoefficients", runID)
-                            )
-                            for runID in currentRuns["sys/id"].unique()
-                        ]
-                    except:
-                        pass
-                    try:
-                        results[i][j][
-                            "averageShapelyExplanations"
-                        ] = load_fold_dataframe(
-                            ("featureImportance/shapelyExplanations/average", runID)
-                        )
-                    except:
-                        pass
-
-            else:
-                bootstrapFolders = os.listdir(
-                    f"{config['tracking']['project']}/bootstraps"
-                )
-                # convert to int
-                bootstrapFolders = [int(folder) for folder in bootstrapFolders]
-                bootstrapFolders.sort()
-                assert (
-                    max(bootstrapFolders) == config["sampling"]["lastIteration"]
-                )  # TODO automatically determine last iteration by max
-                for j in range(0, config["sampling"]["lastIteration"]):
-                    results[i][j] = {}
-                    currentBootstrap = bootstrapFolders[j]
-                    modelFolders = os.listdir(
-                        f"{config['tracking']['project']}/bootstraps/{currentBootstrap}"
-                    )
-                    currentFolder = modelFolders.index(modelName)
-                    currentFiles = os.listdir(
-                        f"{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentFolder}"
-                    )
-                    for fileName in currentFiles:
-                        if "testCount" in fileName:
-                            results[i][j]["testCount"] = fileName.split("_")[1]
-                        elif "trainCount" in fileName:
-                            results[i][j]["trainCount"] = fileName.split("_")[1]
-                        # TODO handle rest of local files
-
-        modelResult = results[i]
-
-        for sampleID in modelResult["samples"].keys():
-            flattenedProbabilities = np.array(
-                [
-                    prediction[1] if len(prediction) >= 2 else prediction
-                    for prediction in modelResult["samples"][sampleID]
-                ]
+        if not config["tracking"]["remote"]:
+            bootstrapFolders = os.listdir(
+                f"projects/{config['tracking']['project']}bootstraps"
             )
-            if sampleID not in sampleResults:
-                # label, probability, accuracy
-                sampleResults[sampleID] = [
-                    modelResult["labels"][sampleID],
-                    modelResult["samples"][sampleID],
-                    np.mean(
-                        [
-                            np.around(caseProbability)
-                            == modelResult["labels"][sampleID]
-                            for caseProbability in flattenedProbabilities
-                        ]
-                    ),
-                ]
-            else:
-                sampleResults[sampleID][1].append(modelResult["samples"][sampleID])
-                sampleResults[sampleID][2] = np.mean(
+            # convert to int
+            bootstrapFolders = [int(folder) for folder in bootstrapFolders]
+            bootstrapFolders.sort()
+            # assert (
+            #     max(bootstrapFolders) == config["sampling"]["lastIteration"]
+            # )  # TODO automatically determine last iteration by max
+
+            for i, model in enumerate(config["model"]["stack"]):
+                modelName = model.__class__.__name__
+                if "samples" not in results[i]:
+                    results[i]["samples"] = {}
+                if "labels" not in results[i]:
+                    results[i]["labels"] = {}
+                if config["sampling"]["lastIteration"] > 0:
+                    # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
+                    for j in range(0, config["sampling"]["lastIteration"]):
+                        results[i][j] = {}
+                        currentBootstrap = bootstrapFolders[j]
+                        modelFolders = os.listdir(
+                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}"
+                        )
+                        currentModel = modelFolders[modelFolders.index(modelName)]
+                        currentFiles = os.listdir(
+                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}"
+                        )
+                        for fileName in currentFiles:
+                            if "testCount" in fileName:
+                                results[i][j]["testCount"] = fileName.split("_")[1]
+                            elif "trainCount" in fileName:
+                                results[i][j]["trainCount"] = fileName.split("_")[1]
+                            elif "holdoutCount" in fileName:
+                                results[i][j]["holdoutCount"] = fileName.split("_")[1]
+                            elif (
+                                "testLabels" in fileName
+                                or "trainLabels" in fileName
+                                or "holdoutLabels" in fileName
+                                or "testIDs" in fileName
+                                or "trainIDs" in fileName
+                                or "holdoutIDs" in fileName
+                            ):
+                                sampleKeyFiles = os.listdir(
+                                    f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
+                                )
+                                sampleKeyFiles.sort(
+                                    key=lambda fileName: int(fileName.split(".")[0])
+                                )  # ascending order by k-fold
+                                results[i][j][fileName] = [
+                                    np.ravel(
+                                        pd.read_csv(
+                                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{keys}",
+                                            index_col=0,
+                                        )
+                                    )
+                                    for keys in sampleKeyFiles  # data column identical to dir name
+                                ]
+                            elif "sampleResults" in fileName:
+                                results[i][j]["probabilities"] = pd.read_csv(
+                                    f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}",
+                                    index_col="id",
+                                )
+                                if "holdoutIDs" in results[i][j]["holdoutIDs"]:
+                                    results[i][j]["holdoutProbabilities"] = results[i][
+                                        j
+                                    ]["probabilities"].loc[
+                                        np.ravel(results[i][j]["holdoutIDs"])
+                                    ]
+                                    results[i][j]["probabilities"] = results[i][j][
+                                        "probabilities"
+                                    ].loc[np.ravel(results[i][j]["testIDs"])]
+                                else:
+                                    results[i][j]["holdoutProbabilities"] = []
+                            elif "featureImportance" in fileName:
+                                # TODO handle holdout sample shap values
+                                importanceFiles = os.listdir(
+                                    f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
+                                )
+                                for importanceType in importanceFiles:
+                                    if importanceType == "modelCoefficients":
+                                        coefficientFiles = os.listdir(
+                                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{importanceType}"
+                                        )
+                                        coefficientFiles.sort(
+                                            key=lambda fileName: int(
+                                                fileName.split(".")[0]
+                                            )
+                                        )  # ascending order by k-fold
+                                        results[i][j]["globalExplanations"] = [
+                                            pd.read_csv(
+                                                f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/{fileName}/{importanceType}/{foldCoefficients}",
+                                                index_col="features",
+                                            )
+                                            for foldCoefficients in coefficientFiles
+                                        ]
+                                    elif importanceType == "shapelyExplanations":
+                                        results[i][j][
+                                            "averageShapelyExplanations"
+                                        ] = pd.read_csv(
+                                            f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/averageLocalExplanations.csv",
+                                            index_col="features",
+                                        )
+                                        if (
+                                            "averageHoldoutShapelyExplanations"
+                                            in results[i][j]
+                                        ):
+                                            results[i][j][
+                                                "averageHoldoutShapelyExplanations"
+                                            ] = pd.read_csv(
+                                                f"projects/{config['tracking']['project']}bootstraps/{currentBootstrap}/{currentModel}/averageHoldoutLocalExplanations.csv",
+                                                index_col="features",
+                                            )
+                        results[i][j]["model"] = modelName
+                        allTestIDs = set(
+                            results[i][j]["testIDs"] + results[i][j]["holdoutIDs"]
+                        )
+                        for sampleID in allTestIDs:
+                            if sampleID in results[i][j]["holdoutIDs"]:
+                                currentProbabilities = results[i][j][
+                                    "holdoutProbabilities"
+                                ]
+                                currentLabels = results[i][j]["holdoutLabels"]
+                                currentIDs = results[i][j]["holdoutIDs"]
+                            else:
+                                currentProbabilities = results[i][j]["probabilities"]
+                                currentLabels = results[i][j]["testLabels"]
+                                currentIDs = results[i][j]["testIDs"]
+                            if sampleID not in results[i]["samples"]:
+                                results[i]["samples"][
+                                    sampleID
+                                ] = currentProbabilities.loc[sampleID]["probability"]
+                            else:
+                                results[i]["samples"][sampleID] = np.append(
+                                    currentProbabilities.loc[sampleID]["probability"],
+                                    results[i]["samples"][sampleID],
+                                )
+                            if sampleID not in results[i]["labels"]:
+                                if sampleID in currentIDs:
+                                    results[i]["labels"][sampleID] = currentLabels[
+                                        np.where(currentIDs == sampleID)
+                                    ]
+
+            modelResult = results[i]
+
+            # TODO multiprocessing, there are many samples so this is very slow on a single thread
+            for sampleID in modelResult["samples"].keys():
+                flattenedProbabilities = np.array(
                     [
-                        sampleResults[sampleID][2],
+                        prediction[1] if len(prediction.shape) >= 2 else prediction
+                        for prediction in modelResult["samples"][sampleID]
+                    ]
+                )
+                if sampleID not in sampleResults:
+                    # label, probability, accuracy
+                    sampleResults[sampleID] = [
+                        modelResult["labels"][sampleID],
+                        modelResult["samples"][sampleID],
                         np.mean(
                             [
-                                np.around(caseProbability)
+                                np.around(probability)
                                 == modelResult["labels"][sampleID]
-                                for caseProbability in flattenedProbabilities
+                                for probability in flattenedProbabilities
                             ]
                         ),
                     ]
+                else:
+                    sampleResults[sampleID][1] = np.hstack(
+                        [sampleResults[sampleID][1], modelResult["samples"][sampleID]]
+                    )
+                    sampleResults[sampleID][2] = np.mean(
+                        [
+                            sampleResults[sampleID][2],
+                            np.mean(
+                                [
+                                    np.around(probability)
+                                    == modelResult["labels"][sampleID]
+                                    for probability in flattenedProbabilities
+                                ]
+                            ),
+                        ]
+                    )
+
+            if modelName not in testLabelsProbabilitiesByModelName:
+                testLabelsProbabilitiesByModelName[modelName] = [[], []]
+            if modelName not in holdoutLabelsProbabilitiesByModelName:
+                holdoutLabelsProbabilitiesByModelName[modelName] = [[], []]
+            globalExplanationsList = []
+            for j in range(config["sampling"]["bootstrapIterations"]):
+                bootstrapResult = modelResult[j]
+                # append labels
+                testLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
+                    (
+                        testLabelsProbabilitiesByModelName[modelName][0],
+                        *[foldLabel for foldLabel in bootstrapResult["testLabels"]],
+                    )
+                )
+                holdoutLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
+                    (
+                        holdoutLabelsProbabilitiesByModelName[modelName][0],
+                        *[foldLabel for foldLabel in bootstrapResult["holdoutLabels"]],
+                    )
+                )
+                # append probabilities
+                testLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
+                    [
+                        testLabelsProbabilitiesByModelName[modelName][1],
+                        bootstrapResult["probabilities"]["probability"].to_numpy()[:1]
+                        if len(
+                            bootstrapResult["probabilities"]
+                            .iloc[0]["probability"]
+                            .shape
+                        )
+                        >= 1
+                        and isinstance(bootstrapResult["probabilities"], pd.DataFrame)
+                        else bootstrapResult["probabilities"]["probability"].to_numpy()
+                        if isinstance(bootstrapResult["probabilities"], pd.DataFrame)
+                        else np.concatenate(bootstrapResult["probabilities"]),
+                    ]
+                )
+                holdoutLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
+                    [
+                        holdoutLabelsProbabilitiesByModelName[modelName][1],
+                        bootstrapResult["holdoutProbabilities"][
+                            "probability"
+                        ].to_numpy()[:1]
+                        if len(
+                            bootstrapResult["holdoutProbabilities"]
+                            .iloc[0]["probability"]
+                            .shape
+                        )
+                        >= 1
+                        and isinstance(
+                            bootstrapResult["holdoutProbabilities"], pd.DataFrame
+                        )
+                        else bootstrapResult["holdoutProbabilities"][
+                            "probability"
+                        ].to_numpy()
+                        if isinstance(
+                            bootstrapResult["holdoutProbabilities"], pd.DataFrame
+                        )
+                        else np.concatenate(bootstrapResult["holdoutProbabilities"]),
+                    ]
                 )
 
-        if modelName not in labelsProbabilitiesByModelName:
-            labelsProbabilitiesByModelName[modelName] = [[], []]
-        globalExplanationsList = []
-        for j in range(config["sampling"]["bootstrapIterations"]):
-            bootstrapResult = modelResult[j]
-            # append labels
-            labelsProbabilitiesByModelName[modelName][0] = np.hstack(
-                (
-                    labelsProbabilitiesByModelName[modelName][0],
-                    *bootstrapResult["testLabels"],
-                )
-            )
-            # append probabilities
-            labelsProbabilitiesByModelName[modelName][1] = np.hstack(
-                [
-                    labelsProbabilitiesByModelName[modelName][1],
-                    np.concatenate(bootstrapResult["probabilities"])[:, 1]
-                    if len(bootstrapResult["probabilities"][0].shape) >= 1
-                    else np.concatenate(bootstrapResult["probabilities"]),
-                ]
-            )
+                if "globalExplanations" not in bootstrapResult or not isinstance(
+                    bootstrapResult["globalExplanations"][0], pd.DataFrame
+                ):
+                    continue
+                variantCount = bootstrapResult["globalExplanations"][0].shape[0]
+                assert lastVariantCount == variantCount or lastVariantCount == 0
+                lastVariantCount = variantCount
 
-            if not isinstance(bootstrapResult["globalExplanations"][0], pd.DataFrame):
-                continue
-            variantCount = bootstrapResult["globalExplanations"][0].shape[0]
-            assert lastVariantCount == variantCount or lastVariantCount == 0
-            lastVariantCount = variantCount
+                globalExplanationsList += bootstrapResult["globalExplanations"]
 
-            globalExplanationsList += bootstrapResult["globalExplanations"]
-
-        if globalExplanationsList:
-            averageGlobalExplanationsDataFrame = (
-                pd.concat(globalExplanationsList)
-                .reset_index()
-                .groupby("features")
-                .mean()
-            )
-            if config["tracking"]["remote"]:
-                projectTracker[f"averageModelCoefficients/{modelName}"].upload(
-                    serializeDataFrame(averageGlobalExplanationsDataFrame)
+            if globalExplanationsList:
+                averageGlobalExplanationsDataFrame = (
+                    pd.concat(globalExplanationsList)
+                    .reset_index()
+                    .groupby("features")
+                    .mean()
                 )
-            else:
-                os.makedirs(
-                    f"{config['tracking']['project']}/averageModelCoefficients/",
-                    exist_ok=True,
-                )
-                averageGlobalExplanationsDataFrame.to_csv(
-                    f"{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
-                )
+                if config["tracking"]["remote"]:
+                    projectTracker[f"averageModelCoefficients/{modelName}"].upload(
+                        serializeDataFrame(averageGlobalExplanationsDataFrame)
+                    )
+                else:
+                    os.makedirs(
+                        f"projects/{config['tracking']['project']}averageModelCoefficients/",
+                        exist_ok=True,
+                    )
+                    averageGlobalExplanationsDataFrame.to_csv(
+                        f"projects/{config['tracking']['project']}averageModelCoefficients/{modelName}.csv"
+                    )
 
     sampleResultsDataFrame = pd.DataFrame.from_dict(
         sampleResults, orient="index", columns=["label", "probability", "accuracy"]
@@ -782,14 +883,14 @@ async def main():
         )
     else:
         sampleResultsDataFrame.to_csv(
-            f"{config['tracking']['project']}/sampleResults.csv"
+            f"projects/{config['tracking']['project']}sampleResults.csv"
         )
 
     if config["model"]["calculateShapelyExplanations"]:
         averageShapelyExplanationsDataFrame = (
             pd.concat(
                 [
-                    modelResult[j]["averageShapelyValues"]
+                    modelResult[j]["averageShapelyExplanations"]
                     for j in range(config["sampling"]["bootstrapIterations"])
                 ]
             )
@@ -797,29 +898,63 @@ async def main():
             .groupby("feature_name")
             .mean()
         )
+        if "averageHoldoutShapelyExplanations" in modelResult[j]:
+            averageHoldoutShapelyExplanationsDataFrame = (
+                pd.concat(
+                    [
+                        modelResult[j]["averageHoldoutShapelyExplanations"]
+                        for j in range(config["sampling"]["bootstrapIterations"])
+                    ]
+                )
+                .reset_index()
+                .groupby("feature_name")
+                .mean()
+            )
         if config["tracking"]["remote"]:
             projectTracker["averageShapelyExplanations"].upload(
                 serializeDataFrame(averageShapelyExplanationsDataFrame)
             )
+            if "averageHoldoutShapelyExplanations" in modelResult[j]:
+                projectTracker["averageHoldoutShapelyExplanationsDataFrame"].upload(
+                    serializeDataFrame(averageHoldoutShapelyExplanationsDataFrame)
+                )
         else:
             os.makedirs(
-                f"{config['tracking']['project']}/averageShapelyExplanations/",
+                f"projects/{config['tracking']['project']}averageShapelyExplanations/",
                 exist_ok=True,
             )
             averageShapelyExplanationsDataFrame.to_csv(
-                f"{config['tracking']['project']}/averageShapelyExplanations.csv"
+                f"projects/{config['tracking']['project']}averageShapelyExplanations.csv"
             )
+            if "averageHoldoutShapelyExplanations" in modelResult[j]:
+                averageHoldoutShapelyExplanationsDataFrame.to_csv(
+                    f"projects/{config['tracking']['project']}averageHoldoutShapelyExplanations.csv"
+                )
 
-    caseAccuracy = sampleResultsDataFrame[sampleResultsDataFrame["label"] == 1][
-        "accuracy"
-    ].mean()
+    seenCases = [id for id in sampleResultsDataFrame.index if id in caseIDs]
+    seenControls = [id for id in sampleResultsDataFrame.index if id in controlIDs]
+    seenHoldoutCases = [
+        id for id in sampleResultsDataFrame.index if id in holdoutCaseIDs
+    ]
+    seenHoldoutControls = [
+        id for id in sampleResultsDataFrame.index if id in holdoutControlIDs
+    ]
+
+    caseAccuracy = sampleResultsDataFrame.loc[
+        ~[*seenHoldoutCases, *seenHoldoutControls]
+    ][sampleResultsDataFrame["label"] == 1]["accuracy"].mean()
     controlAccuracy = 1 - caseAccuracy
+
+    holdoutCaseAccuracy = sampleResultsDataFrame.loc[
+        [*seenHoldoutCases, *seenHoldoutControls]
+    ][sampleResultsDataFrame["label"] == 1]["accuracy"].mean()
+    holdoutControlAccuracy = 1 - holdoutCaseAccuracy
 
     bootstrapTrainCount = int(
         np.around(
             np.mean(
                 [
-                    modelResult[j]["trainCount"]
+                    float(modelResult[j]["trainCount"])
                     for j in range(config["sampling"]["bootstrapIterations"])
                 ]
             )
@@ -829,7 +964,18 @@ async def main():
         np.around(
             np.mean(
                 [
-                    modelResult[j]["testCount"]
+                    float(modelResult[j]["testCount"])
+                    for j in range(config["sampling"]["bootstrapIterations"])
+                ]
+            )
+        )
+    )
+
+    bootstrapHoldoutCount = int(
+        np.around(
+            np.mean(
+                [
+                    float(modelResult[j]["holdoutCount"])
                     for j in range(config["sampling"]["bootstrapIterations"])
                 ]
             )
@@ -841,30 +987,30 @@ async def main():
     {config["tracking"]["name"]}, {variantCount} variants
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    {sampleResultsDataFrame['label'].value_counts()[1]} cases @ {'{:.1%}'.format(caseAccuracy)} accuracy, {sampleResultsDataFrame['label'].value_counts()[0]} controls @ {'{:.1%}'.format(controlAccuracy)} accuracy
+    {len(seenCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(seenControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
     accuracyHistogram = px.histogram(
-        sampleResultsDataFrame,
+        sampleResultsDataFrame.loc[~np.hstack([seenHoldoutCases, seenHoldoutControls])],
         x="accuracy",
         color="label",
         pattern_shape="label",
         range_x=[0, 1],
         title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
-    aucPlot = await plotAUC(
+    aucPlot = plotAUC(
         f"""
             Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
-        labelsProbabilitiesByModelName,
+        testLabelsProbabilitiesByModelName,
     )
-    calibrationPlot = await plotCalibration(
+    calibrationPlot = plotCalibration(
         f"""
             Calibration Curve
             {plotSubtitle}
             """,
-        labelsProbabilitiesByModelName,
+        testLabelsProbabilitiesByModelName,
     )
     if config["model"]["hyperparameterOptimization"]:
         convergencePlot = plotOptimizer(
@@ -883,6 +1029,39 @@ async def main():
             },
         )
 
+    if bootstrapHoldoutCount > 0:
+        holdoutPlotSubtitle = f"""
+        {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+        {config["tracking"]["name"]}, {variantCount} variants
+        Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+
+        Ethnically variable holdout
+        {len(seenHoldoutCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(seenHoldoutControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
+        {bootstrapHoldoutCount} ethnically-matched samples"""
+
+        holdoutAccuracyHistogram = px.histogram(
+            sampleResultsDataFrame.loc[[*seenHoldoutCases, *seenHoldoutControls]],
+            x="accuracy",
+            color="label",
+            pattern_shape="label",
+            range_x=[0, 1],
+            title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
+        )
+        holdoutAucPlot = plotAUC(
+            f"""
+                Receiver Operating Characteristic (ROC) Curve
+                {holdoutPlotSubtitle}
+                """,
+            holdoutLabelsProbabilitiesByModelName,
+        )
+        holdoutCalibrationPlot = plotCalibration(
+            f"""
+                Calibration Curve
+                {holdoutPlotSubtitle}
+                """,
+            holdoutLabelsProbabilitiesByModelName,
+        )
+
     if config["tracking"]["remote"]:
         projectTracker["sampleAccuracyPlot"].upload(accuracyHistogram)
         projectTracker["aucPlot"].upload(aucPlot)
@@ -893,16 +1072,49 @@ async def main():
         if config["model"]["hyperparameterOptimization"]:
             projectTracker["convergencePlot"].upload(File.as_image(convergencePlot))
 
+        if bootstrapHoldoutCount > 0:
+            projectTracker["holdoutSampleAccuracyPlot"].upload(holdoutAccuracyHistogram)
+            projectTracker["holdoutAucPlot"].upload(holdoutAucPlot)
+            projectTracker["holdoutCalibrationPlot"].upload(
+                File.as_image(holdoutCalibrationPlot)
+            )
+
         projectTracker.stop()
     else:
-        accuracyHistogram.save_html(
-            f"{config['tracking']['project']}/accuracyPlot.html"
+        accuracyHistogram.write_html(
+            f"projects/{config['tracking']['project']}accuracyPlot.html"
         )
-        aucPlot.savefig(f"{config['tracking']['project']}/aucPlot.svg")
-        calibrationPlot.savefig(f"{config['tracking']['project']}/calibrationPlot.svg")
+        aucPlot.savefig(f"projects/{config['tracking']['project']}aucPlot.svg")
+        aucPlot.savefig(f"projects/{config['tracking']['project']}aucPlot.png")
+        calibrationPlot.savefig(
+            f"projects/{config['tracking']['project']}calibrationPlot.svg"
+        )
+        calibrationPlot.savefig(
+            f"projects/{config['tracking']['project']}calibrationPlot.png"
+        )
         if config["model"]["hyperparameterOptimization"]:
             convergencePlot.savefig(
-                f"{config['tracking']['project']}/convergencePlot.svg"
+                f"projects/{config['tracking']['project']}convergencePlot.svg"
+            )
+            convergencePlot.savefig(
+                f"projects/{config['tracking']['project']}convergencePlot.png"
+            )
+
+        if bootstrapHoldoutCount > 0:
+            holdoutAccuracyHistogram.write_html(
+                f"projects/{config['tracking']['project']}holdoutAccuracyPlot.html"
+            )
+            holdoutAucPlot.savefig(
+                f"projects/{config['tracking']['project']}holdoutAucPlot.svg"
+            )
+            holdoutAucPlot.savefig(
+                f"projects/{config['tracking']['project']}holdoutAucPlot.png"
+            )
+            holdoutCalibrationPlot.savefig(
+                f"projects/{config['tracking']['project']}holdoutCalibrationPlot.svg"
+            )
+            holdoutCalibrationPlot.savefig(
+                f"projects/{config['tracking']['project']}holdoutCalibrationPlot.png"
             )
 
     return results
