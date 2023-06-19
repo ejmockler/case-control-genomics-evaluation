@@ -26,7 +26,28 @@ def applyAlleleModel(values, columns, genotypeIDs):
     resolvedGenotypeIDs = set()
     for id in tqdm(genotypeIDs, unit="id"):
         for j, column in enumerate(columns):
-            if id in column or column in id:
+            matched = False
+            if column == id:
+                matched = True
+            else:
+                # check for compound sample IDs
+                if config["vcfLike"]["compoundSampleIdDelimiter"] in column:
+                    delimitedColumn = column.split(
+                        config["vcfLike"]["compoundSampleIdDelimiter"]
+                    )[config["vcfLike"]["compoundSampleIdStartIndex"] :]
+                    matched = any(columnValue == id for columnValue in delimitedColumn)
+                if config["vcfLike"]["compoundSampleIdDelimiter"] in id:
+                    delimitedID = id.split(
+                        config["vcfLike"]["compoundSampleIdDelimiter"]
+                    )[config["vcfLike"]["compoundSampleIdStartIndex"] :]
+                    matched = any(idValue == column for idValue in delimitedID)
+                if (
+                    config["vcfLike"]["compoundSampleIdDelimiter"] in column
+                    and config["vcfLike"]["compoundSampleIdDelimiter"] in id
+                ):
+                    matched = any(idValue in delimitedColumn for idValue in delimitedID)
+
+            if matched:
                 # implement allele model
                 genotypeDict[f"{column}"] = [
                     (
@@ -45,7 +66,7 @@ def applyAlleleModel(values, columns, genotypeIDs):
                                 ]
                             ),
                             a_max=1,
-                            a_min=None,
+                            a_min=0,
                         )
                     )
                     if any(char.isdigit() for char in genotype)
@@ -356,15 +377,22 @@ async def processInputFiles():
                 print(f"\nmissing {len(IDs)} {alias} IDs:\n {IDs}")
 
     caseGenotypes = pd.DataFrame.from_dict(caseGenotypeDict)
+    caseGenotypes = caseGenotypes.loc[:, ~caseGenotypes.columns.duplicated()].copy()
     caseGenotypes.index.name = filteredVCF.index.name
     caseGenotypes.index = filteredVCF.index
     controlGenotypes = pd.DataFrame.from_dict(controlGenotypeDict)
+    controlGenotypes = controlGenotypes.loc[
+        :, ~controlGenotypes.columns.duplicated()
+    ].copy()
     controlGenotypes.index.name = filteredVCF.index.name
     controlGenotypes.index = filteredVCF.index
 
     holdoutCaseGenotypes = pd.DataFrame()
     if resolvedHoldoutCaseIDs:
         holdoutCaseGenotypes = pd.DataFrame.from_dict(holdoutCaseGenotypeDict)
+        holdoutCaseGenotypes = holdoutCaseGenotypes.loc[
+            :, ~holdoutCaseGenotypes.columns.duplicated()
+        ].copy()
         holdoutCaseGenotypes.index.name = filteredVCF.index.name
         holdoutCaseGenotypes.index = filteredVCF.index
         holdoutCaseIDs = resolvedHoldoutCaseIDs
@@ -372,6 +400,9 @@ async def processInputFiles():
     holdoutControlGenotypes = pd.DataFrame()
     if resolvedHoldoutControlIDs:
         holdoutControlGenotypes = pd.DataFrame.from_dict(holdoutControlGenotypeDict)
+        holdoutControlGenotypes = holdoutControlGenotypes.loc[
+            :, ~holdoutControlGenotypes.columns.duplicated()
+        ].copy()
         holdoutControlGenotypes.index.name = filteredVCF.index.name
         holdoutControlGenotypes.index = filteredVCF.index
         holdoutControlIDs = resolvedHoldoutControlIDs
@@ -382,15 +413,34 @@ async def processInputFiles():
     print(f"\n{len(caseIDs)} cases:\n {caseIDs}")
     print(f"\n{len(controlIDs)} controls:\n {controlIDs}")
 
-    columns = [
-        *caseGenotypes.columns,
-        *controlGenotypes.columns,
-        *holdoutCaseGenotypes.columns,
-        *holdoutControlGenotypes.columns,
-    ]
+    # prepare a dict to hold column names from each dataframe
+    df_dict = {
+        "caseGenotypes": caseGenotypes.columns.tolist(),
+        "controlGenotypes": controlGenotypes.columns.tolist(),
+        "holdoutCaseGenotypes": holdoutCaseGenotypes.columns.tolist(),
+        "holdoutControlGenotypes": holdoutControlGenotypes.columns.tolist(),
+    }
 
-    # Assert there are no duplicate columns
-    assert len(columns) == len(set(columns)), "Duplicate columns exist"
+    # prepare a dict to hold duplicates
+    dup_dict = {}
+
+    # check each list against all others for duplicates
+    for df_name, columns in df_dict.items():
+        other_columns = [
+            col for name, cols in df_dict.items() if name != df_name for col in cols
+        ]
+        duplicates = set(columns) & set(other_columns)
+        if duplicates:
+            dup_dict[df_name] = duplicates
+
+    # if any duplicates found, raise an assertion error with details
+    if dup_dict:
+        raise AssertionError(
+            f"Duplicate columns exist in the following dataframes: {dup_dict}"
+        )
+
+    # if no duplicates found, print a success message
+    print("No duplicate columns found!")
 
     # filter allele frequencies
     allGenotypes = pd.concat(
