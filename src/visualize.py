@@ -177,7 +177,7 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
             {
                 f"Fold {k+1}": [
                     result
-                    for result in current["fittedOptimizers"][k].optimizer_results_
+                    for result in current["fittedOptimizer"][k].optimizer_results_
                 ]
                 for k in range(config["sampling"]["crossValIterations"])
             },

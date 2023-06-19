@@ -155,7 +155,7 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs):
         runID = runTracker["sys/id"].fetch()
         runTracker.stop()
     else:
-        runPath = f"projects/{config['tracking']['project']}bootstraps/{runNumber+1}/{model.__class__.__name__}"
+        runPath = f"projects/{config['tracking']['project']}/bootstraps/{runNumber+1}/{model.__class__.__name__}"
         if not os.path.exists(runPath):
             os.makedirs(runPath, exist_ok=True)
         with open(f"{runPath}/config.pkl", "wb") as file:
@@ -204,7 +204,7 @@ def trackResults(runID, current):
         # )
         # if config["model"]["hyperparameterOptimization"]:
         #     runTracker["modelParams"] = {
-        #         k + 1: current["fittedOptimizers"][k].best_params_
+        #         k + 1: current["fittedOptimizer"][k].best_params_
         #         for k in range(config["sampling"]["crossValIterations"])
         #     }
 
@@ -312,7 +312,7 @@ def trackResults(runID, current):
                 hyperparameterDir = f"{runPath}/hyperparameters/{k+1}"
                 os.makedirs(hyperparameterDir, exist_ok=True)
                 with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
-                    json.dump(current["fittedOptimizers"][k].best_params_, file)
+                    json.dump(current["fittedOptimizer"][k].best_params_, file)
 
             testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
             testLabelsSeries.index = current["testIDs"][k]
@@ -488,6 +488,16 @@ def trackResults(runID, current):
     gc.collect()
 
 
+def clone_model(model):
+    ModelClass = type(model)  # Get the type of the model
+    params = model.get_params()  # Get the parameters of the model
+    cloned_model = ModelClass(
+        **params
+    )  # Initialize a new object of the same type with the same parameters
+    return cloned_model
+
+
+@task()
 def evaluate(
     trainIndices,
     testIndices,
@@ -500,6 +510,9 @@ def evaluate(
     samples = embedding["samples"]
     variantIndex = embedding["variantIndex"]
     sampleIndex = embedding["sampleIndex"]
+
+    # re-initialize since models may not be process-safe
+    model = clone_model(model)
 
     if config["model"]["hyperparameterOptimization"]:
         fittedOptimizer = optimizeHyperparameters(
