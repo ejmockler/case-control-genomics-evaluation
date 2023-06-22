@@ -138,7 +138,7 @@ def plotAUC(title, labelsPredictionsByInstance=None, tprFprAucByInstance=None):
 def plotConfusionMatrix(title, labelsPredictionsByInstance):
     all_labels = []
     all_predictions = []
-    matrix_displays = []
+    matrix_figures = []
 
     for name, (labels, predictions) in labelsPredictionsByInstance.items():
         # Ensure any probabilities become predictions
@@ -160,7 +160,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
             include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
         )
         ax.set_title(f"Confusion Matrix for {name}")
-        matrix_displays.append((fig, disp))
+        matrix_figures.append(fig)
 
         # Collect all labels and predictions for later use
         all_labels.extend(labels)
@@ -178,12 +178,12 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
         ],
     )
 
-    fig, ax = plt.subplots()
+    avgFig, ax = plt.subplots()
     disp.plot(include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal")
     ax.set_title(f"Average {title}")
-    avg_display = (fig, disp)
+    plt.close("all")
 
-    return matrix_displays, avg_display
+    return matrix_figures, avgFig
 
 
 def plotSampleAccuracy():
@@ -206,23 +206,21 @@ def plotOptimizer(title, resultsByInstance):
     return fig
 
 
-def plotSample(j, k, runID, modelName, plotSubtitle, current, runTracker):
+def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
     currentIndex = (
         k if k < len(current["testIDs"][j]) else k - len(current["testIDs"][j])
     )
     currentLabel = (
         current["testLabels"][j][k]
-        if k < len(current["testIDs"][j])
+        if holdout
         else current["holdoutLabels"][j][currentIndex]
     )
     sampleID = (
-        current["testIDs"][j][k]
-        if k < len(current["testIDs"][j])
-        else current["holdoutIDs"][j][currentIndex]
+        current["testIDs"][j][k] if holdout else current["holdoutIDs"][j][currentIndex]
     )
     localExplanations = (
         current["localExplanations"][j]
-        if k < len(current["testIDs"][j])
+        if holdout
         else current["holdoutLocalExplanations"][j]
     )
     waterfallPlot = plt.figure()
@@ -252,6 +250,13 @@ def plotSample(j, k, runID, modelName, plotSubtitle, current, runTracker):
     plt.tight_layout()
 
     if config["tracking"]["remote"]:
+        if config["tracking"]["remote"]:
+            runTracker = neptune.init_run(
+                project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
+                with_id=runID,
+                api_token=config["tracking"]["token"],
+                capture_stdout=False,
+            )
         if k < len(current["testIDs"][j]):
             logPath = f"plots/samples/{j+1}/{sampleID}"
         else:
@@ -293,6 +298,7 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
         current["predictions"] if not holdout else current["holdoutPredictions"]
     )
     labels = current["testLabels"] if not holdout else current["holdoutLabels"]
+    ids = current["testIDs"] if not holdout else current["holdoutIDs"]
     labelsProbabilitiesByFold = {
         f"Fold {k+1}": (
             labels[k],
@@ -352,14 +358,13 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
     ):
         args = []
         for j in range(config["sampling"]["crossValIterations"]):
-            for k in range(len(current["testIDs"][j]) + len(current["holdoutIDs"][j])):
-                args.append((j, k, runID, modelName, plotSubtitle, current, runTracker))
+            for k in range(len(ids)):
+                args.append((j, k, runID, modelName, plotSubtitle, current, holdout))
 
         # Create a multiprocessing Pool
         with Pool(os.cpu_count()) as p:
             p.starmap(plotSample, args)
             gc.collect()
-        plt.close("all")
 
     if config["tracking"]["remote"]:
         runTracker = neptune.init_run(
@@ -384,9 +389,8 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
         runPath = runID
         aucPlot.savefig(f"{runPath}/{aucName}.svg")
         aucPlot.savefig(f"{runPath}/{aucName}.png")
-        confusionMatrixPath = os.makedirs(
-            f"{runPath}/{confusionMatrixName}", exist_ok=True
-        )
+        confusionMatrixPath = f"{runPath}/{confusionMatrixName}"
+        os.makedirs(confusionMatrixPath, exist_ok=True)
         for i, confusionMatrix in enumerate(confusionMatrixList):
             confusionMatrix.savefig(f"{confusionMatrixPath}/{i+1}.svg")
         avgConfusionMatrix.savefig(

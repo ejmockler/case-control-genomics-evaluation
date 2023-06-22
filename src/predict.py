@@ -309,7 +309,7 @@ def trackResults(runID, current):
         runPath = runID
         for k in range(config["sampling"]["crossValIterations"]):
             if config["model"]["hyperparameterOptimization"]:
-                hyperparameterDir = f"{runPath}/hyperparameters/{k+1}"
+                hyperparameterDir = f"{runPath}/hyperparameters"
                 os.makedirs(hyperparameterDir, exist_ok=True)
                 with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
                     json.dump(current["fittedOptimizer"][k].best_params_, file)
