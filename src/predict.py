@@ -12,6 +12,7 @@ from prefect import task
 from skopt import BayesSearchCV
 
 from config import config
+from copy import deepcopy
 
 import pandas as pd
 import numpy as np
@@ -102,10 +103,9 @@ def optimizeHyperparameters(
         n_jobs=n_jobs,
         n_points=2,
         return_train_score=True,
-        n_iter=25,
+        n_iter=50,
         scoring=metricFunction,
     )
-    # train / optimize parameters
     optimizer.fit(samples, labels)
     return optimizer
 
@@ -497,27 +497,23 @@ def clone_model(model):
     return cloned_model
 
 
-@task()
 def evaluate(
-    trainIndices,
-    testIndices,
+    trainSamples,
+    trainLabels,
+    testSamples,
+    testLabels,
     model,
     embedding,
     hyperParameterSpace,
     cvIterator,
+    trainIDs,
+    testIDs,
+    variantIndex,
 ):
-    labels = embedding["labels"]
-    samples = embedding["samples"]
-    variantIndex = embedding["variantIndex"]
-    sampleIndex = embedding["sampleIndex"]
-
-    # re-initialize since models may not be process-safe
-    model = clone_model(model)
-
     if config["model"]["hyperparameterOptimization"]:
         fittedOptimizer = optimizeHyperparameters(
-            samples[trainIndices],
-            labels[trainIndices],
+            trainSamples,
+            trainLabels,
             model,
             hyperParameterSpace,
             cvIterator,
@@ -527,9 +523,9 @@ def evaluate(
     else:
         fittedOptimizer = None
 
-    model.fit(samples[trainIndices], labels[trainIndices])
+    model.fit(trainSamples, trainLabels)
 
-    probabilities = get_probabilities(model, samples[testIndices])
+    probabilities = get_probabilities(model, testSamples)
     predictions = np.argmax(probabilities, axis=1)
 
     holdoutSamples = []
@@ -550,17 +546,11 @@ def evaluate(
         holdoutShapValues,
         shapExplainer,
         shapMasker,
-    ) = getFeatureImportances(model, samples[testIndices], holdoutSamples, variantIndex)
+    ) = getFeatureImportances(model, testSamples, holdoutSamples, variantIndex)
 
     globalExplanations = modelValues
     localExplanations = shapValues
     holdoutLocalExplanations = holdoutShapValues
-
-    # return sample labels mapped to this fold
-    trainLabels = np.array(labels[trainIndices])
-    testLabels = np.array(labels[testIndices])
-    trainIDs = np.array([sampleIndex[i] for i in trainIndices])
-    testIDs = np.array([sampleIndex[i] for i in testIndices])
 
     # TODO implement object to structure these results
     return (
@@ -596,10 +586,10 @@ def processSampleResult(fold, j, sampleID, current, results):
         else current["holdoutLabels"][fold][j - len(current["testIDs"][fold])]
     )
 
-    with results.get_lock():
-        try:
-            results["samples"][sampleID].append(probability)
-        except KeyError:
-            results["samples"][sampleID] = [probability]
-        finally:
-            results["labels"][sampleID] = label
+    try:
+        results["samples"][sampleID].append(probability)
+    except KeyError:
+        results["samples"][sampleID] = [probability]
+    finally:
+        results["labels"][sampleID] = label
+    return results
