@@ -215,10 +215,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
     colorbar = cm_display.im_.colorbar
     colorbar.ax.tick_params(labelsize=7)
 
-    # Manually set the colorbar's ticks
-    colorbar.set_ticks([i / 10.0 for i in range(0, 11, 2)])
-
-    # Get the tick values and generate tick labels from them
+    # Convert colorbar ticks to percentages
     tick_vals = colorbar.get_ticks()
     tick_labels = ["{:.0f}%".format(val * 100) for val in tick_vals]
     colorbar.set_ticklabels(tick_labels)
