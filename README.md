@@ -35,4 +35,4 @@ Increase database timeout if server throws timeout errors when loading parallel 
 
 ## Interactive entrypoint
 
-[notebook/ALS_genomics_model_stack.ipynb](notebook/ALS_genomics_model_stack.ipynb)
+[src/ALS_genomics_model_stack.ipynb](src/ALS_genomics_model_stack.ipynb)
