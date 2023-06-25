@@ -1,11 +1,9 @@
 import os
 import traceback
 from types import SimpleNamespace
-from joblib import Parallel, delayed
 import matplotlib
-from matplotlib import pyplot as plt, ticker
+from matplotlib import pyplot as plt
 from matplotlib.gridspec import GridSpec
-import multiprocess
 import neptune
 import numpy as np
 from sklearn.calibration import CalibrationDisplay
@@ -210,8 +208,8 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
             """,
         fontsize=8,
     )
-    ax.set_xlabel("Predicted label", fontsize=7)
-    ax.set_ylabel("True label", fontsize=7)
+    ax.set_xlabel("Predicted label", fontsize=8)
+    ax.set_ylabel("True label", fontsize=8)
     ax.tick_params(axis="both", which="major", labelsize=7)
 
     colorbar = cm_display.im_.colorbar

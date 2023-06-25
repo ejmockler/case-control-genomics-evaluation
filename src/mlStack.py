@@ -2,8 +2,6 @@ import asyncio
 from inspect import isclass
 import pickle
 import os
-import traceback
-from fastnumbers import check_real
 import numpy as np
 import neptune
 import pandas as pd
@@ -14,23 +12,22 @@ import matplotlib
 matplotlib.use("agg")
 
 from prefect_ray.task_runners import RayTaskRunner
-from prefect import flow, task, unmapped
-from prefect.task_runners import ConcurrentTaskRunner
+from prefect import flow, task
 from sklearn.metrics import roc_auc_score, roc_curve
-from types import SimpleNamespace
 from sklearn.model_selection import StratifiedKFold
-from input import (
+
+from tasks.input import (
     processInputFiles,
     prepareDatasets,
 )
-from predict import (
+from tasks.predict import (
     beginTracking,
     evaluate,
     serializeDataFrame,
     trackResults,
     processSampleResult,
 )
-from visualize import (
+from tasks.visualize import (
     plotAUC,
     plotCalibration,
     plotConfusionMatrix,
@@ -41,7 +38,6 @@ from neptune.types import File
 from config import config
 
 import gc
-from multiprocess import Pool, Manager
 from joblib import Parallel, delayed
 
 
@@ -1056,6 +1052,8 @@ async def runMLstack():
     )
     sampleResultsDataFrame.index.name = "id"
 
+    results["sampleResultsDataframe"] = sampleResultsDataFrame
+
     if config["tracking"]["remote"]:
         projectTracker["sampleResults"].upload(
             serializeDataFrame(sampleResultsDataFrame)
@@ -1076,6 +1074,10 @@ async def runMLstack():
     seenHoldoutControls = [
         id for id in sampleResultsDataFrame.index if id in holdoutControlIDs
     ]
+    results["seenCases"] = seenCases
+    results["seenControls"] = seenControls
+    results["seenHoldoutCases"] = seenHoldoutCases
+    results["seenHoldoutControls"] = seenHoldoutControls
 
     caseAccuracy = sampleResultsDataFrame.loc[
         ~sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
