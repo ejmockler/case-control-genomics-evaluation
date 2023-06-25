@@ -44,7 +44,7 @@ config = {
     "clinicalTable": {
         "path": "../notebook/ACWM.xlsx",  # clinical data as Excel spreadsheet
         "idColumn": "ExternalSampleId",  # genotype ID header
-        "uniqueIdColumn": "ExternalSubjectId",  # unique ID for each patient
+        "subjectIdColumn": "ExternalSubjectId",  # unique ID for each patient
         "labelColumn": "Subject Group",  # header that has case/control labels
         "controlLabels": [
             "Non-Neurological Control"
@@ -86,8 +86,8 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 2,
-        "crossValIterations": 5,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 30,
+        "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
     },
@@ -111,7 +111,7 @@ config = {
                 "n_estimators": Integer(25, 75),
                 "learning_rate": Real(1e-6, 1e1, prior="log-uniform"),
             },
-            XGBClassifier(): {
+            XGBClassifier(): {  # single thread to avoid memory issues (segfaults) in multiprocessing
                 "learning_rate": Real(1e-6, 1e1, prior="log-uniform"),
                 "n_estimators": Integer(10, 100),
             },

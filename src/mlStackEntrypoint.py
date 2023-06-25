@@ -145,17 +145,17 @@ def classify(
     ]
 
     # run models sequentially with SHAP to avoid memory issues
-    if config["model"]["calculateShapelyExplanations"]:
-        outerCrossValResults = []
-        for args in evaluate_args:
-            result = evaluate(*args)
-            outerCrossValResults.append(result)
-            gc.collect()
-        outerCrossValResults = list(map(list, zip(*outerCrossValResults)))
-    else:
-        outerCrossValResults = zip(
-            *Parallel(n_jobs=-1)(delayed(evaluate)(*args) for args in evaluate_args)
-        )
+    # if config["model"]["calculateShapelyExplanations"]:
+    outerCrossValResults = []
+    for args in evaluate_args:
+        result = evaluate(*args)
+        outerCrossValResults.append(result)
+        gc.collect()
+    outerCrossValResults = list(map(list, zip(*outerCrossValResults)))
+    # else:
+    # outerCrossValResults = zip(
+    #     *Parallel(n_jobs=-1)(delayed(evaluate)(*args) for args in evaluate_args)
+    # )
 
     # TODO implement object to structure these results
     resultNames = [
@@ -330,13 +330,26 @@ def classify(
 
     caseAccuracy = np.mean(
         [
-            np.divide(np.count_nonzero(labels == predictions), len(labels))
+            np.divide(
+                np.sum((predictions[labels == 1] == 1).astype(int)),
+                np.sum((labels == 1).astype(int)),
+            )
             for predictions, labels in zip(
                 current["predictions"], current["testLabels"]
             )
         ]
     )
-    controlAccuracy = 1 - caseAccuracy
+    controlAccuracy = np.mean(
+        [
+            np.divide(
+                np.sum((predictions[labels == 0] == 0).astype(int)),
+                np.sum((labels == 0).astype(int)),
+            )
+            for predictions, labels in zip(
+                current["predictions"], current["testLabels"]
+            )
+        ]
+    )
 
     trackResults.submit(runID.result(), current)
 
@@ -364,14 +377,28 @@ def classify(
     if len(current["holdoutLabels"]) > 0:
         holdoutCaseAccuracy = np.mean(
             [
-                np.divide(np.count_nonzero(labels == predictions), len(labels))
+                np.divide(
+                    np.sum((predictions[labels == 1] == 1).astype(int)),
+                    np.sum((labels == 1).astype(int)),
+                )
                 for predictions, labels in zip(
                     current["holdoutPredictions"],
                     current["holdoutLabels"],
                 )
             ]
         )
-        holdoutControlAccuracy = 1 - holdoutCaseAccuracy
+        holdoutControlAccuracy = np.mean(
+            [
+                np.divide(
+                    np.sum((predictions[labels == 0] == 0).astype(int)),
+                    np.sum((labels == 0).astype(int)),
+                )
+                for predictions, labels in zip(
+                    current["holdoutPredictions"],
+                    current["holdoutLabels"],
+                )
+            ]
+        )
         holdoutPlotSubtitle = f"""
             {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
@@ -481,7 +508,7 @@ def load_fold_dataframe(args):
 
 
 @flow(task_runner=RayTaskRunner())
-async def main():
+async def runMLstack():
     (
         caseGenotypes,
         caseIDs,
@@ -897,51 +924,48 @@ async def main():
                 )
 
                 if j == 0:
-                    # initialize first bootstrap to iteratively calculate average
-                    tprFprAucByInstance[modelName][0] = bootstrapResult[
-                        "averageTestTPR"
+                    tprFprAucByInstance[modelName][0] = [
+                        bootstrapResult["averageTestTPR"]
                     ]
-                    tprFprAucByInstance[modelName][1] = bootstrapResult["testFPR"]
-                    tprFprAucByInstance[modelName][2] = bootstrapResult[
-                        "averageTestAUC"
+                    tprFprAucByInstance[modelName][2] = [
+                        bootstrapResult["averageTestAUC"]
                     ]
                     if "averageHoldoutAUC" in bootstrapResult:
-                        holdoutTprFprAucByInstance[modelName][0] = bootstrapResult[
-                            "averageHoldoutTPR"
+                        holdoutTprFprAucByInstance[modelName][0] = [
+                            bootstrapResult["averageHoldoutTPR"]
                         ]
-                        holdoutTprFprAucByInstance[modelName][1] = bootstrapResult[
-                            "holdoutFPR"
-                        ]
-                        holdoutTprFprAucByInstance[modelName][2] = bootstrapResult[
-                            "averageHoldoutAUC"
+                        holdoutTprFprAucByInstance[modelName][2] = [
+                            bootstrapResult["averageHoldoutAUC"]
                         ]
                 else:
-                    tprFprAucByInstance[modelName][0] = np.mean(
-                        [
-                            tprFprAucByInstance[modelName][0],
-                            bootstrapResult["averageTestTPR"],
-                        ]
+                    tprFprAucByInstance[modelName][0].append(
+                        bootstrapResult["averageTestTPR"]
                     )
-                    tprFprAucByInstance[modelName][2] = np.mean(
-                        [
-                            tprFprAucByInstance[modelName][2],
-                            bootstrapResult["averageTestAUC"],
-                        ]
+                    tprFprAucByInstance[modelName][2].append(
+                        bootstrapResult["averageTestAUC"]
                     )
-
                     if "averageHoldoutAUC" in bootstrapResult:
-                        holdoutTprFprAucByInstance[modelName][0] = np.mean(
-                            [
-                                holdoutTprFprAucByInstance[modelName][0],
-                                bootstrapResult["averageHoldoutTPR"],
-                            ]
+                        holdoutTprFprAucByInstance[modelName][0].append(
+                            bootstrapResult["averageHoldoutTPR"]
                         )
-                        holdoutTprFprAucByInstance[modelName][2] = np.mean(
-                            [
-                                holdoutTprFprAucByInstance[modelName][2],
-                                bootstrapResult["averageHoldoutAUC"],
-                            ]
+                        holdoutTprFprAucByInstance[modelName][2].append(
+                            bootstrapResult["averageHoldoutAUC"]
                         )
+                # Calculate mean over bootstraps (axis=0) for each TPR value
+                tprFprAucByInstance[modelName][0] = np.mean(
+                    tprFprAucByInstance[modelName][0], axis=0
+                )
+                # Same for AUC
+                tprFprAucByInstance[modelName][2] = np.mean(
+                    tprFprAucByInstance[modelName][2], axis=0
+                )
+                if "averageHoldoutAUC" in bootstrapResult:
+                    holdoutTprFprAucByInstance[modelName][0] = np.mean(
+                        holdoutTprFprAucByInstance[modelName][0], axis=0
+                    )
+                    holdoutTprFprAucByInstance[modelName][2] = np.mean(
+                        holdoutTprFprAucByInstance[modelName][2], axis=0
+                    )
 
                 if "globalExplanations" not in bootstrapResult or not isinstance(
                     bootstrapResult["globalExplanations"][0], pd.DataFrame
@@ -1057,13 +1081,18 @@ async def main():
         ~sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
         & (sampleResultsDataFrame["label"] == 1)
     ]["accuracy"].mean()
-    controlAccuracy = 1 - caseAccuracy
-
+    controlAccuracy = sampleResultsDataFrame.loc[
+        ~sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
+        & (sampleResultsDataFrame["label"] == 0)
+    ]["accuracy"].mean()
     holdoutCaseAccuracy = sampleResultsDataFrame.loc[
         sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
         & (sampleResultsDataFrame["label"] == 1)
     ][sampleResultsDataFrame["label"] == 1]["accuracy"].mean()
-    holdoutControlAccuracy = 1 - holdoutCaseAccuracy
+    holdoutControlAccuracy = sampleResultsDataFrame.loc[
+        sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
+        & (sampleResultsDataFrame["label"] == 1)
+    ][sampleResultsDataFrame["label"] == 0]["accuracy"].mean()
 
     bootstrapTrainCount = int(
         np.around(
@@ -1106,7 +1135,11 @@ async def main():
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
     accuracyHistogram = px.histogram(
-        sampleResultsDataFrame.loc[~np.hstack([seenHoldoutCases, seenHoldoutControls])],
+        sampleResultsDataFrame.loc[
+            ~sampleResultsDataFrame.index.isin(
+                [*seenHoldoutCases, *seenHoldoutControls]
+            )
+        ],
         x="accuracy",
         color="label",
         pattern_shape="label",
@@ -1128,15 +1161,18 @@ async def main():
         testLabelsProbabilitiesByModelName,
     )
     confusionMatrixInstanceList, averageConfusionMatrix = plotConfusionMatrix(
-        f"Confusion Matrix\n{plotSubtitle}".lstrip(),
+        f"""
+            Confusion Matrix
+            {plotSubtitle}
+            """,
         testLabelsProbabilitiesByModelName,
     )
     if config["model"]["hyperparameterOptimization"]:
         convergencePlot = plotOptimizer(
             f"""
-            Convergence Plot
-            {plotSubtitle}
-            """,
+                Convergence Plot
+                {plotSubtitle}
+                """,
             {
                 modelName: [
                     result
@@ -1188,7 +1224,10 @@ async def main():
             holdoutConfusionMatrixInstanceList,
             averageHoldoutConfusionMatrix,
         ) = plotConfusionMatrix(
-            f"Confusion Matrix\n{plotSubtitle}".lstrip(),
+            f"""
+                Confusion Matrix
+                {plotSubtitle}
+                """,
             holdoutLabelsProbabilitiesByModelName,
         )
 
@@ -1224,8 +1263,12 @@ async def main():
         accuracyHistogram.write_html(
             f"projects/{config['tracking']['project']}/accuracyPlot.html"
         )
-        aucPlot.savefig(f"projects/{config['tracking']['project']}/aucPlot.svg")
-        aucPlot.savefig(f"projects/{config['tracking']['project']}/aucPlot.png")
+        aucPlot.savefig(
+            f"projects/{config['tracking']['project']}/aucPlot.svg", bbox_inches="tight"
+        )
+        aucPlot.savefig(
+            f"projects/{config['tracking']['project']}/aucPlot.png", bbox_inches="tight"
+        )
         confusionMatrixPath = (
             f"projects/{config['tracking']['project']}/confusionMatrix"
         )
@@ -1233,26 +1276,35 @@ async def main():
         for name, confusionMatrix in zip(
             list(testLabelsProbabilitiesByModelName.keys()), confusionMatrixInstanceList
         ):
-            confusionMatrix.savefig(f"confusionMatrixPath/{name}.svg")
+            confusionMatrix.savefig(
+                f"confusionMatrixPath/{name}.svg",
+                bbox_inches="tight",
+            )
         averageConfusionMatrix.savefig(
-            f"projects/{config['tracking']['project']}/averageConfusionMatrix.svg"
+            f"projects/{config['tracking']['project']}/averageConfusionMatrix.svg",
+            bbox_inches="tight",
         )
         averageConfusionMatrix.savefig(
-            f"projects/{config['tracking']['project']}/averageConfusionMatrix.png"
+            f"projects/{config['tracking']['project']}/averageConfusionMatrix.png",
+            bbox_inches="tight",
         )
 
         calibrationPlot.savefig(
-            f"projects/{config['tracking']['project']}/calibrationPlot.svg"
+            f"projects/{config['tracking']['project']}/calibrationPlot.svg",
+            bbox_inches="tight",
         )
         calibrationPlot.savefig(
-            f"projects/{config['tracking']['project']}/calibrationPlot.png"
+            f"projects/{config['tracking']['project']}/calibrationPlot.png",
+            bbox_inches="tight",
         )
         if config["model"]["hyperparameterOptimization"]:
             convergencePlot.savefig(
-                f"projects/{config['tracking']['project']}/convergencePlot.svg"
+                f"projects/{config['tracking']['project']}/convergencePlot.svg",
+                bbox_inches="tight",
             )
             convergencePlot.savefig(
-                f"projects/{config['tracking']['project']}/convergencePlot.png"
+                f"projects/{config['tracking']['project']}/convergencePlot.png",
+                bbox_inches="tight",
             )
 
         if bootstrapHoldoutCount > 0:
@@ -1260,16 +1312,20 @@ async def main():
                 f"projects/{config['tracking']['project']}/holdoutAccuracyPlot.html"
             )
             holdoutAucPlot.savefig(
-                f"projects/{config['tracking']['project']}/holdoutAucPlot.svg"
+                f"projects/{config['tracking']['project']}/holdoutAucPlot.svg",
+                bbox_inches="tight",
             )
             holdoutAucPlot.savefig(
-                f"projects/{config['tracking']['project']}/holdoutAucPlot.png"
+                f"projects/{config['tracking']['project']}/holdoutAucPlot.png",
+                bbox_inches="tight",
             )
             holdoutCalibrationPlot.savefig(
-                f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.svg"
+                f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.svg",
+                bbox_inches="tight",
             )
             holdoutCalibrationPlot.savefig(
-                f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.png"
+                f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.png",
+                bbox_inches="tight",
             )
             confusionMatrixPath = (
                 f"projects/{config['tracking']['project']}/confusionMatrix/holdout"
@@ -1279,12 +1335,16 @@ async def main():
                 list(testLabelsProbabilitiesByModelName.keys()),
                 holdoutConfusionMatrixInstanceList,
             ):
-                confusionMatrix.savefig(f"confusionMatrixPath/{name}.svg")
+                confusionMatrix.savefig(
+                    f"confusionMatrixPath/{name}.svg", bbox_inches="tight"
+                )
             averageHoldoutConfusionMatrix.savefig(
-                f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.svg"
+                f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.svg",
+                bbox_inches="tight",
             )
             averageHoldoutConfusionMatrix.savefig(
-                f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.png"
+                f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.png",
+                bbox_inches="tight",
             )
 
     return results
@@ -1303,15 +1363,13 @@ async def remove_all_flows():
 
 
 if __name__ == "__main__":
-    # TODO replace notebook code with src imports
     ray.shutdown()
-    parallelRunner = ray.init()
 
     clearHistory = True
     if clearHistory:
         asyncio.run(remove_all_flows())
 
-    results = asyncio.run(main())
+    results = asyncio.run(runMLstack())
     pickle.dump(
         results,
         open(

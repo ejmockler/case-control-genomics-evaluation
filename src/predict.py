@@ -20,6 +20,7 @@ import neptune
 import shap
 
 import gc
+import faulthandler
 
 
 def getFeatureImportances(model, data, holdoutData, featureLabels):
@@ -62,6 +63,7 @@ def getFeatureImportances(model, data, holdoutData, featureLabels):
         modelCoefficientDF.index = featureLabels
         modelCoefficientDF.index.name = "feature_name"
 
+    faulthandler.enable()
     if config["model"]["calculateShapelyExplanations"]:
         # Cluster correlated and hierarchical features using masker
         masker = shap.maskers.Partition(data, clustering="correlation")

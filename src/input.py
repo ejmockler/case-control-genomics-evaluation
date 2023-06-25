@@ -87,7 +87,7 @@ def applyAlleleModel(values, columns, genotypeIDs):
 def load():
     clinicalData = pd.read_excel(
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
-    ).drop_duplicates(subset=config["clinicalTable"]["uniqueIdColumn"])
+    ).drop_duplicates(subset=config["clinicalTable"]["subjectIdColumn"])
     externalSamples = [
         pd.read_csv(path, sep="\t", index_col=idColumn)
         for path, idColumn in zip(
@@ -412,6 +412,10 @@ async def processInputFiles():
 
     print(f"\n{len(caseIDs)} cases:\n {caseIDs}")
     print(f"\n{len(controlIDs)} controls:\n {controlIDs}")
+    if resolvedHoldoutCaseIDs:
+        print(f"\n{len(holdoutCaseIDs)} holdout cases:\n {holdoutCaseIDs}")
+    if resolvedHoldoutControlIDs:
+        print(f"\n{len(holdoutControlIDs)} holdout controls:\n {holdoutControlIDs}")
 
     # prepare a dict to hold column names from each dataframe
     df_dict = {

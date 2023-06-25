@@ -1,8 +1,11 @@
 import os
 import traceback
 from types import SimpleNamespace
-from matplotlib import pyplot as plt
+from joblib import Parallel, delayed
+import matplotlib
+from matplotlib import pyplot as plt, ticker
 from matplotlib.gridspec import GridSpec
+import multiprocess
 import neptune
 import numpy as np
 from sklearn.calibration import CalibrationDisplay
@@ -17,7 +20,7 @@ import shap
 import gc
 from config import config
 
-from multiprocess import Pool
+matplotlib.use("agg")
 
 
 def plotCalibration(title, labelsPredictionsByInstance):
@@ -159,14 +162,21 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
         disp.plot(
             include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
         )
-        ax.set_title(f"Confusion Matrix for {name}")
+        ax.set_title(
+            f"""
+                {title}
+                {name}
+                """,
+            fontsize=8,
+        )
+        plt.tight_layout()
         matrix_figures.append(fig)
+        plt.close(fig)
 
         # Collect all labels and predictions for later use
         all_labels.extend(labels)
         all_predictions.extend(predictions)
 
-    # Compute the average confusion matrix
     avg_matrix = confusion_matrix(all_labels, all_predictions, normalize="all")
 
     # Create ConfusionMatrixDisplay for the average confusion matrix
@@ -179,8 +189,44 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
     )
 
     avgFig, ax = plt.subplots()
-    disp.plot(include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal")
-    ax.set_title(f"Average {title}")
+    cm_display = disp.plot(
+        include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
+    )
+
+    # Set color limits
+    cm_display.im_.set_clim(vmin=0, vmax=1)  # These are in proportion, not percentage
+
+    # List normalized proportions as percentages
+    for i in range(avg_matrix.shape[0]):
+        for j in range(avg_matrix.shape[1]):
+            percentage = avg_matrix[i, j] * 100
+            cm_display.text_[i, j].set_text(f"{percentage:.1f}%")  # 1 decimal place
+            cm_display.text_[i, j].set_fontsize(7)
+
+    ax.set_title(
+        f"""
+            {title}
+            Average across folds
+            """,
+        fontsize=8,
+    )
+    ax.set_xlabel("Predicted label", fontsize=7)
+    ax.set_ylabel("True label", fontsize=7)
+    ax.tick_params(axis="both", which="major", labelsize=7)
+
+    colorbar = cm_display.im_.colorbar
+    colorbar.ax.tick_params(labelsize=7)
+
+    # Manually set the colorbar's ticks
+    colorbar.set_ticks([i / 10.0 for i in range(0, 11, 2)])
+
+    # Get the tick values and generate tick labels from them
+    tick_vals = colorbar.get_ticks()
+    tick_labels = ["{:.0f}%".format(val * 100) for val in tick_vals]
+    colorbar.set_ticklabels(tick_labels)
+    colorbar.ax.tick_params(labelsize=7)
+
+    plt.tight_layout()
     plt.close("all")
 
     return matrix_figures, avgFig
@@ -207,47 +253,44 @@ def plotOptimizer(title, resultsByInstance):
 
 
 def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
-    currentIndex = (
-        k if k < len(current["testIDs"][j]) else k - len(current["testIDs"][j])
-    )
+    import matplotlib.pyplot as plt
+    import shap
+
     currentLabel = (
-        current["testLabels"][j][k]
-        if holdout
-        else current["holdoutLabels"][j][currentIndex]
+        current["testLabels"][j][k] if not holdout else current["holdoutLabels"][j][k]
     )
-    sampleID = (
-        current["testIDs"][j][k] if holdout else current["holdoutIDs"][j][currentIndex]
-    )
+    sampleID = current["testIDs"][j][k] if not holdout else current["holdoutIDs"][j][k]
     localExplanations = (
         current["localExplanations"][j]
-        if holdout
+        if not holdout
         else current["holdoutLocalExplanations"][j]
     )
     waterfallPlot = plt.figure()
     plt.title(
         f"""
-                {sampleID}
-                Shapely explanations from {modelName}
-                Fold {j+1}
-                {plotSubtitle}
-                """
+            {sampleID}
+            Shapely explanations from {modelName}
+            Fold {j+1}
+            {plotSubtitle}
+            """
     )
     # patch parameter bug: https://github.com/slundberg/shap/issues/2362
     to_pass = SimpleNamespace(
         **{
-            "values": localExplanations[currentIndex].values[:, 1]
-            if len(localExplanations[currentIndex].values.shape) > 1
-            else localExplanations[currentIndex].values,
-            "data": localExplanations[currentIndex].data,
+            "values": localExplanations[k].values[:, 1]
+            if len(localExplanations[k].values.shape) > 1
+            else localExplanations[k].values,
+            "data": localExplanations[k].data,
             "display_data": None,
             "feature_names": localExplanations.feature_names,
-            "base_values": localExplanations[currentIndex].base_values[currentLabel]
-            if len(localExplanations[currentIndex].base_values.shape) == 1
-            else localExplanations[currentIndex].base_values,
+            "base_values": localExplanations[k].base_values[currentLabel]
+            if len(localExplanations[k].base_values.shape) == 1
+            else localExplanations[k].base_values,
         }
     )
     shap.plots.waterfall(to_pass, show=False)
     plt.tight_layout()
+    plt.close(waterfallPlot)
 
     if config["tracking"]["remote"]:
         if config["tracking"]["remote"]:
@@ -257,7 +300,7 @@ def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
                 api_token=config["tracking"]["token"],
                 capture_stdout=False,
             )
-        if k < len(current["testIDs"][j]):
+        if not holdout:
             logPath = f"plots/samples/{j+1}/{sampleID}"
         else:
             logPath = f"plots/samples/holdout/{j+1}/{sampleID}"
@@ -267,7 +310,7 @@ def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
             runTracker[logPath] = f"""failed to plot: {traceback.format_exc()}"""
     else:
         runPath = runID
-        if k < len(current["testIDs"][j]):
+        if not holdout:
             samplePlotPath = (
                 f"{runPath}/featureImportance/shapelyExplanations/samples/{j+1}"
             )
@@ -285,8 +328,6 @@ def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
                 f"{samplePlotPath}/{sampleID}.svg",
                 bbox_inches="tight",
             )
-
-    plt.close(waterfallPlot)
 
 
 def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
@@ -323,7 +364,11 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
     )
     confusionMatrixName = "confusionMatrix" if not holdout else "confusionMatrixHoldout"
     confusionMatrixList, avgConfusionMatrix = plotConfusionMatrix(
-        f"Confusion Matrix\n{modelName} with {config['sampling']['crossValIterations']}-fold cross-validation\n{plotSubtitle}".lstrip(),
+        f"""
+            Confusion Matrix
+            {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
+            {plotSubtitle}
+            """,
         labelsPredictionsByFold,
     )
     calibrationName = "calibrationPlot" if not holdout else "calibrationPlotHoldout"
@@ -358,13 +403,17 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
     ):
         args = []
         for j in range(config["sampling"]["crossValIterations"]):
-            for k in range(len(ids)):
+            for k in range(len(ids[j])):
                 args.append((j, k, runID, modelName, plotSubtitle, current, holdout))
 
-        # Create a multiprocessing Pool
-        with Pool(os.cpu_count()) as p:
-            p.starmap(plotSample, args)
-            gc.collect()
+        for arg in args:
+            plotSample(*arg)
+
+        # with multiprocess.Pool(multiprocess.cpu_count()) as pool:
+        #     # Use map to apply the function to each argument set in the args list
+        #     pool.starmap(plotSample, args)
+
+        gc.collect()
 
     if config["tracking"]["remote"]:
         runTracker = neptune.init_run(
@@ -376,9 +425,9 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
         runTracker[f"plots/{aucName}"] = aucPlot
         for i, confusionMatrix in enumerate(confusionMatrixList):
             runTracker[f"{confusionMatrixName}/{i+1}"].upload(confusionMatrix)
-        runTracker[f"average{confusionMatrixName.capitalize()}"].upload(
-            avgConfusionMatrix
-        )
+        runTracker[
+            f"average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}"
+        ].upload(avgConfusionMatrix)
         runTracker[f"plots/{calibrationName}"] = calibrationPlot
         if config["model"]["hyperparameterOptimization"] and not holdout:
             runTracker[f"plots/{optimizerPlotName}"] = optimizerPlot
@@ -387,22 +436,30 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
 
     else:  # store plots locally
         runPath = runID
-        aucPlot.savefig(f"{runPath}/{aucName}.svg")
-        aucPlot.savefig(f"{runPath}/{aucName}.png")
+        aucPlot.savefig(f"{runPath}/{aucName}.svg", bbox_inches="tight")
+        aucPlot.savefig(f"{runPath}/{aucName}.png", bbox_inches="tight")
         confusionMatrixPath = f"{runPath}/{confusionMatrixName}"
         os.makedirs(confusionMatrixPath, exist_ok=True)
         for i, confusionMatrix in enumerate(confusionMatrixList):
-            confusionMatrix.savefig(f"{confusionMatrixPath}/{i+1}.svg")
+            confusionMatrix.savefig(
+                f"{confusionMatrixPath}/{i+1}.svg", bbox_inches="tight"
+            )
         avgConfusionMatrix.savefig(
-            f"{runPath}/average{confusionMatrixName.capitalize()}.svg"
+            f"{runPath}/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.svg",
+            bbox_inches="tight",
         )
         avgConfusionMatrix.savefig(
-            f"{runPath}/average{confusionMatrixName.capitalize()}.png"
+            f"{runPath}/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.png",
+            bbox_inches="tight",
         )
-        calibrationPlot.savefig(f"{runPath}/{calibrationName}.svg")
-        calibrationPlot.savefig(f"{runPath}/{calibrationName}.png")
+        calibrationPlot.savefig(f"{runPath}/{calibrationName}.svg", bbox_inches="tight")
+        calibrationPlot.savefig(f"{runPath}/{calibrationName}.png", bbox_inches="tight")
         if config["model"]["hyperparameterOptimization"] and not holdout:
-            optimizerPlot.savefig(f"{runPath}/{optimizerPlotName}.svg")
-            optimizerPlot.savefig(f"{runPath}/{optimizerPlotName}.png")
+            optimizerPlot.savefig(
+                f"{runPath}/{optimizerPlotName}.svg", bbox_inches="tight"
+            )
+            optimizerPlot.savefig(
+                f"{runPath}/{optimizerPlotName}.png", bbox_inches="tight"
+            )
 
     plt.close("all")
