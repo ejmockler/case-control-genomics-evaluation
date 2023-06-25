@@ -8,7 +8,7 @@ from mlStack import remove_all_flows, runMLstack
 
 
 def viscosity():
-    # current_calculation =  (Perplexity + Skewness) / (Variance + |Skewness| + Kurtosis)
+    # current_calculation = (Perplexity * Skewness^2) / (Variance + Kurtosis))
     # Vn = α * Vn-1 + β * current_calculation
     # where α > β assuming rheopectic viscosity (viscosity increases as easily-predicted samples are sequestered)
     pass
