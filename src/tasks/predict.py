@@ -23,7 +23,7 @@ import gc
 import faulthandler
 
 
-def getFeatureImportances(model, data, holdoutData, featureLabels):
+def getFeatureImportances(model, data, holdoutData, featureLabels, config):
     """Get feature importances from fitted model and create SHAP explainer"""
     if model.__class__.__name__ == "MultinomialNB":
         modelCoefficientDF = pd.DataFrame()
@@ -95,7 +95,7 @@ def get_probabilities(model, samples):
 
 
 def optimizeHyperparameters(
-    samples, labels, model, parameterSpace, cvIterator, metricFunction, n_jobs=1
+    samples, labels, model, parameterSpace, cvIterator, metricFunction, n_jobs=-1
 ):
     # hyperparameter search (inner cross-validation)
     optimizer = BayesSearchCV(
@@ -119,7 +119,7 @@ def serializeDataFrame(dataframe):
 
 
 @task()
-def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs):
+def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config):
     embeddingDF = pd.DataFrame(
         data=embedding["samples"],
         columns=embedding["variantIndex"],
@@ -176,7 +176,7 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs):
 
 
 @task()
-def trackResults(runID, current):
+def trackResults(runID, current, config):
     sampleResultsDataframe = pd.DataFrame.from_dict(
         {
             "probability": [
@@ -511,6 +511,7 @@ def evaluate(
     trainIDs,
     testIDs,
     variantIndex,
+    config,
 ):
     if config["model"]["hyperparameterOptimization"]:
         fittedOptimizer = optimizeHyperparameters(
@@ -548,7 +549,7 @@ def evaluate(
         holdoutShapValues,
         shapExplainer,
         shapMasker,
-    ) = getFeatureImportances(model, testSamples, holdoutSamples, variantIndex)
+    ) = getFeatureImportances(model, testSamples, holdoutSamples, variantIndex, config)
 
     globalExplanations = modelValues
     localExplanations = shapValues

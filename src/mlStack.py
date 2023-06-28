@@ -36,6 +36,7 @@ from tasks.visualize import (
 )
 from neptune.types import File
 from config import config
+from models import stack as modelStack
 
 import gc
 from joblib import Parallel, delayed
@@ -54,6 +55,7 @@ def classify(
     innerCvIterator,
     outerCvIterator,
     results,
+    config,
 ):
     trainIDs = set()
     testIDs = set()
@@ -98,7 +100,9 @@ def classify(
             pass
     print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
 
-    runID = beginTracking.submit(model, runNumber, embedding, clinicalData, clinicalIDs)
+    runID = beginTracking.submit(
+        model, runNumber, embedding, clinicalData, clinicalIDs, config
+    )
     gc.collect()
 
     # outer cross-validation
@@ -134,6 +138,7 @@ def classify(
             np.array([embedding["sampleIndex"][i] for i in trainIndices]),
             np.array([embedding["sampleIndex"][i] for i in testIndices]),
             embedding["variantIndex"],
+            config,
         )
         for trainIndices, testIndices in zip(
             current["trainIndices"], current["testIndices"]
@@ -188,7 +193,7 @@ def classify(
     ]
     current["averageTestAUC"] = np.mean(current["testAUC"])
 
-    current["testFPR"] = np.linspace(0, 1, 101)  # Define common set of FPR values
+    current["testFPR"] = np.linspace(0, 1, 100)  # Define common set of FPR values
     current["testTPR"] = []
     for labels, probabilities in zip(current["testLabels"], current["probabilities"]):
         fpr, tpr, thresholds = roc_curve(
@@ -347,7 +352,7 @@ def classify(
         ]
     )
 
-    trackResults.submit(runID.result(), current)
+    trackResults.submit(runID.result(), current, config)
 
     results[runNumber] = current
 
@@ -408,10 +413,13 @@ def classify(
             model.__class__.__name__,
             current,
             holdout=True,
+            config=config,
         )
         gc.collect()
 
-    trackVisualizations(runID.result(), plotSubtitle, model.__class__.__name__, current)
+    trackVisualizations(
+        runID.result(), plotSubtitle, model.__class__.__name__, current, config=config
+    )
 
     results[runNumber]["testCount"] = len(trainIDs)
     results[runNumber]["trainCount"] = len(testIDs)
@@ -430,6 +438,7 @@ def bootstrap(
     hyperParameterSpace,
     innerCvIterator,
     outerCvIterator,
+    config,
 ):
     gc.collect()
     results = {}
@@ -455,6 +464,7 @@ def bootstrap(
             innerCvIterator,
             outerCvIterator,
             results,
+            config,
         )
         gc.collect()
 
@@ -462,7 +472,7 @@ def bootstrap(
 
 
 @task()
-def download_file(run_id, field="sampleResults", extension="csv"):
+def download_file(run_id, field="sampleResults", extension="csv", config=config):
     path = f"./{field}/{run_id}.{extension}"
     if not os.path.exists(field):
         os.makedirs(field, exist_ok=True)
@@ -504,7 +514,7 @@ def load_fold_dataframe(args):
 
 
 @flow(task_runner=RayTaskRunner())
-async def runMLstack():
+async def runMLstack(config=config):
     (
         caseGenotypes,
         caseIDs,
@@ -515,7 +525,7 @@ async def runMLstack():
         holdoutControlGenotypes,
         holdoutControlIDs,
         clinicalData,
-    ) = await processInputFiles()
+    ) = await processInputFiles(config)
     outerCvIterator = StratifiedKFold(
         n_splits=config["sampling"]["crossValIterations"], shuffle=False
     )
@@ -537,8 +547,9 @@ async def runMLstack():
             hyperParameterSpace,
             innerCvIterator,
             outerCvIterator,
+            config,
         )
-        for model, hyperParameterSpace in list(config["model"]["stack"].items())
+        for model, hyperParameterSpace in list(modelStack.items())
     ]
 
     # results = []
@@ -566,10 +577,10 @@ async def runMLstack():
         #     ("testLabels", runID) for runID in pastRuns["sys/id"].unique()
         # ]
         # for runID in pastRuns["sys/id"].unique():
-        #     download_file(runID, "testLabels", "csv")
-        #     download_file(runID, "sampleResults", "csv")
-        #     download_file(runID, "featureImportance/modelCoefficients", "csv")
-        #     download_file(runID, "featureImportance/shapelyExplanations/average", "csv")
+        #     download_file(runID, "testLabels", "csv", config)
+        #     download_file(runID, "sampleResults", "csv", config)
+        #     download_file(runID, "featureImportance/modelCoefficients", "csv", config)
+        #     download_file(runID, "featureImportance/shapelyExplanations/average", "csv", config)
         if config["tracking"]["remote"]:
             # get bootstrap runs for model
             # currentRuns = pastRuns.loc[
@@ -649,7 +660,7 @@ async def runMLstack():
             # )  # TODO automatically determine last iteration by max
             if results == None:
                 results = {}
-            for i, model in enumerate(config["model"]["stack"]):
+            for i, model in enumerate(modelStack):
                 modelName = model.__class__.__name__
                 if i not in results:
                     results[i] = {}
@@ -705,14 +716,16 @@ async def runMLstack():
                                     index_col="id",
                                 )
                                 if "holdoutIDs" in results[i][j]:
-                                    results[i][j]["holdoutProbabilities"] = results[i][
-                                        j
-                                    ]["probabilities"].loc[
-                                        np.ravel(results[i][j]["holdoutIDs"])
-                                    ]
-                                    results[i][j]["probabilities"] = results[i][j][
-                                        "probabilities"
-                                    ].loc[np.ravel(results[i][j]["testIDs"])]
+                                    results[i][j]["holdoutProbabilities"] = (
+                                        results[i][j]["probabilities"]
+                                        .loc[np.ravel(results[i][j]["holdoutIDs"])]
+                                        .tolist()
+                                    )
+                                    results[i][j]["probabilities"] = (
+                                        results[i][j]["probabilities"]
+                                        .loc[np.ravel(results[i][j]["testIDs"])]
+                                        .tolist()
+                                    )
                                 else:
                                     results[i][j]["holdoutProbabilities"] = []
                             elif "featureImportance" in fileName:
@@ -814,20 +827,33 @@ async def runMLstack():
                                         np.where(currentIDs == sampleID)
                                     ]
 
-            modelResult = results[i]
-
-            for sampleID in modelResult["samples"].keys():
-                flattenedProbabilities = np.array(
+    for i in range(len(modelStack)):
+        modelResult = results[i]
+        modelName = modelResult["model"]
+        for sampleID in modelResult["samples"].keys():
+            flattenedProbabilities = np.array(
+                [
+                    prediction[1] if len(prediction.shape) >= 2 else prediction
+                    for prediction in modelResult["samples"][sampleID]
+                ]
+            )
+            if sampleID not in sampleResults:
+                # label, probability, accuracy
+                sampleResults[sampleID] = [
+                    modelResult["labels"][sampleID],
+                    modelResult["samples"][sampleID],
+                    np.mean(
+                        [
+                            np.around(probability) == modelResult["labels"][sampleID]
+                            for probability in flattenedProbabilities
+                        ]
+                    ),
+                ]
+            else:
+                sampleResults[sampleID][1].extend(modelResult["samples"][sampleID])
+                sampleResults[sampleID][2] = np.mean(
                     [
-                        prediction[1] if len(prediction.shape) >= 2 else prediction
-                        for prediction in modelResult["samples"][sampleID]
-                    ]
-                )
-                if sampleID not in sampleResults:
-                    # label, probability, accuracy
-                    sampleResults[sampleID] = [
-                        modelResult["labels"][sampleID],
-                        modelResult["samples"][sampleID],
+                        sampleResults[sampleID][2],
                         np.mean(
                             [
                                 np.around(probability)
@@ -836,165 +862,124 @@ async def runMLstack():
                             ]
                         ),
                     ]
-                else:
-                    sampleResults[sampleID][1] = np.hstack(
-                        [sampleResults[sampleID][1], modelResult["samples"][sampleID]]
-                    )
-                    sampleResults[sampleID][2] = np.mean(
-                        [
-                            sampleResults[sampleID][2],
-                            np.mean(
-                                [
-                                    np.around(probability)
-                                    == modelResult["labels"][sampleID]
-                                    for probability in flattenedProbabilities
-                                ]
-                            ),
-                        ]
-                    )
-
-            if modelName not in testLabelsProbabilitiesByModelName:
-                testLabelsProbabilitiesByModelName[modelName] = [[], []]
-            if modelName not in holdoutLabelsProbabilitiesByModelName:
-                holdoutLabelsProbabilitiesByModelName[modelName] = [[], []]
-            if modelName not in tprFprAucByInstance:
-                tprFprAucByInstance[modelName] = [[], [], 0]
-            if modelName not in holdoutTprFprAucByInstance:
-                holdoutTprFprAucByInstance[modelName] = [[], [], 0]
-            globalExplanationsList = []
-            for j in range(config["sampling"]["bootstrapIterations"]):
-                bootstrapResult = modelResult[j]
-                # append labels
-                testLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
-                    (
-                        testLabelsProbabilitiesByModelName[modelName][0],
-                        *[foldLabel for foldLabel in bootstrapResult["testLabels"]],
-                    )
-                )
-                holdoutLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
-                    (
-                        holdoutLabelsProbabilitiesByModelName[modelName][0],
-                        *[foldLabel for foldLabel in bootstrapResult["holdoutLabels"]],
-                    )
-                )
-                # append probabilities
-                testLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
-                    [
-                        testLabelsProbabilitiesByModelName[modelName][1],
-                        bootstrapResult["probabilities"]["probability"].to_numpy()[:1]
-                        if len(
-                            bootstrapResult["probabilities"]
-                            .iloc[0]["probability"]
-                            .shape
-                        )
-                        >= 1
-                        and isinstance(bootstrapResult["probabilities"], pd.DataFrame)
-                        else bootstrapResult["probabilities"]["probability"].to_numpy()
-                        if isinstance(bootstrapResult["probabilities"], pd.DataFrame)
-                        else np.concatenate(bootstrapResult["probabilities"]),
-                    ]
-                )
-                holdoutLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
-                    [
-                        holdoutLabelsProbabilitiesByModelName[modelName][1],
-                        bootstrapResult["holdoutProbabilities"][
-                            "probability"
-                        ].to_numpy()[:1]
-                        if len(
-                            bootstrapResult["holdoutProbabilities"]
-                            .iloc[0]["probability"]
-                            .shape
-                        )
-                        >= 1
-                        and isinstance(
-                            bootstrapResult["holdoutProbabilities"], pd.DataFrame
-                        )
-                        else bootstrapResult["holdoutProbabilities"][
-                            "probability"
-                        ].to_numpy()
-                        if isinstance(
-                            bootstrapResult["holdoutProbabilities"], pd.DataFrame
-                        )
-                        else np.concatenate(bootstrapResult["holdoutProbabilities"]),
-                    ]
                 )
 
-                if j == 0:
-                    tprFprAucByInstance[modelName][0] = [
-                        bootstrapResult["averageTestTPR"]
-                    ]
-                    tprFprAucByInstance[modelName][2] = [
-                        bootstrapResult["averageTestAUC"]
-                    ]
-                    if "averageHoldoutAUC" in bootstrapResult:
-                        holdoutTprFprAucByInstance[modelName][0] = [
-                            bootstrapResult["averageHoldoutTPR"]
-                        ]
-                        holdoutTprFprAucByInstance[modelName][2] = [
-                            bootstrapResult["averageHoldoutAUC"]
-                        ]
-                else:
-                    tprFprAucByInstance[modelName][0].append(
-                        bootstrapResult["averageTestTPR"]
-                    )
-                    tprFprAucByInstance[modelName][2].append(
-                        bootstrapResult["averageTestAUC"]
-                    )
-                    if "averageHoldoutAUC" in bootstrapResult:
-                        holdoutTprFprAucByInstance[modelName][0].append(
-                            bootstrapResult["averageHoldoutTPR"]
-                        )
-                        holdoutTprFprAucByInstance[modelName][2].append(
-                            bootstrapResult["averageHoldoutAUC"]
-                        )
-                # Calculate mean over bootstraps (axis=0) for each TPR value
-                tprFprAucByInstance[modelName][0] = np.mean(
-                    tprFprAucByInstance[modelName][0], axis=0
+        if modelName not in testLabelsProbabilitiesByModelName:
+            testLabelsProbabilitiesByModelName[modelName] = [[], []]
+        if modelName not in holdoutLabelsProbabilitiesByModelName:
+            holdoutLabelsProbabilitiesByModelName[modelName] = [[], []]
+        if modelName not in tprFprAucByInstance:
+            tprFprAucByInstance[modelName] = [[], [], 0]
+        if modelName not in holdoutTprFprAucByInstance:
+            holdoutTprFprAucByInstance[modelName] = [[], [], 0]
+        globalExplanationsList = []
+        for j in range(config["sampling"]["bootstrapIterations"]):
+            bootstrapResult = modelResult[j]
+            # append labels
+            testLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
+                (
+                    testLabelsProbabilitiesByModelName[modelName][0],
+                    *[foldLabel for foldLabel in bootstrapResult["testLabels"][j]],
                 )
-                # Same for AUC
-                tprFprAucByInstance[modelName][2] = np.mean(
-                    tprFprAucByInstance[modelName][2], axis=0
+            )
+            holdoutLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
+                (
+                    holdoutLabelsProbabilitiesByModelName[modelName][0],
+                    *[foldLabel for foldLabel in bootstrapResult["holdoutLabels"][j]],
+                )
+            )
+            # append probabilities
+            testLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
+                [
+                    testLabelsProbabilitiesByModelName[modelName][1],
+                    np.array(bootstrapResult["probabilities"][j])[:, 1]
+                    if len(bootstrapResult["probabilities"][j][0].shape) >= 1
+                    else np.concatenate(bootstrapResult["probabilities"][j]),
+                ]
+            )
+            holdoutLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
+                [
+                    holdoutLabelsProbabilitiesByModelName[modelName][1],
+                    np.array(bootstrapResult["holdoutProbabilities"][j])[:, 1]
+                    if len(bootstrapResult["holdoutProbabilities"][j][0].shape) >= 1
+                    else np.concatenate(bootstrapResult["holdoutProbabilities"][j]),
+                ]
+            )
+
+            if j == 0:
+                tprFprAucByInstance[modelName][0] = [bootstrapResult["averageTestTPR"]]
+                tprFprAucByInstance[modelName][1] = bootstrapResult["testFPR"]
+                tprFprAucByInstance[modelName][2] = [bootstrapResult["averageTestAUC"]]
+                if "averageHoldoutAUC" in bootstrapResult:
+                    holdoutTprFprAucByInstance[modelName][0] = [
+                        bootstrapResult["averageHoldoutTPR"]
+                    ]
+                    holdoutTprFprAucByInstance[modelName][1] = bootstrapResult[
+                        "holdoutFPR"
+                    ]
+
+                    holdoutTprFprAucByInstance[modelName][2] = [
+                        bootstrapResult["averageHoldoutAUC"]
+                    ]
+            else:
+                tprFprAucByInstance[modelName][0].append(
+                    bootstrapResult["averageTestTPR"]
+                )
+                tprFprAucByInstance[modelName][2].append(
+                    bootstrapResult["averageTestAUC"]
                 )
                 if "averageHoldoutAUC" in bootstrapResult:
-                    holdoutTprFprAucByInstance[modelName][0] = np.mean(
-                        holdoutTprFprAucByInstance[modelName][0], axis=0
+                    holdoutTprFprAucByInstance[modelName][0].append(
+                        bootstrapResult["averageHoldoutTPR"]
                     )
-                    holdoutTprFprAucByInstance[modelName][2] = np.mean(
-                        holdoutTprFprAucByInstance[modelName][2], axis=0
+                    holdoutTprFprAucByInstance[modelName][2].append(
+                        bootstrapResult["averageHoldoutAUC"]
                     )
-
-                if "globalExplanations" not in bootstrapResult or not isinstance(
-                    bootstrapResult["globalExplanations"][0], pd.DataFrame
-                ):
-                    continue
-                variantCount = bootstrapResult["globalExplanations"][0].shape[0]
-                assert lastVariantCount == variantCount or lastVariantCount == 0
-                lastVariantCount = variantCount
-
-                globalExplanationsList += bootstrapResult["globalExplanations"]
-
-            if globalExplanationsList:
-                averageGlobalExplanationsDataFrame = (
-                    pd.concat(globalExplanationsList)
-                    .reset_index()
-                    .groupby("feature_name")
-                    .mean()
+            # Calculate mean over bootstraps (axis=0) for each TPR value
+            tprFprAucByInstance[modelName][0] = np.mean(
+                tprFprAucByInstance[modelName][0], axis=0
+            )
+            # Same for AUC
+            tprFprAucByInstance[modelName][2] = np.mean(
+                tprFprAucByInstance[modelName][2], axis=0
+            )
+            if "averageHoldoutAUC" in bootstrapResult:
+                holdoutTprFprAucByInstance[modelName][0] = np.mean(
+                    holdoutTprFprAucByInstance[modelName][0], axis=0
                 )
-                if config["tracking"]["remote"]:
-                    projectTracker[f"averageModelCoefficients/{modelName}"].upload(
-                        serializeDataFrame(averageGlobalExplanationsDataFrame)
-                    )
-                else:
-                    os.makedirs(
-                        f"projects/{config['tracking']['project']}/averageModelCoefficients/",
-                        exist_ok=True,
-                    )
-                    averageGlobalExplanationsDataFrame.to_csv(
-                        f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
-                    )
+                holdoutTprFprAucByInstance[modelName][2] = np.mean(
+                    holdoutTprFprAucByInstance[modelName][2], axis=0
+                )
 
-    for i in range(len(config["model"]["stack"])):
-        modelResult = results[i]
+            if "globalExplanations" not in bootstrapResult or not isinstance(
+                bootstrapResult["globalExplanations"][0], pd.DataFrame
+            ):
+                continue
+            variantCount = bootstrapResult["globalExplanations"][0].shape[0]
+            assert lastVariantCount == variantCount or lastVariantCount == 0
+            lastVariantCount = variantCount
+
+            globalExplanationsList += bootstrapResult["globalExplanations"]
+
+        if globalExplanationsList:
+            averageGlobalExplanationsDataFrame = (
+                pd.concat(globalExplanationsList)
+                .reset_index()
+                .groupby("feature_name")
+                .mean()
+            )
+            if config["tracking"]["remote"]:
+                projectTracker[f"averageModelCoefficients/{modelName}"].upload(
+                    serializeDataFrame(averageGlobalExplanationsDataFrame)
+                )
+            else:
+                os.makedirs(
+                    f"projects/{config['tracking']['project']}/averageModelCoefficients/",
+                    exist_ok=True,
+                )
+                averageGlobalExplanationsDataFrame.to_csv(
+                    f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
+                )
         for j in range(config["sampling"]["bootstrapIterations"]):
             if config["model"]["calculateShapelyExplanations"]:
                 averageShapelyExplanationsDataFrame = (
@@ -1050,9 +1035,10 @@ async def runMLstack():
     sampleResultsDataFrame = pd.DataFrame.from_dict(
         sampleResults, orient="index", columns=["label", "probability", "accuracy"]
     )
+    sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
+        "probability"
+    ].map(lambda x: np.mean(np.array(x)[:, 1]))
     sampleResultsDataFrame.index.name = "id"
-
-    results["sampleResultsDataframe"] = sampleResultsDataFrame
 
     if config["tracking"]["remote"]:
         projectTracker["sampleResults"].upload(
@@ -1066,18 +1052,20 @@ async def runMLstack():
             f"projects/{config['tracking']['project']}/sampleResults.csv"
         )
 
-    seenCases = [id for id in sampleResultsDataFrame.index if id in caseIDs]
-    seenControls = [id for id in sampleResultsDataFrame.index if id in controlIDs]
+    seenCases = [
+        id for id in sampleResultsDataFrame.index if id in caseGenotypes.columns
+    ]
+    seenControls = [
+        id for id in sampleResultsDataFrame.index if id in controlGenotypes.columns
+    ]
     seenHoldoutCases = [
-        id for id in sampleResultsDataFrame.index if id in holdoutCaseIDs
+        id for id in sampleResultsDataFrame.index if id in holdoutCaseGenotypes.columns
     ]
     seenHoldoutControls = [
-        id for id in sampleResultsDataFrame.index if id in holdoutControlIDs
+        id
+        for id in sampleResultsDataFrame.index
+        if id in holdoutControlGenotypes.columns
     ]
-    results["seenCases"] = seenCases
-    results["seenControls"] = seenControls
-    results["seenHoldoutCases"] = seenHoldoutCases
-    results["seenHoldoutControls"] = seenHoldoutControls
 
     caseAccuracy = sampleResultsDataFrame.loc[
         ~sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
@@ -1129,12 +1117,12 @@ async def runMLstack():
     )
 
     plotSubtitle = f"""
-    {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-    {config["tracking"]["name"]}, {variantCount} variants
-    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+        {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+        {config["tracking"]["name"]}, {variantCount} variants
+        Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    {len(seenCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(seenControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
-    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
+        {len(seenCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(seenControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
+        {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
     accuracyHistogram = px.histogram(
         sampleResultsDataFrame.loc[
@@ -1148,26 +1136,39 @@ async def runMLstack():
         range_x=[0, 1],
         title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
+    probabilityHistogram = px.histogram(
+        sampleResultsDataFrame.loc[
+            ~sampleResultsDataFrame.index.isin(
+                [*seenHoldoutCases, *seenHoldoutControls]
+            )
+        ],
+        x="meanProbability",
+        color="label",
+        title=f"""Mean sample probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
+    )
     aucPlot = plotAUC(
         f"""
-            Receiver Operating Characteristic (ROC) Curve
+        Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
         tprFprAucByInstance=tprFprAucByInstance,
+        config=config,
     )
     calibrationPlot = plotCalibration(
         f"""
-            Calibration Curve
+        Calibration Curve
             {plotSubtitle}
             """,
         testLabelsProbabilitiesByModelName,
+        config=config,
     )
     confusionMatrixInstanceList, averageConfusionMatrix = plotConfusionMatrix(
         f"""
-            Confusion Matrix
+        Confusion Matrix
             {plotSubtitle}
             """,
         testLabelsProbabilitiesByModelName,
+        config=config,
     )
     if config["model"]["hyperparameterOptimization"]:
         convergencePlot = plotOptimizer(
@@ -1182,19 +1183,19 @@ async def runMLstack():
                     for foldOptimizer in results[i][j]["fittedOptimizer"]
                     for result in foldOptimizer.optimizer_results_
                 ]
-                for i, modelName in enumerate(config["model"]["stack"])
+                for i, modelName in enumerate(modelStack)
             },
         )
 
     if bootstrapHoldoutCount > 0:
         holdoutPlotSubtitle = f"""
-        {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-        {config["tracking"]["name"]}, {variantCount} variants
-        Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+            {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+            {config["tracking"]["name"]}, {variantCount} variants
+            Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-        Ethnically variable holdout
-        {len(seenHoldoutCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(seenHoldoutControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
-        {bootstrapHoldoutCount} ethnically-matched samples"""
+            Ethnically variable holdout
+            {len(seenHoldoutCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(seenHoldoutControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
+            {bootstrapHoldoutCount} ethnically-matched samples"""
 
         holdoutAccuracyHistogram = px.histogram(
             sampleResultsDataFrame.loc[
@@ -1206,35 +1207,49 @@ async def runMLstack():
             color="label",
             pattern_shape="label",
             range_x=[0, 1],
-            title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
+            title=f"""Mean holdout accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
+        )
+        holdoutProbabilityHistogram = px.histogram(
+            sampleResultsDataFrame.loc[
+                sampleResultsDataFrame.index.isin(
+                    [*seenHoldoutCases, *seenHoldoutControls]
+                )
+            ],
+            x="meanProbability",
+            color="label",
+            title=f"""Mean holdout probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
         )
         holdoutAucPlot = plotAUC(
             f"""
-                Receiver Operating Characteristic (ROC) Curve
+            Receiver Operating Characteristic (ROC) Curve
                 {holdoutPlotSubtitle}
                 """,
             tprFprAucByInstance=holdoutTprFprAucByInstance,
+            config=config,
         )
         holdoutCalibrationPlot = plotCalibration(
             f"""
-                Calibration Curve
+            Calibration Curve
                 {holdoutPlotSubtitle}
                 """,
             holdoutLabelsProbabilitiesByModelName,
+            config=config,
         )
         (
             holdoutConfusionMatrixInstanceList,
             averageHoldoutConfusionMatrix,
         ) = plotConfusionMatrix(
             f"""
-                Confusion Matrix
+            Confusion Matrix
                 {plotSubtitle}
                 """,
             holdoutLabelsProbabilitiesByModelName,
+            config=config,
         )
 
     if config["tracking"]["remote"]:
         projectTracker["sampleAccuracyPlot"].upload(accuracyHistogram)
+        projectTracker["sampleProbabilityPlot"].upload(probabilityHistogram)
         projectTracker["aucPlot"].upload(aucPlot)
         for name, confusionMatrix in zip(
             list(testLabelsProbabilitiesByModelName.keys()), confusionMatrixInstanceList
@@ -1250,6 +1265,9 @@ async def runMLstack():
 
         if bootstrapHoldoutCount > 0:
             projectTracker["sampleAccuracyPlotHoldout"].upload(holdoutAccuracyHistogram)
+            projectTracker["sampleProbabilityPlotHoldout"].upload(
+                holdoutProbabilityHistogram
+            )
             projectTracker["aucPlotHoldout"].upload(holdoutAucPlot)
             for i, confusionMatrix in enumerate(holdoutConfusionMatrixInstanceList):
                 projectTracker[f"confusionMatrixHoldout/{i+1}"].upload(confusionMatrix)
@@ -1265,6 +1283,9 @@ async def runMLstack():
         accuracyHistogram.write_html(
             f"projects/{config['tracking']['project']}/accuracyPlot.html"
         )
+        probabilityHistogram.write_html(
+            f"projects/{config['tracking']['project']}/probabilityPlot.html"
+        )
         aucPlot.savefig(
             f"projects/{config['tracking']['project']}/aucPlot.svg", bbox_inches="tight"
         )
@@ -1279,7 +1300,7 @@ async def runMLstack():
             list(testLabelsProbabilitiesByModelName.keys()), confusionMatrixInstanceList
         ):
             confusionMatrix.savefig(
-                f"confusionMatrixPath/{name}.svg",
+                f"{confusionMatrixPath}/{name}.svg",
                 bbox_inches="tight",
             )
         averageConfusionMatrix.savefig(
@@ -1313,6 +1334,9 @@ async def runMLstack():
             holdoutAccuracyHistogram.write_html(
                 f"projects/{config['tracking']['project']}/holdoutAccuracyPlot.html"
             )
+            holdoutProbabilityHistogram.write_html(
+                f"projects/{config['tracking']['project']}/holdoutProbabilityPlot.html"
+            )
             holdoutAucPlot.savefig(
                 f"projects/{config['tracking']['project']}/holdoutAucPlot.svg",
                 bbox_inches="tight",
@@ -1338,7 +1362,7 @@ async def runMLstack():
                 holdoutConfusionMatrixInstanceList,
             ):
                 confusionMatrix.savefig(
-                    f"confusionMatrixPath/{name}.svg", bbox_inches="tight"
+                    f"{confusionMatrixPath}/{name}.svg", bbox_inches="tight"
                 )
             averageHoldoutConfusionMatrix.savefig(
                 f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.svg",

@@ -1,19 +1,4 @@
-from sklearn.ensemble import (
-    AdaBoostClassifier,
-    RandomForestClassifier,
-)
-from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.svm import LinearSVC, SVC
-from xgboost import XGBClassifier
-from pytorch_tabnet.tab_model import TabNetClassifier
-
-from skopt.space import Categorical, Integer, Real
-
 from env import neptune_api_token
-
-RadialBasisSVC = SVC
-RadialBasisSVC.__name__ = "RadialBasisSVC"
 
 
 config = {
@@ -34,9 +19,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "Nucleoporin genes, cases >= 97.5% accuracy",  # name of the experiment
+        "name": "Nucleoporin genes",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPS-60-accurateCases",
+        "project": "ALS-NUPS-60",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "token": neptune_api_token,
         "remote": False,  # if True, log to Neptune
@@ -49,7 +34,7 @@ config = {
         "controlLabels": [
             "Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
-        "caseLabels": [],  # "ALS Spectrum MND"
+        "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
         "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
@@ -57,69 +42,49 @@ config = {
     "externalTables": {
         "path": [
             "../notebook/igsr-1000 genomes phase 3 release.tsv",
-            "../notebook/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
+            # "../notebook/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
             "../notebook/ACWM_ethnicallyVariable.tsv",
             "../notebook/ACWM_ethnicallyVariable.tsv",
             "../notebook/igsr-1000 genomes phase 3 release.tsv",
         ],  # external sample table
         "label": [
             "control",
-            "case",
+            # "case",
             "case",
             "control",
             "control",
-        ],  # case | control | TODO mixed
-        "setType": ["crossval", "crossval", "holdout", "holdout", "holdout"],
+        ],  # case | control
+        "setType": [
+            "crossval",
+            # "crossval",
+            "holdout",
+            "holdout",
+            "holdout",
+        ],
         "idColumn": [
             "Sample name",
-            "id",
+            # "id",
             "ExternalSubjectId",
             "ExternalSubjectId",
             "Sample name",
         ],  # sample ID header
         "filters": [
             "`Superpopulation code`=='EUR' & `Population name`!='Finnish'",  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
-            "`testLabel`==1",
+            # "`testLabel`==1",
             "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
             "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
             "`Superpopulation code`!='EUR' & `Population name`!='Finnish'",
         ],
     },
     "sampling": {
-        "bootstrapIterations": 30,
-        "crossValIterations": 10,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 1,
+        "crossValIterations": 2,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
+        "sequesteredIDs": [],
     },
     "model": {
-        "stack": {
-            LinearSVC(): {
-                "tol": Real(1e-6, 1e1, prior="log-uniform"),
-                "C": Real(1e-4, 1e1, prior="log-uniform"),
-            },
-            RadialBasisSVC(probability=True, kernel="rbf"): {
-                "tol": Real(1e-4, 1e1, prior="log-uniform"),
-                "C": Real(1e-4, 1e1, prior="log-uniform"),
-                "gamma": Categorical(["scale", "auto"]),
-            },
-            LogisticRegression(penalty="l2", solver="saga"): {
-                "tol": Real(1e-6, 1e1, prior="log-uniform"),
-                "C": Real(1e-4, 1e1, prior="log-uniform"),
-            },
-            MultinomialNB(): {"alpha": Real(1e-10, 1e1, prior="log-uniform")},
-            AdaBoostClassifier(): {
-                "n_estimators": Integer(25, 75),
-                "learning_rate": Real(1e-6, 1e1, prior="log-uniform"),
-            },
-            XGBClassifier(): {  # single thread to avoid memory issues (segfaults) in multiprocessing
-                "learning_rate": Real(1e-6, 1e1, prior="log-uniform"),
-                "n_estimators": Integer(10, 100),
-            },
-            RandomForestClassifier(): {
-                "n_estimators": Integer(75, 200),
-            },
-        },
-        "hyperparameterOptimization": True,
-        "calculateShapelyExplanations": True,
+        "hyperparameterOptimization": False,
+        "calculateShapelyExplanations": False,
     },
 }

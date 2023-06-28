@@ -21,7 +21,7 @@ from config import config
 matplotlib.use("agg")
 
 
-def plotCalibration(title, labelsPredictionsByInstance):
+def plotCalibration(title, labelsPredictionsByInstance, config):
     # code from https://scikit-learn.org/stable/auto_examples/calibration/plot_calibration_curve.html
     fig, ax_calibration_curve = plt.subplots(figsize=(10, 10))
     colors = plt.cm.get_cmap("Dark2")
@@ -65,7 +65,9 @@ def plotCalibration(title, labelsPredictionsByInstance):
     return fig
 
 
-def plotAUC(title, labelsPredictionsByInstance=None, tprFprAucByInstance=None):
+def plotAUC(
+    title, labelsPredictionsByInstance=None, tprFprAucByInstance=None, config=config
+):
     # trace AUC for each set of predictions
     tprs = []
     aucs = []
@@ -96,7 +98,15 @@ def plotAUC(title, labelsPredictionsByInstance=None, tprFprAucByInstance=None):
     elif tprFprAucByInstance is not None:
         for name, (tprList, fprList, aucScore) in tprFprAucByInstance.items():
             viz = RocCurveDisplay(
-                tpr=tprList, fpr=fprList, roc_auc=aucScore, estimator_name=name
+                tpr=tprList,
+                fpr=fprList,
+                roc_auc=aucScore,
+                estimator_name=name,
+            )
+            viz.plot(
+                alpha=0.6,
+                lw=2,
+                ax=ax,
             )
             interp_tpr = np.interp(mean_fpr, viz.fpr, viz.tpr)
             interp_tpr[0] = 0.0
@@ -136,7 +146,7 @@ def plotAUC(title, labelsPredictionsByInstance=None, tprFprAucByInstance=None):
     return fig
 
 
-def plotConfusionMatrix(title, labelsPredictionsByInstance):
+def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
     all_labels = []
     all_predictions = []
     matrix_figures = []
@@ -191,9 +201,6 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance):
         include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
     )
 
-    # Set color limits
-    cm_display.im_.set_clim(vmin=0, vmax=1)  # These are in proportion, not percentage
-
     # List normalized proportions as percentages
     for i in range(avg_matrix.shape[0]):
         for j in range(avg_matrix.shape[1]):
@@ -247,7 +254,9 @@ def plotOptimizer(title, resultsByInstance):
     return fig
 
 
-def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
+def plotSample(
+    j, k, runID, modelName, plotSubtitle, current, holdout=False, config=config
+):
     import matplotlib.pyplot as plt
     import shap
 
@@ -325,7 +334,9 @@ def plotSample(j, k, runID, modelName, plotSubtitle, current, holdout=False):
             )
 
 
-def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
+def trackVisualizations(
+    runID, plotSubtitle, modelName, current, holdout=False, config=config
+):
     aucName = "aucPlot" if not holdout else "aucPlotHoldout"
     probabilities = (
         current["probabilities"] if not holdout else current["holdoutProbabilities"]
@@ -356,6 +367,7 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
             {plotSubtitle}
             """,
         labelsProbabilitiesByFold,
+        config=config,
     )
     confusionMatrixName = "confusionMatrix" if not holdout else "confusionMatrixHoldout"
     confusionMatrixList, avgConfusionMatrix = plotConfusionMatrix(
@@ -365,6 +377,7 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
             {plotSubtitle}
             """,
         labelsPredictionsByFold,
+        config=config,
     )
     calibrationName = "calibrationPlot" if not holdout else "calibrationPlotHoldout"
     calibrationPlot = plotCalibration(
@@ -374,6 +387,7 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
             {plotSubtitle}
             """,
         labelsProbabilitiesByFold,
+        config=config,
     )
     if config["model"]["hyperparameterOptimization"] and not holdout:
         optimizerPlotName = "convergencePlot"
@@ -399,7 +413,9 @@ def trackVisualizations(runID, plotSubtitle, modelName, current, holdout=False):
         args = []
         for j in range(config["sampling"]["crossValIterations"]):
             for k in range(len(ids[j])):
-                args.append((j, k, runID, modelName, plotSubtitle, current, holdout))
+                args.append(
+                    (j, k, runID, modelName, plotSubtitle, current, holdout, config)
+                )
 
         for arg in args:
             plotSample(*arg)
