@@ -173,7 +173,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
         ax.set_title(
             f"""
                 {title}
-                {name}
+            {name}
                 """,
             fontsize=8,
         )
