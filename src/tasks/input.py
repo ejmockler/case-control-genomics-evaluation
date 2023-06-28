@@ -20,12 +20,16 @@ def filterTable(table, filterString):
 
 
 @task()
-def applyAlleleModel(values, columns, genotypeIDs):
+def applyAlleleModel(values, columns, genotypeIDs, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
     resolvedGenotypeIDs = set()
     for id in tqdm(genotypeIDs, unit="id"):
+        if id in config["sampling"]["sequesteredIDs"]:
+            continue
         for j, column in enumerate(columns):
+            if column in config["sampling"]["sequesteredIDs"]:
+                break
             matched = False
             if column == id:
                 matched = True
@@ -84,7 +88,7 @@ def applyAlleleModel(values, columns, genotypeIDs):
 
 
 @task()
-def load():
+def load(config):
     clinicalData = pd.read_excel(
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
     ).drop_duplicates(subset=config["clinicalTable"]["subjectIdColumn"])
@@ -269,8 +273,8 @@ def prepareDatasets(
 
 
 @flow(task_runner=ConcurrentTaskRunner(), log_prints=True)
-async def processInputFiles():
-    clinicalData, externalSamples, annotatedVCF = load()
+async def processInputFiles(config):
+    clinicalData, externalSamples, annotatedVCF = load(config)
 
     filteredClinicalData = filterTable(clinicalData, config["clinicalTable"]["filters"])
     print(
@@ -303,27 +307,48 @@ async def processInputFiles():
 
     caseIDs = caseIDsMask[caseIDsMask].index.to_numpy()
     controlIDs = controlIDsMask[controlIDsMask].index.to_numpy()
+
     holdoutCaseIDs = np.array([])
     holdoutControlIDs = np.array([])
     for i, label in enumerate(config["externalTables"]["label"]):
         if config["externalTables"]["setType"][i] == "holdout":
             if label == config["clinicalTable"]["caseAlias"]:
                 holdoutCaseIDs = np.append(
-                    holdoutCaseIDs, filteredExternalSamples[i].index.to_numpy()
+                    holdoutCaseIDs,
+                    [
+                        id
+                        for id in filteredExternalSamples[i].index.to_numpy()
+                        if id not in config["sampling"]["sequesteredIDs"]
+                    ],
                 )
             elif label == config["clinicalTable"]["controlAlias"]:
                 holdoutControlIDs = np.append(
-                    holdoutControlIDs, filteredExternalSamples[i].index.to_numpy()
+                    holdoutControlIDs,
+                    [
+                        id
+                        for id in filteredExternalSamples[i].index.to_numpy()
+                        if id not in config["sampling"]["sequesteredIDs"]
+                    ],
                 )
 
         elif config["externalTables"]["setType"][i] == "crossval":
             if label == config["clinicalTable"]["caseAlias"]:
                 caseIDs = np.append(
-                    caseIDs, filteredExternalSamples[i].index.to_numpy()
+                    caseIDs,
+                    [
+                        id
+                        for id in filteredExternalSamples[i].index.to_numpy()
+                        if id not in config["sampling"]["sequesteredIDs"]
+                    ],
                 )
             elif label == config["clinicalTable"]["controlAlias"]:
                 controlIDs = np.append(
-                    controlIDs, filteredExternalSamples[i].index.to_numpy()
+                    controlIDs,
+                    [
+                        id
+                        for id in filteredExternalSamples[i].index.to_numpy()
+                        if id not in config["sampling"]["sequesteredIDs"]
+                    ],
                 )
 
     # cast genotypes as numeric, drop chromosome positions with missing values
@@ -331,6 +356,7 @@ async def processInputFiles():
         unmapped(filteredVCF.to_numpy()),
         unmapped(filteredVCF.columns.to_numpy()),
         genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
+        config=unmapped(config),
     )
 
     caseGenotypeDict, missingCaseIDs, resolvedCaseIDs = caseGenotypeFutures.result()
@@ -350,6 +376,7 @@ async def processInputFiles():
             unmapped(filteredVCF.to_numpy()),
             unmapped(filteredVCF.columns.to_numpy()),
             genotypeIDs=[IDs for IDs in (holdoutCaseIDs, holdoutControlIDs)],
+            config=unmapped(config),
         )
         (
             holdoutCaseGenotypeDict,
