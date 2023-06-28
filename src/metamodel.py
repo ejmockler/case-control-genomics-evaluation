@@ -10,7 +10,7 @@ from sklearn.metrics import log_loss
 
 import ray
 
-from mlStack import remove_all_flows, runMLstack
+from mlStack import remove_all_flows, main as runMLstack
 from metaconfig import metaconfig
 from config import config
 
@@ -56,7 +56,7 @@ def measureIterations(result):
 
 
 @flow(task_runner=RayTaskRunner())
-def splash():
+def main():
     newWellClassified = True
     countSuffix = 0
     projectSummaryPath = f"projects/{config['tracking']['project']}__summary"
@@ -98,8 +98,8 @@ def splash():
         )
         # remove well-classified cases before next iteration
         config["sampling"]["sequesteredIDs"].append(
-            accurateSamples.loc[accurateSamples["label"] == 1]["id"].tolist()
-            + discordantSamples.loc[discordantSamples["label"] == 1]["id"].tolist()
+            accurateSamples.loc[accurateSamples["label"] == 1].index.tolist()
+            + discordantSamples.loc[discordantSamples["label"] == 1].index.tolist()
         )
     os.makedirs(
         projectSummaryPath,
@@ -110,7 +110,7 @@ def splash():
 if __name__ == "__main__":
     # TODO replace notebook code with src imports
     ray.shutdown()
-    splash()
+    main()
     clearHistory = False
     if clearHistory:
         asyncio.run(remove_all_flows())

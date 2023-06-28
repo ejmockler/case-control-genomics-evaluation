@@ -21,7 +21,7 @@ config = {
     "tracking": {
         "name": "Nucleoporin genes",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPS-60",
+        "project": "ALS-NUPS-30",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "token": neptune_api_token,
         "remote": False,  # if True, log to Neptune
@@ -84,7 +84,7 @@ config = {
         "sequesteredIDs": [],
     },
     "model": {
-        "hyperparameterOptimization": False,
+        "hyperparameterOptimization": True,
         "calculateShapelyExplanations": False,
     },
 }

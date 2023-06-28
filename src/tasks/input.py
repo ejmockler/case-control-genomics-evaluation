@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import os
 
-from multiprocess import Pool, Manager
+from multiprocess import Pool, Manager, managers
 
 
 @task()
@@ -395,6 +395,10 @@ async def processInputFiles(config):
         "holdout cases": missingHoldoutCaseIDs,
         "holdout controls": missingHoldoutControlIDs,
     }.items():
+        sequesteredIDs = set(config["sampling"]["sequesteredIDs"]).intersection(
+            set(IDs)
+        )
+        IDs = set(IDs) - sequesteredIDs
         if len(IDs) > 0:
             if "holdout" not in alias:
                 print(
@@ -402,6 +406,13 @@ async def processInputFiles(config):
                 )
             elif "holdout" in alias:
                 print(f"\nmissing {len(IDs)} {alias} IDs:\n {IDs}")
+        if len(sequesteredIDs) > 0:
+            if "holdout" not in alias:
+                print(
+                    f"\nsequestered {len(sequesteredIDs)} {config['clinicalTable'][alias]} IDs:\n {sequesteredIDs}"
+                )
+            elif "holdout" in alias:
+                print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
     caseGenotypes = pd.DataFrame.from_dict(caseGenotypeDict)
     caseGenotypes = caseGenotypes.loc[:, ~caseGenotypes.columns.duplicated()].copy()
@@ -529,7 +540,7 @@ def toMultiprocessDict(orig_dict, manager):
 
 def fromMultiprocessDict(shared_dict):
     orig_dict = {
-        k: fromMultiprocessDict(v) if isinstance(v, Manager().dict) else v
+        k: fromMultiprocessDict(v) if isinstance(v, managers.DictProxy) else v
         for k, v in shared_dict.items()
     }
     return orig_dict

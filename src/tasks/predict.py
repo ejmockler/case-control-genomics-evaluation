@@ -589,10 +589,9 @@ def processSampleResult(fold, j, sampleID, current, results):
         else current["holdoutLabels"][fold][j - len(current["testIDs"][fold])]
     )
 
-    try:
+    if sampleID in results["samples"]:
         results["samples"][sampleID].append(probability)
-    except KeyError:
+    else:
         results["samples"][sampleID] = [probability]
-    finally:
         results["labels"][sampleID] = label
     return results

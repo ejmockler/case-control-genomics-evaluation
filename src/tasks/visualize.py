@@ -45,6 +45,7 @@ def plotCalibration(title, labelsPredictionsByInstance, config):
         calibration_displays[name] = display
 
     ax_calibration_curve.grid()
+    title = "\n".join(line.strip() for line in title.split("\n"))
     ax_calibration_curve.set_title(title)
 
     # Add histogram
@@ -139,6 +140,7 @@ def plotAUC(
         label=r"$\pm$ 1 std. dev.",
     )
 
+    title = "\n".join(line.strip() for line in title.split("\n"))
     ax.set(xlim=[-0.05, 1.05], ylim=[-0.05, 1.05], title=title)
     ax.legend(loc="lower right")
     ax.set(title=title)
@@ -170,13 +172,10 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
         disp.plot(
             include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
         )
-        ax.set_title(
-            f"""
-                {title}
-            {name}
-                """,
-            fontsize=8,
-        )
+
+        title = "\n".join("    " + line.strip() for line in title.split("\n"))
+        ax.set_title(title, fontsize=8)
+
         plt.tight_layout()
         matrix_figures.append(fig)
         plt.close(fig)
@@ -208,13 +207,17 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
             cm_display.text_[i, j].set_text(f"{percentage:.1f}%")  # 1 decimal place
             cm_display.text_[i, j].set_fontsize(7)
 
-    ax.set_title(
-        f"""
-            {title}
-            Average across folds
-            """,
-        fontsize=8,
+    title = "\n".join(
+        "    " + line.strip()
+        for line in f"""
+        {title}
+        Average across folds
+        """.split(
+            "\n"
+        )
     )
+
+    ax.set_title(title, fontsize=8)
     ax.set_xlabel("Predicted label", fontsize=8)
     ax.set_ylabel("True label", fontsize=8)
     ax.tick_params(axis="both", which="major", labelsize=7)
@@ -249,6 +252,7 @@ def plotOptimizer(title, resultsByInstance):
         ax=ax_convergence,
         color=colors,
     )
+    title = "\n".join(line.strip() for line in title.split("\n"))
     ax_convergence.set(title=title)
     plt.tight_layout()
     return fig
@@ -270,14 +274,19 @@ def plotSample(
         else current["holdoutLocalExplanations"][j]
     )
     waterfallPlot = plt.figure()
-    plt.title(
-        f"""
+    title = "\n".join(
+        line.strip()
+        for line in f"""
             {sampleID}
             Shapely explanations from {modelName}
             Fold {j+1}
             {plotSubtitle}
-            """
+            """.split(
+            "\n"
+        )
     )
+
+    plt.title(title)
     # patch parameter bug: https://github.com/slundberg/shap/issues/2362
     to_pass = SimpleNamespace(
         **{

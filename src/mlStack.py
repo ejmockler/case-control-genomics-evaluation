@@ -2,12 +2,14 @@ import asyncio
 from inspect import isclass
 import pickle
 import os
+import multiprocess
 import numpy as np
 import neptune
 import pandas as pd
 import ray
 import plotly.express as px
 import matplotlib
+import faulthandler
 
 matplotlib.use("agg")
 
@@ -17,8 +19,10 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
 
 from tasks.input import (
+    fromMultiprocessDict,
     processInputFiles,
     prepareDatasets,
+    toMultiprocessDict,
 )
 from tasks.predict import (
     beginTracking,
@@ -356,17 +360,6 @@ def classify(
 
     results[runNumber] = current
 
-    args = [
-        (fold, j, sampleID, current, results)
-        for fold in range(config["sampling"]["crossValIterations"])
-        for j, sampleID in enumerate(
-            [*current["testIDs"][fold], *current["holdoutIDs"][fold]]
-        )
-    ]
-    for arg in args:
-        results = processSampleResult(*arg)
-        gc.collect()
-
     # plot AUC & hyperparameter convergence
     plotSubtitle = f"""
         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
@@ -514,7 +507,7 @@ def load_fold_dataframe(args):
 
 
 @flow(task_runner=RayTaskRunner())
-async def runMLstack(config=config):
+async def main(config=config):
     (
         caseGenotypes,
         caseIDs,
@@ -826,10 +819,26 @@ async def runMLstack(config=config):
                                     results[i]["labels"][sampleID] = currentLabels[
                                         np.where(currentIDs == sampleID)
                                     ]
-
+    faulthandler.enable()
     for i in range(len(modelStack)):
         modelResult = results[i]
         modelName = modelResult["model"]
+        for j in range(
+            config["sampling"]["lastIteration"],
+            config["sampling"]["bootstrapIterations"],
+        ):
+            current = results[i][j]
+            sample_result_args = [
+                (fold, k, sampleID, current, modelResult)
+                for fold in range(config["sampling"]["crossValIterations"])
+                for k, sampleID in enumerate(
+                    [*current["testIDs"][fold], *current["holdoutIDs"][fold]]
+                )
+            ]
+            Parallel(n_jobs=-1, backend="threading")(
+                delayed(processSampleResult)(*args) for args in sample_result_args
+            )
+        results[i] = modelResult
         for sampleID in modelResult["samples"].keys():
             flattenedProbabilities = np.array(
                 [
@@ -951,36 +960,6 @@ async def runMLstack(config=config):
                     holdoutTprFprAucByInstance[modelName][2], axis=0
                 )
 
-            if "globalExplanations" not in bootstrapResult or not isinstance(
-                bootstrapResult["globalExplanations"][0], pd.DataFrame
-            ):
-                continue
-            variantCount = bootstrapResult["globalExplanations"][0].shape[0]
-            assert lastVariantCount == variantCount or lastVariantCount == 0
-            lastVariantCount = variantCount
-
-            globalExplanationsList += bootstrapResult["globalExplanations"]
-
-        if globalExplanationsList:
-            averageGlobalExplanationsDataFrame = (
-                pd.concat(globalExplanationsList)
-                .reset_index()
-                .groupby("feature_name")
-                .mean()
-            )
-            if config["tracking"]["remote"]:
-                projectTracker[f"averageModelCoefficients/{modelName}"].upload(
-                    serializeDataFrame(averageGlobalExplanationsDataFrame)
-                )
-            else:
-                os.makedirs(
-                    f"projects/{config['tracking']['project']}/averageModelCoefficients/",
-                    exist_ok=True,
-                )
-                averageGlobalExplanationsDataFrame.to_csv(
-                    f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
-                )
-        for j in range(config["sampling"]["bootstrapIterations"]):
             if config["model"]["calculateShapelyExplanations"]:
                 averageShapelyExplanationsDataFrame = (
                     pd.concat(
@@ -1031,6 +1010,34 @@ async def runMLstack(config=config):
                         averageHoldoutShapelyExplanationsDataFrame.to_csv(
                             f"projects/{config['tracking']['project']}/averageHoldoutShapelyExplanations.csv"
                         )
+            if "globalExplanations" in bootstrapResult and isinstance(
+                bootstrapResult["globalExplanations"][0], pd.DataFrame
+            ):
+                variantCount = bootstrapResult["globalExplanations"][0].shape[0]
+                assert lastVariantCount == variantCount or lastVariantCount == 0
+                lastVariantCount = variantCount
+
+                globalExplanationsList += bootstrapResult["globalExplanations"]
+
+        if globalExplanationsList:
+            averageGlobalExplanationsDataFrame = (
+                pd.concat(globalExplanationsList)
+                .reset_index()
+                .groupby("feature_name")
+                .mean()
+            )
+            if config["tracking"]["remote"]:
+                projectTracker[f"averageModelCoefficients/{modelName}"].upload(
+                    serializeDataFrame(averageGlobalExplanationsDataFrame)
+                )
+            else:
+                os.makedirs(
+                    f"projects/{config['tracking']['project']}/averageModelCoefficients/",
+                    exist_ok=True,
+                )
+                averageGlobalExplanationsDataFrame.to_csv(
+                    f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
+                )
 
     sampleResultsDataFrame = pd.DataFrame.from_dict(
         sampleResults, orient="index", columns=["label", "probability", "accuracy"]
@@ -1068,21 +1075,17 @@ async def runMLstack(config=config):
     ]
 
     caseAccuracy = sampleResultsDataFrame.loc[
-        ~sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
-        & (sampleResultsDataFrame["label"] == 1)
+        sampleResultsDataFrame.index.isin([*seenCases])
     ]["accuracy"].mean()
     controlAccuracy = sampleResultsDataFrame.loc[
-        ~sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
-        & (sampleResultsDataFrame["label"] == 0)
+        sampleResultsDataFrame.index.isin([*seenControls])
     ]["accuracy"].mean()
     holdoutCaseAccuracy = sampleResultsDataFrame.loc[
-        sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
-        & (sampleResultsDataFrame["label"] == 1)
-    ][sampleResultsDataFrame["label"] == 1]["accuracy"].mean()
+        sampleResultsDataFrame.index.isin([*seenHoldoutCases])
+    ]["accuracy"].mean()
     holdoutControlAccuracy = sampleResultsDataFrame.loc[
-        sampleResultsDataFrame.index.isin([*seenHoldoutCases, *seenHoldoutControls])
-        & (sampleResultsDataFrame["label"] == 1)
-    ][sampleResultsDataFrame["label"] == 0]["accuracy"].mean()
+        sampleResultsDataFrame.index.isin([*seenHoldoutControls])
+    ]["accuracy"].mean()
 
     bootstrapTrainCount = int(
         np.around(
@@ -1148,7 +1151,7 @@ async def runMLstack(config=config):
     )
     aucPlot = plotAUC(
         f"""
-        Receiver Operating Characteristic (ROC) Curve
+            Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
         tprFprAucByInstance=tprFprAucByInstance,
@@ -1156,7 +1159,7 @@ async def runMLstack(config=config):
     )
     calibrationPlot = plotCalibration(
         f"""
-        Calibration Curve
+            Calibration Curve
             {plotSubtitle}
             """,
         testLabelsProbabilitiesByModelName,
@@ -1164,7 +1167,7 @@ async def runMLstack(config=config):
     )
     confusionMatrixInstanceList, averageConfusionMatrix = plotConfusionMatrix(
         f"""
-        Confusion Matrix
+            Confusion Matrix
             {plotSubtitle}
             """,
         testLabelsProbabilitiesByModelName,
@@ -1177,13 +1180,13 @@ async def runMLstack(config=config):
                 {plotSubtitle}
                 """,
             {
-                modelName: [
+                model.__class__.__name__: [
                     result
                     for j in range(config["sampling"]["bootstrapIterations"])
                     for foldOptimizer in results[i][j]["fittedOptimizer"]
                     for result in foldOptimizer.optimizer_results_
                 ]
-                for i, modelName in enumerate(modelStack)
+                for i, model in enumerate(modelStack)
             },
         )
 
@@ -1221,7 +1224,7 @@ async def runMLstack(config=config):
         )
         holdoutAucPlot = plotAUC(
             f"""
-            Receiver Operating Characteristic (ROC) Curve
+                Receiver Operating Characteristic (ROC) Curve
                 {holdoutPlotSubtitle}
                 """,
             tprFprAucByInstance=holdoutTprFprAucByInstance,
@@ -1229,7 +1232,7 @@ async def runMLstack(config=config):
         )
         holdoutCalibrationPlot = plotCalibration(
             f"""
-            Calibration Curve
+                Calibration Curve
                 {holdoutPlotSubtitle}
                 """,
             holdoutLabelsProbabilitiesByModelName,
@@ -1240,7 +1243,7 @@ async def runMLstack(config=config):
             averageHoldoutConfusionMatrix,
         ) = plotConfusionMatrix(
             f"""
-            Confusion Matrix
+                Confusion Matrix
                 {plotSubtitle}
                 """,
             holdoutLabelsProbabilitiesByModelName,
@@ -1395,7 +1398,7 @@ if __name__ == "__main__":
     if clearHistory:
         asyncio.run(remove_all_flows())
 
-    results = asyncio.run(runMLstack())
+    results = asyncio.run(main())
     pickle.dump(
         results,
         open(
