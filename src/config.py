@@ -21,7 +21,7 @@ config = {
     "tracking": {
         "name": "Nucleoporin genes",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPS-30",
+        "project": "ALS-NUPS-60",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "token": neptune_api_token,
         "remote": False,  # if True, log to Neptune
@@ -77,8 +77,8 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 1,
-        "crossValIterations": 2,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 60,
+        "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],

@@ -10,8 +10,10 @@ from pytorch_tabnet.tab_model import TabNetClassifier
 
 from skopt.space import Categorical, Integer, Real
 
-RadialBasisSVC = SVC
-RadialBasisSVC.__name__ = "RadialBasisSVC"
+
+class RadialBasisSVC(SVC):
+    pass
+
 
 stack = {
     LinearSVC(): {
