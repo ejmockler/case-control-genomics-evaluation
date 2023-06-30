@@ -63,6 +63,8 @@ def main():
     baseProjectPath = config["tracking"]["project"]
     while newWellClassified:
         countSuffix += 1
+        if countSuffix >= 2:
+            config["sampling"]["lastIteration"] = 0
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
         runMLstack(config)
         currentResults = pd.read_csv(

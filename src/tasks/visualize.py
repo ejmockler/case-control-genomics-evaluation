@@ -6,6 +6,7 @@ from matplotlib import pyplot as plt
 from matplotlib.gridspec import GridSpec
 import neptune
 import numpy as np
+from prefect import task
 from sklearn.calibration import CalibrationDisplay
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
@@ -173,7 +174,15 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
             include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
         )
 
-        title = "\n".join("    " + line.strip() for line in title.split("\n"))
+        title = "\n".join(
+            "    " + line.strip()
+            for line in f"""
+            {title}
+            {name}
+            """.split(
+                "\n"
+            )
+        )
         ax.set_title(title, fontsize=8)
 
         plt.tight_layout()
@@ -343,6 +352,7 @@ def plotSample(
             )
 
 
+@task()
 def trackVisualizations(
     runID, plotSubtitle, modelName, current, holdout=False, config=config
 ):

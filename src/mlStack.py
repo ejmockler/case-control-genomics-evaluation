@@ -356,10 +356,10 @@ def classify(
         ]
     )
 
-    trackResults.submit(runID.result(), current, config)
-
     results[runNumber] = current
-
+    
+    resultsFuture = trackResults.submit(runID.result(), current, config)
+    
     # plot AUC & hyperparameter convergence
     plotSubtitle = f"""
         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
@@ -400,7 +400,7 @@ def classify(
             Ethnically variable holdout
             {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
             {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
-        trackVisualizations(
+        holdoutVisualizationFuture = trackVisualizations.submit(
             runID.result(),
             holdoutPlotSubtitle,
             model.__class__.__name__,
@@ -410,13 +410,19 @@ def classify(
         )
         gc.collect()
 
-    trackVisualizations(
+    visualizationFuture = trackVisualizations.submit(
         runID.result(), plotSubtitle, model.__class__.__name__, current, config=config
     )
 
+    visualizationFuture.wait()
+    if len(current["holdoutLabels"]) > 0:
+        holdoutVisualizationFuture.wait()
+    resultsFuture.wait()
+    
     results[runNumber]["testCount"] = len(trainIDs)
     results[runNumber]["trainCount"] = len(testIDs)
     results[runNumber]["holdoutCount"] = len(holdoutIDs)
+
     return results
 
 
