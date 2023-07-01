@@ -105,11 +105,7 @@ def plotAUC(
                 roc_auc=aucScore,
                 estimator_name=name,
             )
-            viz.plot(
-                alpha=0.6,
-                lw=2,
-                ax=ax,
-            )
+            viz.plot(alpha=0.6, lw=2, ax=ax)
             interp_tpr = np.interp(mean_fpr, viz.fpr, viz.tpr)
             interp_tpr[0] = 0.0
             tprs.append(interp_tpr)
@@ -174,7 +170,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
             include_values=True, cmap="viridis", ax=ax, xticks_rotation="horizontal"
         )
 
-        title = "\n".join(
+        centeredTitle = "\n".join(
             "    " + line.strip()
             for line in f"""
             {title}
@@ -183,7 +179,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
                 "\n"
             )
         )
-        ax.set_title(title, fontsize=8)
+        ax.set_title(centeredTitle, fontsize=8)
 
         plt.tight_layout()
         matrix_figures.append(fig)
@@ -216,7 +212,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
             cm_display.text_[i, j].set_text(f"{percentage:.1f}%")  # 1 decimal place
             cm_display.text_[i, j].set_fontsize(7)
 
-    title = "\n".join(
+    centeredTitle = "\n".join(
         "    " + line.strip()
         for line in f"""
         {title}
@@ -226,7 +222,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
         )
     )
 
-    ax.set_title(title, fontsize=8)
+    ax.set_title(centeredTitle, fontsize=8)
     ax.set_xlabel("Predicted label", fontsize=8)
     ax.set_ylabel("True label", fontsize=8)
     ax.tick_params(axis="both", which="major", labelsize=7)
@@ -333,18 +329,14 @@ def plotSample(
     else:
         runPath = runID
         if not holdout:
-            samplePlotPath = (
-                f"{runPath}/featureImportance/shapelyExplanations/samples/{j+1}"
-            )
+            samplePlotPath = f"{runPath}/plots/samples/{j+1}"
             os.makedirs(samplePlotPath, exist_ok=True)
             waterfallPlot.savefig(
                 f"{samplePlotPath}/{sampleID}.svg",
                 bbox_inches="tight",
             )
         else:
-            samplePlotPath = (
-                f"{runPath}/featureImportance/shapelyExplanations/samples/holdout/{j+1}"
-            )
+            samplePlotPath = f"{runPath}/plots/samples/holdout/{j+1}"
             os.makedirs(samplePlotPath, exist_ok=True)
             waterfallPlot.savefig(
                 f"{samplePlotPath}/{sampleID}.svg",
@@ -466,30 +458,35 @@ def trackVisualizations(
 
     else:  # store plots locally
         runPath = runID
-        aucPlot.savefig(f"{runPath}/{aucName}.svg", bbox_inches="tight")
-        aucPlot.savefig(f"{runPath}/{aucName}.png", bbox_inches="tight")
-        confusionMatrixPath = f"{runPath}/{confusionMatrixName}"
+        os.makedirs(f"{runPath}/plots", exist_ok=True)
+        aucPlot.savefig(f"{runPath}/plots/{aucName}.svg", bbox_inches="tight")
+        aucPlot.savefig(f"{runPath}/plots/{aucName}.png", bbox_inches="tight")
+        confusionMatrixPath = f"{runPath}/plots/{confusionMatrixName}"
         os.makedirs(confusionMatrixPath, exist_ok=True)
         for i, confusionMatrix in enumerate(confusionMatrixList):
             confusionMatrix.savefig(
                 f"{confusionMatrixPath}/{i+1}.svg", bbox_inches="tight"
             )
         avgConfusionMatrix.savefig(
-            f"{runPath}/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.svg",
+            f"{runPath}/plots/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.svg",
             bbox_inches="tight",
         )
         avgConfusionMatrix.savefig(
-            f"{runPath}/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.png",
+            f"{runPath}/plots/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.png",
             bbox_inches="tight",
         )
-        calibrationPlot.savefig(f"{runPath}/{calibrationName}.svg", bbox_inches="tight")
-        calibrationPlot.savefig(f"{runPath}/{calibrationName}.png", bbox_inches="tight")
+        calibrationPlot.savefig(
+            f"{runPath}/plots/{calibrationName}.svg", bbox_inches="tight"
+        )
+        calibrationPlot.savefig(
+            f"{runPath}/plots/{calibrationName}.png", bbox_inches="tight"
+        )
         if config["model"]["hyperparameterOptimization"] and not holdout:
             optimizerPlot.savefig(
-                f"{runPath}/{optimizerPlotName}.svg", bbox_inches="tight"
+                f"{runPath}/plots/{optimizerPlotName}.svg", bbox_inches="tight"
             )
             optimizerPlot.savefig(
-                f"{runPath}/{optimizerPlotName}.png", bbox_inches="tight"
+                f"{runPath}/plots/{optimizerPlotName}.png", bbox_inches="tight"
             )
 
     plt.close("all")

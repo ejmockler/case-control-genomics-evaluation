@@ -2,10 +2,8 @@ from prefect import unmapped, task, flow
 from prefect.task_runners import ConcurrentTaskRunner
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
-from config import config
 import pandas as pd
 import numpy as np
-import os
 
 from multiprocess import Pool, Manager, managers
 
@@ -28,8 +26,6 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
         if id in config["sampling"]["sequesteredIDs"]:
             continue
         for j, column in enumerate(columns):
-            if column in config["sampling"]["sequesteredIDs"]:
-                break
             matched = False
             if column == id:
                 matched = True
@@ -50,8 +46,9 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
                     and config["vcfLike"]["compoundSampleIdDelimiter"] in id
                 ):
                     matched = any(idValue in delimitedColumn for idValue in delimitedID)
-
             if matched:
+                if column in config["sampling"]["sequesteredIDs"]:
+                    break
                 # implement allele model
                 genotypeDict[f"{column}"] = [
                     (
@@ -389,14 +386,14 @@ async def processInputFiles(config):
             resolvedHoldoutControlIDs,
         ) = holdoutControlGenotypeFutures.result()
 
-    for alias, IDs in {
-        "caseAlias": missingCaseIDs,
-        "controlAlias": missingControlIDs,
-        "holdout cases": missingHoldoutCaseIDs,
-        "holdout controls": missingHoldoutControlIDs,
+    for alias, (IDs, genotypeDict) in {
+        "caseAlias": (missingCaseIDs, caseGenotypeDict),
+        "controlAlias": (missingControlIDs, controlGenotypeDict),
+        "holdout cases": (missingHoldoutCaseIDs, holdoutCaseGenotypeDict),
+        "holdout controls": (missingHoldoutControlIDs, holdoutControlGenotypeDict),
     }.items():
         sequesteredIDs = set(config["sampling"]["sequesteredIDs"]).intersection(
-            set(IDs)
+            set(genotypeDict.keys())
         )
         IDs = set(IDs) - sequesteredIDs
         if len(IDs) > 0:

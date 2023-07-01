@@ -1,5 +1,6 @@
 import asyncio
 import os
+from joblib import Parallel, delayed
 import pandas as pd
 from prefect import flow, task
 from prefect_ray.task_runners import RayTaskRunner
@@ -9,16 +10,78 @@ from numpy import array, float32  # to eval strings as arrays
 from sklearn.metrics import log_loss
 
 import ray
+from sklearn.model_selection import StratifiedKFold
 
-from mlStack import remove_all_flows, main as runMLstack
+from mlStack import (
+    bootstrap,
+    remove_all_flows,
+    main as runMLstack,
+    serializeBootstrapResults,
+)
 from metaconfig import metaconfig
 from config import config
+from models import stack as modelStack
 
 
-def inertia(y_true, y_pred):
-    return np.divide(
-        perplexity(y_true, y_pred), np.var(y_pred)
-    )  # predictive inertia = perplexity / variance
+def relativePerplexity(y_true, y_pred, y_true_baseline, y_pred_baseline, epsilon=1e-15):
+    samplePerplexity = perplexity(y_true, y_pred)
+    baselineSamplePerplexity = perplexity(y_true_baseline, y_pred_baseline)
+
+    return pd.Series(
+        [
+            samplePerplexity,
+            baselineSamplePerplexity,
+            np.divide(samplePerplexity, baselineSamplePerplexity + epsilon),
+        ]
+    )  # relative perplexity = perplexity / perplexity of model with single-most case correlated feature
+
+
+def getBaselineFeatureResults(
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
+    clinicalData,
+    config,
+):
+    selectedFeature = findBaselineFeature(caseGenotypes, controlGenotypes)
+    outerCvIterator = StratifiedKFold(
+        n_splits=config["sampling"]["crossValIterations"], shuffle=False
+    )
+    innerCvIterator = outerCvIterator
+
+    bootstrap_args = [
+        (
+            caseGenotypes.loc[[selectedFeature]],
+            controlGenotypes.loc[[selectedFeature]],
+            holdoutCaseGenotypes.loc[[selectedFeature]],
+            holdoutControlGenotypes.loc[[selectedFeature]],
+            clinicalData,
+            model,
+            hyperParameterSpace,
+            innerCvIterator,
+            outerCvIterator,
+            config,
+            False,  # disable tracking
+        )
+        for model, hyperParameterSpace in list(modelStack.items())
+    ]
+    results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+
+    baselineFeatureResults = {}
+    for i in range(len(modelStack)):
+        modelResults = results[i]
+        baselineFeatureResults = serializeBootstrapResults(
+            modelResults, baselineFeatureResults
+        )
+    baselineFeatureResultsDataframe = pd.DataFrame.from_dict(
+        baselineFeatureResults,
+        orient="index",
+        columns=["label", "probability", "accuracy"],
+    )
+    baselineFeatureResultsDataframe.index.name = "id"
+
+    return baselineFeatureResultsDataframe, selectedFeature
 
 
 def perplexity(y_true, y_pred):
@@ -30,17 +93,67 @@ def perplexity(y_true, y_pred):
     return np.power(2, crossEntropy)
 
 
+def findBaselineFeature(caseGenotypes, controlGenotypes):
+    # calculate the mean of each feature for cases and controls
+    mean_cases = caseGenotypes.mean(axis=1)
+    mean_controls = controlGenotypes.mean(axis=1)
+
+    # calculate the absolute difference in means for each feature
+    diff_means = abs(mean_cases - mean_controls)
+
+    # get the feature with the largest difference in means
+    selected_feature = diff_means.idxmax()
+
+    print("Selected feature for baseline perplexity: ", selected_feature)
+    return selected_feature
+
+
 @task()
-def measureIterations(result):
-    sampleInertia = pd.DataFrame(index=result.index)
-    result["probability"] = result["probability"].apply(lambda x: array(eval(x))[:, 1])
-    # find inertia of entire sample distribution
-    sampleInertia["inertia"] = result.apply(
-        lambda row: inertia(
-            [row["label"]] * len(row["probability"]), row["probability"]
+def measureIterations(
+    result,
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
+    clinicalData,
+):
+    baselineFeatureResults, selectedFeature = getBaselineFeatureResults(
+        caseGenotypes,
+        controlGenotypes,
+        holdoutCaseGenotypes,
+        holdoutControlGenotypes,
+        clinicalData,
+        config
+    )
+    # serialize probability arrays from string
+    currentResults["probability"] = currentResults["probability"].apply(
+        lambda x: np.array(eval(x))[:, 1]
+    )
+    # take intersection of bootstrapped samples
+    currentResults = currentResults.loc[
+        baselineFeatureResults.index.intersection(currentResults.index)
+    ]
+    baselineFeatureResults = baselineFeatureResults.loc[currentResults.index]
+    currentResults["baselineProbability"] = baselineFeatureResults["probability"]
+
+    relativePerplexities = pd.DataFrame(index=currentResults.index)
+    new_cols = currentResults.apply(
+        lambda row: relativePerplexity(
+            [row["label"]] * len(row["probability"]),
+            row["probability"],
+            [row["label"]] * len(row["baselineProbability"]),
+            row["baselineProbability"],
         ),
         axis=1,
+        result_type="expand",
     )
+
+    (
+        relativePerplexities["all features"],
+        relativePerplexities[f"{selectedFeature}"],
+        relativePerplexities["relative"],
+    ) = (new_cols[0], new_cols[1], new_cols[2])
+
     # separate discordant & well-classified
     discordantSamples = result.loc[
         result["accuracy"] <= metaconfig["samples"]["discordantThreshold"],
@@ -48,10 +161,12 @@ def measureIterations(result):
     accurateSamples = result.loc[
         result["accuracy"] >= metaconfig["samples"]["accurateThreshold"],
     ]
+
     return (
-        sampleInertia,
+        relativePerplexities,
         discordantSamples,
         accurateSamples,
+        baselineFeatureResults,
     )
 
 
@@ -66,31 +181,51 @@ def main():
         if countSuffix >= 2:
             config["sampling"]["lastIteration"] = 0
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
-        runMLstack(config)
+
+        (
+            results,
+            clinicalData,
+            caseGenotypes,
+            controlGenotypes,
+            holdoutCaseGenotypes,
+            holdoutControlGenotypes,
+        ) = runMLstack(config)
+
         currentResults = pd.read_csv(
             f"projects/{config['tracking']['project']}/sampleResults.csv",
             index_col="id",
         )
         (
-            sampleInertias,
+            samplePerplexities,
             discordantSamples,
             accurateSamples,
-        ) = measureIterations(currentResults)
+            baselineFeatureResults,
+        ) = measureIterations(
+            currentResults,
+            caseGenotypes,
+            controlGenotypes,
+            holdoutCaseGenotypes,
+            holdoutControlGenotypes,
+            clinicalData,
+        )
 
-        if len(
-            currentResults.loc[
-                (currentResults["label"] == 1)
-                & (
-                    currentResults["accuracy"]
-                    >= metaconfig["samples"]["accurateThreshold"]
-                )
-            ]
-        ) == len(currentResults):
+        if (
+            len(
+                currentResults.loc[
+                    (currentResults["label"] == 1)
+                    & (
+                        currentResults["accuracy"]
+                        >= metaconfig["samples"]["accurateThreshold"]
+                    )
+                ]
+            )
+            == 0
+        ):
             newWellClassified = False
             break
 
-        sampleInertias.to_csv(
-            f"projects/{config['tracking']['project']}/sampleInertias.csv"
+        samplePerplexities.to_csv(
+            f"projects/{config['tracking']['project']}/samplePerplexities.csv"
         )
         accurateSamples.to_csv(
             f"projects/{config['tracking']['project']}/accurateSamples.csv"
@@ -98,10 +233,15 @@ def main():
         discordantSamples.to_csv(
             f"projects/{config['tracking']['project']}/discordantSamples.csv"
         )
+        baselineFeatureResults["probability"] = baselineFeatureResults[
+            "probability"
+        ].map(lambda x: np.array2string(np.array(x), separator=","))
+        baselineFeatureResults.to_csv(
+            f"projects/{config['tracking']['project']}/baselineFeatureSampleResults.csv"
+        )
         # remove well-classified cases before next iteration
-        config["sampling"]["sequesteredIDs"].append(
+        config["sampling"]["sequesteredIDs"].extend(
             accurateSamples.loc[accurateSamples["label"] == 1].index.tolist()
-            + discordantSamples.loc[discordantSamples["label"] == 1].index.tolist()
         )
     os.makedirs(
         projectSummaryPath,
