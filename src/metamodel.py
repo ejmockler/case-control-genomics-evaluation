@@ -21,6 +21,7 @@ from mlStack import (
 from metaconfig import metaconfig
 from config import config
 from models import stack as modelStack
+from tasks.input import processInputFiles
 
 
 def relativePerplexity(y_true, y_pred, y_true_baseline, y_pred_baseline, epsilon=1e-15):
@@ -123,21 +124,21 @@ def measureIterations(
         holdoutCaseGenotypes,
         holdoutControlGenotypes,
         clinicalData,
-        config
+        config,
     )
     # serialize probability arrays from string
-    currentResults["probability"] = currentResults["probability"].apply(
+    result["probability"] = result["probability"].apply(
         lambda x: np.array(eval(x))[:, 1]
+        if len(np.array(eval(x)).shape) > 1
+        else np.array(eval(x))
     )
     # take intersection of bootstrapped samples
-    currentResults = currentResults.loc[
-        baselineFeatureResults.index.intersection(currentResults.index)
-    ]
-    baselineFeatureResults = baselineFeatureResults.loc[currentResults.index]
-    currentResults["baselineProbability"] = baselineFeatureResults["probability"]
+    result = result.loc[baselineFeatureResults.index.intersection(result.index)]
+    baselineFeatureResults = baselineFeatureResults.loc[result.index]
+    result["baselineProbability"] = baselineFeatureResults["probability"]
 
-    relativePerplexities = pd.DataFrame(index=currentResults.index)
-    new_cols = currentResults.apply(
+    relativePerplexities = pd.DataFrame(index=result.index)
+    new_cols = result.apply(
         lambda row: relativePerplexity(
             [row["label"]] * len(row["probability"]),
             row["probability"],
@@ -173,24 +174,34 @@ def measureIterations(
 @flow(task_runner=RayTaskRunner())
 def main():
     newWellClassified = True
-    countSuffix = 0
+    countSuffix = metaconfig["tracking"]["lastIteration"] or 1
+
     projectSummaryPath = f"projects/{config['tracking']['project']}__summary"
     baseProjectPath = config["tracking"]["project"]
     while newWellClassified:
-        countSuffix += 1
-        if countSuffix >= 2:
-            config["sampling"]["lastIteration"] = 0
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
-
-        (
-            results,
-            clinicalData,
-            caseGenotypes,
-            controlGenotypes,
-            holdoutCaseGenotypes,
-            holdoutControlGenotypes,
-        ) = runMLstack(config)
-
+        if countSuffix <= metaconfig["tracking"]["lastIteration"]:
+            (
+                caseGenotypes,
+                caseIDs,
+                holdoutCaseGenotypes,
+                holdoutCaseIDs,
+                controlGenotypes,
+                controlIDs,
+                holdoutControlGenotypes,
+                holdoutControlIDs,
+                clinicalData,
+            ) = processInputFiles(config)
+        else:
+            (
+                results,
+                clinicalData,
+                caseGenotypes,
+                controlGenotypes,
+                holdoutCaseGenotypes,
+                holdoutControlGenotypes,
+            ) = runMLstack(config)
+        config["sampling"]["lastIteration"] = 0
         currentResults = pd.read_csv(
             f"projects/{config['tracking']['project']}/sampleResults.csv",
             index_col="id",
@@ -243,6 +254,8 @@ def main():
         config["sampling"]["sequesteredIDs"].extend(
             accurateSamples.loc[accurateSamples["label"] == 1].index.tolist()
         )
+        countSuffix += 1
+
     os.makedirs(
         projectSummaryPath,
         exist_ok=True,

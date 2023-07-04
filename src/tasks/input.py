@@ -270,7 +270,7 @@ def prepareDatasets(
 
 
 @flow(task_runner=ConcurrentTaskRunner(), log_prints=True)
-async def processInputFiles(config):
+def processInputFiles(config):
     clinicalData, externalSamples, annotatedVCF = load(config)
 
     filteredClinicalData = filterTable(clinicalData, config["clinicalTable"]["filters"])

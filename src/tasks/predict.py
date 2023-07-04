@@ -464,6 +464,10 @@ def trackResults(runID, current, config):
                 f"{runPath}/averageGlobalExplanations.csv"
             )
 
+        if config["model"]["hyperparameterOptimization"]:
+            with open(f"{runPath}/hyperparameters/fittedOptimizer.pkl", "wb") as file:
+                pickle.dump(current["fittedOptimizer"], file)
+
         with open(
             f"{runPath}/trainCount_{np.mean([len(idList) for idList in current['trainIDs']])}",
             "w",
@@ -590,7 +594,9 @@ def processSampleResult(fold, j, sampleID, current, results):
     )
 
     if sampleID in results["samples"]:
-        results["samples"][sampleID].append(probability)
+        results["samples"][sampleID] = np.append(
+            results["samples"][sampleID], probability
+        )
     else:
         results["samples"][sampleID] = [probability]
         results["labels"][sampleID] = label

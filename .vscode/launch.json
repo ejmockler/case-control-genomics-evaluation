@@ -12,6 +12,9 @@
       "console": "integratedTerminal",
       "justMyCode": true,
       "cwd": "${workspaceFolder}/src"
+      // "autoReload": {
+      //   "enable": true
+      // }
     }
   ]
 }

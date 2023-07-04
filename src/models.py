@@ -6,7 +6,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import LinearSVC, SVC
 from xgboost import XGBClassifier
-from pytorch_tabnet.tab_model import TabNetClassifier
 
 from skopt.space import Categorical, Integer, Real
 

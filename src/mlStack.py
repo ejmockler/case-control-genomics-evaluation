@@ -2,14 +2,14 @@ import asyncio
 from inspect import isclass
 import pickle
 import os
-import multiprocess
+import sys
 import numpy as np
 import neptune
 import pandas as pd
 import ray
 import plotly.express as px
 import matplotlib
-import faulthandler
+from tqdm import tqdm
 
 matplotlib.use("agg")
 
@@ -228,7 +228,7 @@ def classify(
         ]
         current["averageHoldoutAUC"] = np.mean(current["holdoutAUC"])
         current["holdoutFPR"] = np.linspace(
-            0, 1, 101
+            0, 1, 100
         )  # Define common set of FPR values
         current["holdoutTPR"] = []
         for labels, probabilities in zip(
@@ -560,7 +560,10 @@ def serializeBootstrapResults(modelResult, sampleResults):
                 ),
             ]
         else:
-            sampleResults[sampleID][1].extend(modelResult["samples"][sampleID])
+            sampleResults[sampleID][1] = np.append(
+                sampleResults[sampleID][1], modelResult["samples"][sampleID]
+            )
+
             sampleResults[sampleID][2] = np.mean(
                 [
                     sampleResults[sampleID][2],
@@ -576,18 +579,30 @@ def serializeBootstrapResults(modelResult, sampleResults):
 
 
 @flow(task_runner=RayTaskRunner())
-async def main(config=config):
-    (
-        caseGenotypes,
-        caseIDs,
-        holdoutCaseGenotypes,
-        holdoutCaseIDs,
-        controlGenotypes,
-        controlIDs,
-        holdoutControlGenotypes,
-        holdoutControlIDs,
-        clinicalData,
-    ) = await processInputFiles(config)
+def main(
+    config=config,
+    caseGenotypes=None,
+    caseIDs=None,
+    holdoutCaseGenotypes=None,
+    holdoutCaseIDs=None,
+    controlGenotypes=None,
+    controlIDs=None,
+    holdoutControlGenotypes=None,
+    holdoutControlIDs=None,
+    clinicalData=None,
+):
+    if caseGenotypes is None:
+        (
+            caseGenotypes,
+            caseIDs,
+            holdoutCaseGenotypes,
+            holdoutCaseIDs,
+            controlGenotypes,
+            controlIDs,
+            holdoutControlGenotypes,
+            holdoutControlIDs,
+            clinicalData,
+        ) = processInputFiles(config)
     outerCvIterator = StratifiedKFold(
         n_splits=config["sampling"]["crossValIterations"], shuffle=False
     )
@@ -721,21 +736,25 @@ async def main(config=config):
             #     max(bootstrapFolders) == config["sampling"]["lastIteration"]
             # )  # TODO automatically determine last iteration by max
             if results == None:
-                results = {}
+                results = []
             for i, model in enumerate(modelStack):
                 modelName = model.__class__.__name__
-                if i not in results:
-                    results[i] = {}
+                if i + 1 > len(results):
+                    results.append({})
                 if "samples" not in results[i]:
                     results[i]["samples"] = {}
                 if "labels" not in results[i]:
                     results[i]["labels"] = {}
                 if config["sampling"]["lastIteration"] > 0:
                     # if run was interrupted, and bootstrapping began after the first iteration (and incomplete runs deleted)
-                    for j in range(0, config["sampling"]["lastIteration"]):
+                    for j in tqdm(
+                        range(
+                            0,
+                            config["sampling"]["lastIteration"],
+                        ),
+                        unit="bootstrap iteration",
+                    ):
                         results[i][j] = {}
-                        results[i][j]["testFPR"] = np.linspace(0, 1, 100)
-                        results[i][j]["holdoutFPR"] = np.linspace(0, 1, 100)
                         currentBootstrap = bootstrapFolders[j]
                         modelFolders = os.listdir(
                             f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}"
@@ -747,17 +766,25 @@ async def main(config=config):
                         results[i]["model"] = modelName
                         for fileName in currentFiles:
                             if "testCount" in fileName:
-                                results[i][j]["testCount"] = fileName.split("_")[1]
+                                results[i][j]["testCount"] = float(
+                                    fileName.split("_")[1]
+                                )
                             elif "trainCount" in fileName:
-                                results[i][j]["trainCount"] = fileName.split("_")[1]
+                                results[i][j]["trainCount"] = float(
+                                    fileName.split("_")[1]
+                                )
                             elif "holdoutCount" in fileName:
-                                results[i][j]["holdoutCount"] = fileName.split("_")[1]
+                                results[i][j]["holdoutCount"] = float(
+                                    fileName.split("_")[1]
+                                )
                             elif "meanAUC" in fileName:
-                                results[i][j]["averageTestAUC"] = fileName.split("_")[1]
+                                results[i][j]["averageTestAUC"] = float(
+                                    fileName.split("_")[1]
+                                )
                             elif "meanHoldoutAUC" in fileName:
-                                results[i][j]["averageHoldoutAUC"] = fileName.split(
-                                    "_"
-                                )[1]
+                                results[i][j]["averageHoldoutAUC"] = float(
+                                    fileName.split("_")[1]
+                                )
                             elif (
                                 "testLabels" in fileName
                                 or "trainLabels" in fileName
@@ -786,15 +813,12 @@ async def main(config=config):
                                     f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}",
                                     index_col="id",
                                 )
-                                results[i][j]["averageTestTPR"] = np.mean(
-                                    results[i][j]["testTPR"], axis=0
-                                )
                                 if "holdoutIDs" in results[i][j]:
                                     results[i][j]["holdoutProbabilities"] = (
                                         results[i][j]["probabilities"]
                                         .loc[
-                                            np.hstack(
-                                                results[i][j]["holdoutIDs"]
+                                            np.unique(
+                                                np.hstack(results[i][j]["holdoutIDs"])
                                             ).tolist()
                                         ]
                                         .to_numpy()
@@ -806,12 +830,7 @@ async def main(config=config):
                                         ]
                                         .to_numpy()
                                     )
-                                    results[i][j]["averageHoldoutTPR"] = np.mean(
-                                        results[i][j]["holdoutTPR"], axis=0
-                                    )
-
                             elif "featureImportance" in fileName:
-                                # TODO handle holdout sample shap values
                                 importanceFiles = os.listdir(
                                     f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
                                 )
@@ -849,6 +868,41 @@ async def main(config=config):
                                                 f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/averageHoldoutLocalExplanations.csv",
                                                 index_col="feature_name",
                                             )
+                            elif "hyperparameters" in fileName:
+                                hyperparameterFiles = os.listdir(
+                                    f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}"
+                                )
+                                if "fittedOptimizer.pkl" in hyperparameterFiles:
+                                    with open(
+                                        f"projects/{config['tracking']['project']}/bootstraps/{currentBootstrap}/{currentModel}/{fileName}/fittedOptimizer.pkl",
+                                        "rb",
+                                    ) as pickleFile:
+                                        results[i][j]["fittedOptimizer"] = pickle.load(
+                                            pickleFile
+                                        )
+
+                        results[i][j]["testFPR"] = np.linspace(
+                            0, 1, 100
+                        )  # common FPR to interpolate with other models
+                        testFPR, testTPR, thresholds = roc_curve(
+                            np.hstack(results[i][j]["testLabels"]),
+                            np.hstack(results[i][j]["probabilities"]),
+                        )
+                        # interpolate TPR at common FPR values
+                        tpr_interpolated = np.interp(
+                            results[i][j]["testFPR"], testFPR, testTPR
+                        )
+                        results[i][j]["averageTestTPR"] = tpr_interpolated
+                        if "holdoutProbabilities" in results[i][j]:
+                            results[i][j]["holdoutFPR"] = np.linspace(0, 1, 100)
+                            holdoutFPR, holdoutTPR, thresholds = roc_curve(
+                                np.hstack(results[i][j]["holdoutLabels"]),
+                                np.hstack(results[i][j]["holdoutProbabilities"]),
+                            )
+                            tpr_interpolated = np.interp(
+                                results[i][j]["holdoutFPR"], holdoutFPR, holdoutTPR
+                            )
+                            results[i][j]["averageHoldoutTPR"] = tpr_interpolated
                         results[i][j]["model"] = modelName
                         allTestIDs = {
                             id
@@ -903,7 +957,7 @@ async def main(config=config):
                                         ]
                                     )
                                     results[i]["labels"][sampleID] = currentLabels[
-                                        np.where(currentIDs == sampleID)
+                                        np.argmax(currentIDs == sampleID)
                                     ]
                                 else:
                                     results[i]["samples"][sampleID] = np.append(
@@ -928,6 +982,8 @@ async def main(config=config):
         globalExplanationsList = []
         for j in range(config["sampling"]["bootstrapIterations"]):
             bootstrapResult = modelResult[j]
+            testFlattenedCrossValIndex = 0
+            holdoutFlattenedCrossValIndex = 0
             for k in range(config["sampling"]["crossValIterations"]):
                 # append labels
                 testLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
@@ -951,16 +1007,30 @@ async def main(config=config):
                         testLabelsProbabilitiesByModelName[modelName][1],
                         np.array(bootstrapResult["probabilities"][k])[:, 1]
                         if len(bootstrapResult["probabilities"][k][0].shape) >= 1
-                        else np.hstack(bootstrapResult["probabilities"][k]),
+                        else np.ravel(
+                            bootstrapResult["probabilities"][
+                                testFlattenedCrossValIndex : testFlattenedCrossValIndex
+                                + len(bootstrapResult["testLabels"][k])
+                            ]
+                        ),  # probabilities from recovered bootstrap runs are 1D
                     ]
                 )
+                testFlattenedCrossValIndex += len(bootstrapResult["testLabels"][k])
                 holdoutLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
                     [
                         holdoutLabelsProbabilitiesByModelName[modelName][1],
                         np.array(bootstrapResult["holdoutProbabilities"][k])[:, 1]
                         if len(bootstrapResult["holdoutProbabilities"][k][0].shape) >= 1
-                        else np.hstack(bootstrapResult["holdoutProbabilities"][k]),
+                        else np.ravel(
+                            bootstrapResult["holdoutProbabilities"][
+                                holdoutFlattenedCrossValIndex : holdoutFlattenedCrossValIndex
+                                + len(bootstrapResult["holdoutLabels"][k])
+                            ]
+                        ),
                     ]
+                )
+                holdoutFlattenedCrossValIndex += len(
+                    bootstrapResult["holdoutLabels"][k]
                 )
             if j == 0:
                 tprFprAucByInstance[modelName][0] = [bootstrapResult["averageTestTPR"]]
@@ -979,44 +1049,29 @@ async def main(config=config):
             else:
                 tprFprAucByInstance[modelName][0] = np.concatenate(
                     [
-                        [tprFprAucByInstance[modelName][0]],
+                        tprFprAucByInstance[modelName][0],
                         [bootstrapResult["averageTestTPR"]],
                     ]
                 )
                 tprFprAucByInstance[modelName][2] = np.concatenate(
                     [
-                        [tprFprAucByInstance[modelName][2]],
+                        tprFprAucByInstance[modelName][2],
                         [bootstrapResult["averageTestAUC"]],
                     ]
                 )
                 if "averageHoldoutAUC" in bootstrapResult:
                     holdoutTprFprAucByInstance[modelName][0] = np.concatenate(
                         [
-                            [holdoutTprFprAucByInstance[modelName][0]],
+                            holdoutTprFprAucByInstance[modelName][0],
                             [bootstrapResult["averageHoldoutTPR"]],
                         ]
                     )
                     holdoutTprFprAucByInstance[modelName][2] = np.concatenate(
                         [
-                            [holdoutTprFprAucByInstance[modelName][2]],
+                            holdoutTprFprAucByInstance[modelName][2],
                             [bootstrapResult["averageHoldoutAUC"]],
                         ]
                     )
-            # Calculate mean over bootstraps (axis=0) for each TPR value
-            tprFprAucByInstance[modelName][0] = np.mean(
-                tprFprAucByInstance[modelName][0], axis=0
-            )
-            # Same for AUC
-            tprFprAucByInstance[modelName][2] = np.mean(
-                tprFprAucByInstance[modelName][2], axis=0
-            )
-            if "averageHoldoutAUC" in bootstrapResult:
-                holdoutTprFprAucByInstance[modelName][0] = np.mean(
-                    holdoutTprFprAucByInstance[modelName][0], axis=0
-                )
-                holdoutTprFprAucByInstance[modelName][2] = np.mean(
-                    holdoutTprFprAucByInstance[modelName][2], axis=0
-                )
 
             if config["model"]["calculateShapelyExplanations"]:
                 averageShapelyExplanationsDataFrame = (
@@ -1097,12 +1152,36 @@ async def main(config=config):
                     f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
                 )
 
+        # Calculate mean over bootstraps (axis=0) for each TPR value
+        tprFprAucByInstance[modelName][0] = np.mean(
+            tprFprAucByInstance[modelName][0], axis=0
+        )
+        # Same for AUC
+        tprFprAucByInstance[modelName][2] = np.mean(
+            tprFprAucByInstance[modelName][2], axis=0
+        )
+        if "averageHoldoutAUC" in bootstrapResult:
+            holdoutTprFprAucByInstance[modelName][0] = np.mean(
+                holdoutTprFprAucByInstance[modelName][0],
+                axis=0,
+            )
+            holdoutTprFprAucByInstance[modelName][2] = np.mean(
+                holdoutTprFprAucByInstance[modelName][2],
+                axis=0,
+            )
+
     sampleResultsDataFrame = pd.DataFrame.from_dict(
         sampleResults, orient="index", columns=["label", "probability", "accuracy"]
     )
     sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
         "probability"
-    ].map(lambda x: np.mean(np.array(x)[:, 1]))
+    ].map(
+        lambda x: np.mean(
+            np.array(x)[:, 1]
+            if np.array(x).ndim > 1 and np.array(x).shape[1] > 1
+            else np.mean(np.array(x))
+        )
+    )
     sampleResultsDataFrame["probability"] = sampleResultsDataFrame["probability"].map(
         lambda x: np.array2string(np.array(x), separator=",")
     )
@@ -1235,21 +1314,25 @@ async def main(config=config):
         config=config,
     )
     if config["model"]["hyperparameterOptimization"]:
-        convergencePlot = plotOptimizer(
-            f"""
-                Convergence Plot
-                {plotSubtitle}
-                """,
-            {
-                model.__class__.__name__: [
-                    result
-                    for j in range(config["sampling"]["bootstrapIterations"])
-                    for foldOptimizer in results[i][j]["fittedOptimizer"]
-                    for result in foldOptimizer.optimizer_results_
-                ]
-                for i, model in enumerate(modelStack)
-            },
-        )
+        try:
+            convergencePlot = plotOptimizer(
+                f"""
+                    Convergence Plot
+                    {plotSubtitle}
+                    """,
+                {
+                    model.__class__.__name__: [
+                        result
+                        for j in range(config["sampling"]["bootstrapIterations"])
+                        for foldOptimizer in results[i][j]["fittedOptimizer"]
+                        for result in foldOptimizer.optimizer_results_
+                    ]
+                    for i, model in enumerate(modelStack)
+                },
+            )
+        except:
+            print("Convergence plot data unavailable!", file=sys.stderr)
+            convergencePlot = None
 
     if bootstrapHoldoutCount > 0:
         holdoutPlotSubtitle = f"""
@@ -1325,7 +1408,8 @@ async def main(config=config):
             projectTracker["calibrationPlot"].upload(File.as_image(calibrationPlot))
 
         if config["model"]["hyperparameterOptimization"]:
-            projectTracker["convergencePlot"].upload(File.as_image(convergencePlot))
+            if convergencePlot is not None:
+                projectTracker["convergencePlot"].upload(File.as_image(convergencePlot))
 
         if bootstrapHoldoutCount > 0:
             projectTracker["sampleAccuracyPlotHoldout"].upload(holdoutAccuracyHistogram)
@@ -1385,14 +1469,15 @@ async def main(config=config):
             bbox_inches="tight",
         )
         if config["model"]["hyperparameterOptimization"]:
-            convergencePlot.savefig(
-                f"projects/{config['tracking']['project']}/convergencePlot.svg",
-                bbox_inches="tight",
-            )
-            convergencePlot.savefig(
-                f"projects/{config['tracking']['project']}/convergencePlot.png",
-                bbox_inches="tight",
-            )
+            if convergencePlot is not None:
+                convergencePlot.savefig(
+                    f"projects/{config['tracking']['project']}/convergencePlot.svg",
+                    bbox_inches="tight",
+                )
+                convergencePlot.savefig(
+                    f"projects/{config['tracking']['project']}/convergencePlot.png",
+                    bbox_inches="tight",
+                )
 
         if bootstrapHoldoutCount > 0:
             holdoutAccuracyHistogram.write_html(
@@ -1462,7 +1547,7 @@ async def remove_all_flows():
 if __name__ == "__main__":
     ray.shutdown()
 
-    clearHistory = True
+    clearHistory = False
     if clearHistory:
         asyncio.run(remove_all_flows())
 
