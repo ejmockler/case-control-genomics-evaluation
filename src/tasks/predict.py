@@ -103,9 +103,9 @@ def optimizeHyperparameters(
         parameterSpace,
         cv=cvIterator,
         n_jobs=n_jobs,
-        n_points=2,
+        n_points=4,
         return_train_score=True,
-        n_iter=50,
+        n_iter=20,
         scoring=metricFunction,
     )
     optimizer.fit(samples, labels)

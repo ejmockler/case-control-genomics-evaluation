@@ -38,7 +38,7 @@ stack = {
         "learning_rate": Real(1e-3, 1, prior="log-uniform"),
         "n_estimators": Integer(10, 100),
     },
-    RandomForestClassifier(): {
-        "n_estimators": Integer(75, 200),
+    RandomForestClassifier(n_jobs=-1): {
+        "n_estimators": Integer(10, 100),
     },
 }

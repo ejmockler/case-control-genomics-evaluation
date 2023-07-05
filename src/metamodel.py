@@ -235,6 +235,15 @@ def main():
             newWellClassified = False
             break
 
+        samplePerplexities["accuracy"] = currentResults.loc[
+            currentResults.index.intersection(samplePerplexities.index)
+        ]["accuracy"]
+        samplePerplexities["baselineAccuracy"] = baselineFeatureResults.loc[
+            baselineFeatureResults.index.intersection(samplePerplexities.index)
+        ]["accuracy"]
+        samplePerplexities["label"] = currentResults.loc[
+            currentResults.index.intersection(samplePerplexities.index)
+        ]["label"]
         samplePerplexities.to_csv(
             f"projects/{config['tracking']['project']}/samplePerplexities.csv"
         )

@@ -77,8 +77,8 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 50,
-        "crossValIterations": 10,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 3,
+        "crossValIterations": 2,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],
