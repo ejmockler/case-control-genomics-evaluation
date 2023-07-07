@@ -14,6 +14,7 @@ from tqdm import tqdm
 matplotlib.use("agg")
 
 from prefect_ray.task_runners import RayTaskRunner
+from prefect.task_runners import ConcurrentTaskRunner
 from prefect import flow, task
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
@@ -433,7 +434,7 @@ def classify(
     return results
 
 
-@flow(task_runner=RayTaskRunner())
+@flow()
 def bootstrap(
     caseGenotypes,
     controlGenotypes,
@@ -538,47 +539,58 @@ def serializeBootstrapResults(modelResult, sampleResults):
             delayed(processSampleResult)(*args) for args in sample_result_args
         )
     for sampleID in modelResult["samples"].keys():
-        flattenedProbabilities = np.array(
-            [
-                prediction[1]
-                if (isinstance(prediction, np.ndarray) or isinstance(prediction, list))
-                and len(prediction) == 2
-                else prediction
-                for prediction in modelResult["samples"][sampleID]
-            ]
-        )
         if sampleID not in sampleResults:
-            # label, probability, accuracy
+            # label, probability
             sampleResults[sampleID] = [
                 modelResult["labels"][sampleID],
                 modelResult["samples"][sampleID],
-                np.mean(
-                    [
-                        np.around(probability) == modelResult["labels"][sampleID]
-                        for probability in flattenedProbabilities
-                    ]
-                ),
             ]
         else:
             sampleResults[sampleID][1] = np.append(
                 sampleResults[sampleID][1], modelResult["samples"][sampleID]
             )
-
-            sampleResults[sampleID][2] = np.mean(
-                [
-                    sampleResults[sampleID][2],
-                    np.mean(
-                        [
-                            np.around(probability) == modelResult["labels"][sampleID]
-                            for probability in flattenedProbabilities
-                        ]
-                    ),
-                ]
-            )
     return sampleResults
 
 
-@flow(task_runner=RayTaskRunner())
+def serializeResultsDataframe(sampleResults):
+    for sampleID in sampleResults:
+        # add accuracy
+        sampleResults[sampleID].append(
+            np.mean(
+                np.mean(
+                    [
+                        (
+                            np.around(probability[1])
+                            if len(probability.shape) > 0
+                            else np.around(probability)
+                        )
+                        == sampleResults[sampleID][0]  # label index
+                        for probability in np.hstack(
+                            np.array(sampleResults[sampleID][1])
+                        )  # probability index
+                    ]
+                ),
+            )
+        )
+
+    sampleResultsDataFrame = pd.DataFrame.from_dict(
+        sampleResults, orient="index", columns=["label", "probability", "accuracy"]
+    )
+    sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
+        "probability"
+    ].map(
+        lambda x: np.mean(
+            np.array(x)[:, 1]
+            if np.array(x).ndim > 1 and np.array(x).shape[1] > 1
+            else np.mean(np.array(x))
+        )
+    )
+    np.set_printoptions(threshold=np.inf)
+    sampleResultsDataFrame.index.name = "id"
+    return sampleResultsDataFrame
+
+
+@flow()
 def main(
     config=config,
     caseGenotypes=None,
@@ -951,7 +963,7 @@ def main(
                                 )
                             if sampleID in currentIDs:
                                 if sampleID not in results[i]["samples"]:
-                                    results[i]["samples"][sampleID] = np.array(
+                                    results[i]["samples"][sampleID] = np.ravel(
                                         currentProbabilities[
                                             np.where(currentIDs == sampleID)
                                         ]
@@ -961,10 +973,12 @@ def main(
                                     ]
                                 else:
                                     results[i]["samples"][sampleID] = np.append(
-                                        currentProbabilities[
-                                            np.where(currentIDs == sampleID)
-                                        ],
                                         results[i]["samples"][sampleID],
+                                        np.ravel(
+                                            currentProbabilities[
+                                                np.where(currentIDs == sampleID)
+                                            ]
+                                        ),
                                     )
 
     for i in range(len(modelStack)):
@@ -1170,22 +1184,10 @@ def main(
                 axis=0,
             )
 
-    sampleResultsDataFrame = pd.DataFrame.from_dict(
-        sampleResults, orient="index", columns=["label", "probability", "accuracy"]
-    )
-    sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
-        "probability"
-    ].map(
-        lambda x: np.mean(
-            np.array(x)[:, 1]
-            if np.array(x).ndim > 1 and np.array(x).shape[1] > 1
-            else np.mean(np.array(x))
-        )
-    )
+    sampleResultsDataFrame = serializeResultsDataframe(sampleResults)
     sampleResultsDataFrame["probability"] = sampleResultsDataFrame["probability"].map(
         lambda x: np.array2string(np.array(x), separator=",")
     )
-    sampleResultsDataFrame.index.name = "id"
 
     if config["tracking"]["remote"]:
         projectTracker["sampleResults"].upload(

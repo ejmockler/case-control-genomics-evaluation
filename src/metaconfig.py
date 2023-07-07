@@ -1,7 +1,7 @@
 metaconfig = {
     "samples": {
-        "discordantThreshold": 0.025,
-        "accurateThreshold": 0.975,
+        "discordantThreshold": 0.15,
+        "accurateThreshold": 0.85,
     },
-    "tracking": {"lastIteration": 1},
+    "tracking": {"lastIteration": 0},
 }

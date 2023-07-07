@@ -17,6 +17,7 @@ from mlStack import (
     remove_all_flows,
     main as runMLstack,
     serializeBootstrapResults,
+    serializeResultsDataframe,
 )
 from metaconfig import metaconfig
 from config import config
@@ -75,11 +76,7 @@ def getBaselineFeatureResults(
         baselineFeatureResults = serializeBootstrapResults(
             modelResults, baselineFeatureResults
         )
-    baselineFeatureResultsDataframe = pd.DataFrame.from_dict(
-        baselineFeatureResults,
-        orient="index",
-        columns=["label", "probability", "accuracy"],
-    )
+    baselineFeatureResultsDataframe = serializeResultsDataframe(baselineFeatureResults)
     baselineFeatureResultsDataframe.index.name = "id"
 
     return baselineFeatureResultsDataframe, selectedFeature
@@ -127,11 +124,7 @@ def measureIterations(
         config,
     )
     # serialize probability arrays from string
-    result["probability"] = result["probability"].apply(
-        lambda x: np.array(eval(x))[:, 1]
-        if len(np.array(eval(x)).shape) > 1
-        else np.array(eval(x))
-    )
+    result["probability"] = result["probability"].apply(lambda x: np.array(eval(x)))
     # take intersection of bootstrapped samples
     result = result.loc[baselineFeatureResults.index.intersection(result.index)]
     baselineFeatureResults = baselineFeatureResults.loc[result.index]
@@ -171,7 +164,7 @@ def measureIterations(
     )
 
 
-@flow(task_runner=RayTaskRunner())
+@flow()
 def main():
     newWellClassified = True
     countSuffix = metaconfig["tracking"]["lastIteration"] or 1
@@ -181,17 +174,19 @@ def main():
     while newWellClassified:
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
         if countSuffix <= metaconfig["tracking"]["lastIteration"]:
-            (
-                caseGenotypes,
-                caseIDs,
-                holdoutCaseGenotypes,
-                holdoutCaseIDs,
-                controlGenotypes,
-                controlIDs,
-                holdoutControlGenotypes,
-                holdoutControlIDs,
-                clinicalData,
-            ) = processInputFiles(config)
+            # (
+            #     caseGenotypes,
+            #     caseIDs,
+            #     holdoutCaseGenotypes,
+            #     holdoutCaseIDs,
+            #     controlGenotypes,
+            #     controlIDs,
+            #     holdoutControlGenotypes,
+            #     holdoutControlIDs,
+            #     clinicalData,
+            # ) = processInputFiles(config)
+            countSuffix += 1
+            continue
         else:
             (
                 results,
@@ -200,8 +195,8 @@ def main():
                 controlGenotypes,
                 holdoutCaseGenotypes,
                 holdoutControlGenotypes,
-            ) = runMLstack(config)
-        config["sampling"]["lastIteration"] = 0
+            ) = asyncio.run(runMLstack(config))
+            config["sampling"]["lastIteration"] = 0
         currentResults = pd.read_csv(
             f"projects/{config['tracking']['project']}/sampleResults.csv",
             index_col="id",
@@ -244,6 +239,8 @@ def main():
         samplePerplexities["label"] = currentResults.loc[
             currentResults.index.intersection(samplePerplexities.index)
         ]["label"]
+
+        np.set_printoptions(threshold=np.inf)
         samplePerplexities.to_csv(
             f"projects/{config['tracking']['project']}/samplePerplexities.csv"
         )

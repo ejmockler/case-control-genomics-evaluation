@@ -4,7 +4,7 @@ from sklearn.ensemble import (
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import BernoulliNB
-from sklearn.svm import LinearSVC, SVC
+from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
 from skopt.space import Categorical, Integer, Real
@@ -15,12 +15,17 @@ class RadialBasisSVC(SVC):
     ## RuntimeError: scikit-learn estimators should always specify their parameters in the signature of their __init__ (no varargs). <class 'models.RadialBasisSVC'> with constructor (self, *args, **kwargs) doesn't  follow this convention.
 
 
+class LinearSVC(SVC):
+    pass  ## TODO properly init:
+    ## RuntimeError: scikit-learn estimators should always specify their parameters in the signature of their __init__ (no varargs). <class 'models.RadialBasisSVC'> with constructor (self, *args, **kwargs) doesn't  follow this convention.
+
+
 stack = {
-    LinearSVC(): {
+    LinearSVC(probability=True, kernel="linear"): {
         "tol": Real(1e-6, 1e-3, prior="log-uniform"),
         "C": Real(1e-3, 10, prior="log-uniform"),
     },
-    RadialBasisSVC(probability=True): {
+    RadialBasisSVC(probability=True, kernel="rbf"): {
         "tol": Real(1e-6, 1e-3, prior="log-uniform"),
         "C": Real(1e-3, 10, prior="log-uniform"),
         "gamma": Categorical(["scale", "auto"]),

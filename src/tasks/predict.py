@@ -105,7 +105,7 @@ def optimizeHyperparameters(
         n_jobs=n_jobs,
         n_points=4,
         return_train_score=True,
-        n_iter=20,
+        n_iter=25,
         scoring=metricFunction,
     )
     optimizer.fit(samples, labels)
@@ -160,8 +160,8 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
         runPath = f"projects/{config['tracking']['project']}/bootstraps/{runNumber+1}/{model.__class__.__name__}"
         if not os.path.exists(runPath):
             os.makedirs(runPath, exist_ok=True)
-        with open(f"{runPath}/config.pkl", "wb") as file:
-            pickle.dump(config, file)
+        with open(f"{runPath}/config.json", "w") as file:
+            json.dump(config, file)
         embeddingDF.to_csv(f"{runPath}/embedding.csv")
         if "holdoutSamples" in embedding:
             holdoutEmbeddingDF.to_csv(f"{runPath}/holdoutEmbedding.csv")
@@ -580,24 +580,38 @@ def evaluate(
     )
 
 
-def processSampleResult(fold, j, sampleID, current, results):
+def processSampleResult(fold, k, sampleID, current, results):
     probability = (
-        current["probabilities"][fold][j]
-        if j < len(current["testIDs"][fold])
-        else current["holdoutProbabilities"][fold][j - len(current["testIDs"][fold])]
+        (
+            current["probabilities"][fold][k]
+            if len(current["probabilities"][fold][k]) <= 1
+            else current["probabilities"][fold][k][1]
+        )
+        if k < len(current["testIDs"][fold])
+        else (
+            current["holdoutProbabilities"][fold][k - len(current["testIDs"][fold])]
+            if len(
+                current["holdoutProbabilities"][fold][k - len(current["testIDs"][fold])]
+            )
+            <= 1
+            else current["holdoutProbabilities"][fold][
+                k - len(current["testIDs"][fold])
+            ][1]
+        )
     )
 
     label = (
-        current["testLabels"][fold][j]
-        if j < len(current["testIDs"][fold])
-        else current["holdoutLabels"][fold][j - len(current["testIDs"][fold])]
+        current["testLabels"][fold][k]
+        if k < len(current["testIDs"][fold])
+        else current["holdoutLabels"][fold][k - len(current["testIDs"][fold])]
     )
 
     if sampleID in results["samples"]:
         results["samples"][sampleID] = np.append(
             results["samples"][sampleID], probability
         )
+
     else:
-        results["samples"][sampleID] = [probability]
+        results["samples"][sampleID] = np.atleast_1d(probability)
         results["labels"][sampleID] = label
     return results
