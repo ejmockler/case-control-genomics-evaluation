@@ -106,7 +106,7 @@ def findBaselineFeature(caseGenotypes, controlGenotypes):
     return selected_feature
 
 
-@task()
+@task(retries=10)
 def measureIterations(
     result,
     caseGenotypes,
@@ -185,6 +185,14 @@ def main():
             #     holdoutControlIDs,
             #     clinicalData,
             # ) = processInputFiles(config)
+            accurateCases = pd.read_csv(
+                f"projects/{config['tracking']['project']}/accurateSamples.csv",
+                index_col="id",
+            )
+            accurateCaseIDs = accurateCases.loc[
+                accurateCases["label"] == 1
+            ].index.tolist()
+            config["sampling"]["sequesteredIDs"].extend(accurateCaseIDs)
             countSuffix += 1
             continue
         else:
@@ -195,7 +203,7 @@ def main():
                 controlGenotypes,
                 holdoutCaseGenotypes,
                 holdoutControlGenotypes,
-            ) = asyncio.run(runMLstack(config))
+            ) = runMLstack(config)
             config["sampling"]["lastIteration"] = 0
         currentResults = pd.read_csv(
             f"projects/{config['tracking']['project']}/sampleResults.csv",
@@ -272,6 +280,6 @@ if __name__ == "__main__":
     # TODO replace notebook code with src imports
     ray.shutdown()
     main()
-    clearHistory = False
+    clearHistory = True
     if clearHistory:
         asyncio.run(remove_all_flows())

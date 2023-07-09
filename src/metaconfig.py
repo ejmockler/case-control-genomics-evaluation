@@ -3,5 +3,5 @@ metaconfig = {
         "discordantThreshold": 0.15,
         "accurateThreshold": 0.85,
     },
-    "tracking": {"lastIteration": 0},
+    "tracking": {"lastIteration": 1},
 }

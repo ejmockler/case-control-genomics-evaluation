@@ -344,7 +344,7 @@ def plotSample(
             )
 
 
-@task()
+@task(retries=1000)
 def trackVisualizations(
     runID, plotSubtitle, modelName, current, holdout=False, config=config
 ):

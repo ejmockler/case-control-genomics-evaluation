@@ -118,7 +118,7 @@ def serializeDataFrame(dataframe):
     return File.from_stream(stream, extension="csv")
 
 
-@task()
+@task(retries=1000)
 def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config):
     embeddingDF = pd.DataFrame(
         data=embedding["samples"],
@@ -175,7 +175,7 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
     return runID
 
 
-@task()
+@task(retries=1000)
 def trackResults(runID, current, config):
     sampleResultsDataframe = pd.DataFrame.from_dict(
         {

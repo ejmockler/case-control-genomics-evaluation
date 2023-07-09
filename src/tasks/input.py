@@ -8,7 +8,7 @@ import numpy as np
 from multiprocess import Pool, Manager, managers
 
 
-@task()
+@task(retries=1000)
 def filterTable(table, filterString):
     if not filterString:
         return table
@@ -17,7 +17,7 @@ def filterTable(table, filterString):
     return filteredTable
 
 
-@task()
+@task(retries=1000)
 def applyAlleleModel(values, columns, genotypeIDs, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
@@ -84,7 +84,7 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
     return genotypeDict, missingGenotypeIDs, resolvedGenotypeIDs
 
 
-@task()
+@task(retries=1000)
 def load(config):
     clinicalData = pd.read_excel(
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
@@ -150,7 +150,7 @@ def balanceCaseControlDatasets(caseGenotypes, controlGenotypes):
     return minorIDs, balancedMajorIDs, excessMajorIDs
 
 
-@task()
+@task(retries=1000)
 def prepareDatasets(
     caseGenotypes,
     controlGenotypes,
