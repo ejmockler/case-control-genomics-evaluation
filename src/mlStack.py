@@ -1278,6 +1278,16 @@ def main(
         x="accuracy",
         color="label",
         pattern_shape="label",
+        hover_data={
+            "index": (
+                sampleResultsDataFrame.loc[
+                    ~sampleResultsDataFrame.index.isin(
+                        [*seenHoldoutCases, *seenHoldoutControls]
+                    )
+                ].index
+            )
+        },
+        color_discrete_map={0: "red", 1: "blue"},
         range_x=[0, 1],
         title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
@@ -1289,6 +1299,17 @@ def main(
         ],
         x="meanProbability",
         color="label",
+        pattern_shape="label",
+        hover_data={
+            "index": (
+                sampleResultsDataFrame.loc[
+                    ~sampleResultsDataFrame.index.isin(
+                        [*seenHoldoutCases, *seenHoldoutControls]
+                    )
+                ].index
+            )
+        },
+        color_discrete_map={0: "red", 1: "blue"},
         title=f"""Mean sample probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
     aucPlot = plotAUC(
@@ -1355,6 +1376,16 @@ def main(
             x="accuracy",
             color="label",
             pattern_shape="label",
+            hover_data={
+                "index": (
+                    sampleResultsDataFrame.loc[
+                        sampleResultsDataFrame.index.isin(
+                            [*seenHoldoutCases, *seenHoldoutControls]
+                        )
+                    ].index
+                )
+            },
+            color_discrete_map={0: "red", 1: "blue"},
             range_x=[0, 1],
             title=f"""Mean holdout accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
         )
@@ -1366,6 +1397,17 @@ def main(
             ],
             x="meanProbability",
             color="label",
+            pattern_shape="label",
+            hover_data={
+                "index": (
+                    sampleResultsDataFrame.loc[
+                        sampleResultsDataFrame.index.isin(
+                            [*seenHoldoutCases, *seenHoldoutControls]
+                        )
+                    ].index
+                )
+            },
+            color_discrete_map={0: "red", 1: "blue"},
             title=f"""Mean holdout probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
         )
         holdoutAucPlot = plotAUC(

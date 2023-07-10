@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import os
 from joblib import Parallel, delayed
 import pandas as pd
@@ -164,35 +165,42 @@ def measureIterations(
     )
 
 
+def readSampleIDs(table, label):
+    sampleIDs = table.loc[table["label"] == label]
+    return sampleIDs.index.tolist()
+
+
+def sequesterSamples():
+    samples = {
+        "accurate": pd.read_csv(
+            f"projects/{config['tracking']['project']}/accurateSamples.csv",
+            index_col="id",
+        ),
+        "discordant": pd.read_csv(
+            f"projects/{config['tracking']['project']}/discordantSamples.csv",
+            index_col="id",
+        ),
+    }
+
+    for sampleType, dataframe in samples.items():
+        for labelType, label in {"case": 1, "control": 0}.items():
+            if metaconfig["samples"]["sequester"][sampleType][labelType]:
+                ids = readSampleIDs(dataframe, label=label)
+                config["sampling"]["sequesteredIDs"].extend(ids)
+
+
 @flow()
 def main():
     newWellClassified = True
-    countSuffix = metaconfig["tracking"]["lastIteration"] or 1
+    countSuffix = 1
 
     projectSummaryPath = f"projects/{config['tracking']['project']}__summary"
     baseProjectPath = config["tracking"]["project"]
     while newWellClassified:
+        gc.collect()
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
         if countSuffix <= metaconfig["tracking"]["lastIteration"]:
-            # (
-            #     caseGenotypes,
-            #     caseIDs,
-            #     holdoutCaseGenotypes,
-            #     holdoutCaseIDs,
-            #     controlGenotypes,
-            #     controlIDs,
-            #     holdoutControlGenotypes,
-            #     holdoutControlIDs,
-            #     clinicalData,
-            # ) = processInputFiles(config)
-            accurateCases = pd.read_csv(
-                f"projects/{config['tracking']['project']}/accurateSamples.csv",
-                index_col="id",
-            )
-            accurateCaseIDs = accurateCases.loc[
-                accurateCases["label"] == 1
-            ].index.tolist()
-            config["sampling"]["sequesteredIDs"].extend(accurateCaseIDs)
+            sequesterSamples()
             countSuffix += 1
             continue
         else:
@@ -264,10 +272,7 @@ def main():
         baselineFeatureResults.to_csv(
             f"projects/{config['tracking']['project']}/baselineFeatureSampleResults.csv"
         )
-        # remove well-classified cases before next iteration
-        config["sampling"]["sequesteredIDs"].extend(
-            accurateSamples.loc[accurateSamples["label"] == 1].index.tolist()
-        )
+        sequesterSamples()
         countSuffix += 1
 
     os.makedirs(
