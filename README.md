@@ -13,25 +13,27 @@ Development occurs with an interactive environment, so each workflow step can be
 
 ## Scaling
 
-Prefect uses an external database to manage workflow metadata. To properly scale bootstrap sampling across multiple models, set up a Postgres database through Docker:
+Prefect uses an external database to manage workflow metadata. Bootstrap sampling & model execution are scoped to individual Prefect tasks. To properly scale bootstrap sampling across multiple models, set up a Postgres database through Docker:
 
-``` bash
+```bash
 docker run -d --name prefect-postgres -v prefectdb:/var/lib/postgresql/data -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=yourTopSecretPassword -e POSTGRES_DB=prefect postgres:latest
 ```
 
-``` bash
+```bash
 prefect config set PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://postgres:yourTopSecretPassword@localhost:5432/prefect"
 ```
 
-`prefect server start`
+Ensure Prefect composes workflows in a [separate server process](https://github.com/PrefectHQ/prefect/issues/6492#issuecomment-1221111132):
 
-[Ensure Prefect composes workflows in a separate server process](https://github.com/PrefectHQ/prefect/issues/6492#issuecomment-1221111132):
-
-`prefect config set PREFECT_API_URL="http://127.0.0.1:4200/api"`
+> `prefect config set PREFECT_API_URL="http://127.0.0.1:4200/api"`
 
 Increase database timeout if server throws timeout errors when loading parallel subflows:
 
-`prefect config set PREFECT_API_DATABASE_TIMEOUT=720`
+> `prefect config set PREFECT_API_DATABASE_TIMEOUT=720`
+
+Finally
+
+> `prefect server start`
 
 ## Interactive entrypoint
 
