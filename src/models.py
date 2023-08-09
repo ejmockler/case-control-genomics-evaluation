@@ -3,21 +3,24 @@ from sklearn.ensemble import (
     RandomForestClassifier,
 )
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import SVC
+from sklearn.base import BaseEstimator
 from xgboost import XGBClassifier
 
 from skopt.space import Categorical, Integer, Real
+import numpy as np
 
 
 class RadialBasisSVC(SVC):
-    pass  ## TODO properly init:
-    ## RuntimeError: scikit-learn estimators should always specify their parameters in the signature of their __init__ (no varargs). <class 'models.RadialBasisSVC'> with constructor (self, *args, **kwargs) doesn't  follow this convention.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 class LinearSVC(SVC):
-    pass  ## TODO properly init:
-    ## RuntimeError: scikit-learn estimators should always specify their parameters in the signature of their __init__ (no varargs). <class 'models.RadialBasisSVC'> with constructor (self, *args, **kwargs) doesn't  follow this convention.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 stack = {
@@ -47,3 +50,23 @@ stack = {
         "n_estimators": Integer(10, 100),
     },
 }
+
+
+class ClassificationResult:
+    def __init__(self):
+        self.trainIndices = []
+        self.testIndices = []
+        self.holdoutIndices = []
+        self.globalExplanations = []
+        # ... other attributes
+
+    def calculate_test_AUC(self, labels, probabilities):
+        return [
+            roc_auc_score(
+                label,
+                (probability[:, 1] if len(probability.shape) > 1 else probability),
+            )
+            for label, probability in zip(labels, probabilities)
+        ]
+
+    # ... other methods to calculate or update attributes

@@ -196,247 +196,122 @@ def trackResults(runID, current, config):
         dtype=object,
     ).set_index("id")
 
-    # TODO debug inaccurate remote logging
-    if config["tracking"]["remote"]:
-        pass
-        # runTracker = neptune.init_run(
-        #     project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-        #     with_id=runID,
-        #     api_token=config["tracking"]["token"],
-        # )
-        # if config["model"]["hyperparameterOptimization"]:
-        #     runTracker["modelParams"] = {
-        #         k + 1: current["fittedOptimizer"][k].best_params_
-        #         for k in range(config["sampling"]["crossValIterations"])
-        #     }
+    runPath = runID
+    for k in range(config["sampling"]["crossValIterations"]):
+        if config["model"]["hyperparameterOptimization"]:
+            hyperparameterDir = f"{runPath}/hyperparameters"
+            os.makedirs(hyperparameterDir, exist_ok=True)
+            with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
+                json.dump(current["fittedOptimizer"][k].best_params_, file)
 
-        # runTracker["sampleResults"].upload(serializeDataFrame(sampleResultsDataframe))
+        testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
+        testLabelsSeries.index = current["testIDs"][k]
+        testLabelsSeries.index.name = "id"
 
-        # if config["model"]["calculateShapelyExplanations"]:
-        #     runTracker["shapExplanationsPerFold"].upload(
-        #         File.as_pickle(current["localExplanations"])
-        #     )
-        #     runTracker["holdout/shapExplanationsPerFold"].upload(
-        #         File.as_pickle(current["holdoutLocalExplanations"])
-        #     )
-        #     runTracker["shapExplainersPerFold"].upload(
-        #         File.as_pickle(current["shapExplainer"])
-        #     )
-        #     runTracker["shapMaskersPerFold"].upload(
-        #         File.as_pickle(current["shapMasker"])
-        #     )
-        #     runTracker["featureImportance/shapelyExplanations/average"].upload(
-        #         serializeDataFrame(current["averageShapelyExplanations"])
-        #     )
+        testIDsSeries = pd.Series(current["testIDs"][k], name="id")
 
-        # if current["globalExplanations"][0] is not None:
-        #     runTracker[f"featureImportance/modelCoefficients/average"].upload(
-        #         serializeDataFrame(current["averageGlobalExplanations"])
-        #     )
+        trainLabelsSeries = pd.Series(current["trainLabels"][k], name="trainLabel")
+        trainLabelsSeries.index = current["trainIDs"][k]
+        trainLabelsSeries.index.name = "id"
 
-        # for k in range(config["sampling"]["crossValIterations"]):
-        #     testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
-        #     trainLabelsSeries = pd.Series(current["trainLabels"][k], name="trainLabel")
-        #     testLabelsSeries.index = current["testIDs"][k]
-        #     testLabelsSeries.index.name = "id"
-        #     trainLabelsSeries.index = current["trainIDs"][k]
-        #     trainLabelsSeries.index.name = "id"
-        #     runTracker[f"trainIDs/{k+1}"].upload(
-        #         serializeDataFrame(pd.Series(current["trainIDs"][k]))
-        #     )
-        #     runTracker[f"testIDs/{k+1}"].upload(
-        #         serializeDataFrame(pd.Series(current["testIDs"][k]))
-        #     )
-        #     runTracker[f"testLabels/{k+1}"].upload(
-        #         serializeDataFrame(pd.Series(testLabelsSeries))
-        #     )
-        #     runTracker[f"trainLabels/{k+1}"].upload(
-        #         serializeDataFrame(pd.Series(trainLabelsSeries))
-        #     )
-        #     if current["globalExplanations"][k] is not None:
-        #         runTracker[f"featureImportance/modelCoefficients/{k+1}"].upload(
-        #             serializeDataFrame(current["globalExplanations"][k])
-        #         )
-        #     if config["model"]["calculateShapelyExplanations"]:
-        #         runTracker[f"featureImportance/shapelyExplanations/{k+1}"].upload(
-        #             serializeDataFrame(
-        #                 pd.DataFrame.from_dict(
-        #                     {
-        #                         "feature_name": [
-        #                             name
-        #                             for name in current["localExplanations"][
-        #                                 0
-        #                             ].feature_names
-        #                         ],
-        #                         "value": [
-        #                             np.mean(
-        #                                 current["localExplanations"][k].values[
-        #                                     :, featureIndex
-        #                                 ]
-        #                             )
-        #                             for featureIndex in range(
-        #                                 len(
-        #                                     current["localExplanations"][
-        #                                         0
-        #                                     ].feature_names
-        #                                 )
-        #                             )
-        #                         ],
-        #                         "standard_deviation": [
-        #                             np.std(
-        #                                 current["localExplanations"][k].values[
-        #                                     :, featureIndex
-        #                                 ]
-        #                             )
-        #                             for featureIndex in range(
-        #                                 len(
-        #                                     current["localExplanations"][
-        #                                         0
-        #                                     ].feature_names
-        #                                 )
-        #                             )
-        #                         ],
-        #                     },
-        #                     dtype=object,
-        #                 ).set_index("feature_name")
-        #             )
-        #         )
+        trainIDsSeries = pd.Series(current["trainIDs"][k], name="id")
 
-        # runTracker["meanAUC"] = np.mean(current["testAUC"])
-        # # average sample count across folds
-        # runTracker["nTrain"] = np.mean([len(idList) for idList in current["trainIDs"]])
-        # runTracker["nTest"] = np.mean([len(idList) for idList in current["testIDs"]])
-        # runTracker.stop()
-    else:
-        runPath = runID
-        for k in range(config["sampling"]["crossValIterations"]):
-            if config["model"]["hyperparameterOptimization"]:
-                hyperparameterDir = f"{runPath}/hyperparameters"
-                os.makedirs(hyperparameterDir, exist_ok=True)
-                with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
-                    json.dump(current["fittedOptimizer"][k].best_params_, file)
+        os.makedirs(f"{runPath}/testLabels", exist_ok=True)
+        os.makedirs(f"{runPath}/testIDs", exist_ok=True)
+        os.makedirs(f"{runPath}/trainLabels", exist_ok=True)
+        os.makedirs(f"{runPath}/trainIDs", exist_ok=True)
 
-            testLabelsSeries = pd.Series(current["testLabels"][k], name="testLabel")
-            testLabelsSeries.index = current["testIDs"][k]
-            testLabelsSeries.index.name = "id"
+        testLabelsSeries.to_csv(f"{runPath}/testLabels/{k+1}.csv")
+        testIDsSeries.to_csv(f"{runPath}/testIDs/{k+1}.csv")
+        trainLabelsSeries.to_csv(f"{runPath}/trainLabels/{k+1}.csv")
+        trainIDsSeries.to_csv(f"{runPath}/trainIDs/{k+1}.csv")
 
-            testIDsSeries = pd.Series(current["testIDs"][k], name="id")
+        if len(current["holdoutLabels"][k]) > 0:
+            holdoutLabelsSeries = pd.Series(
+                current["holdoutLabels"][k], name="testLabel"
+            )
+            holdoutLabelsSeries.index = current["holdoutIDs"][k]
+            holdoutLabelsSeries.index.name = "id"
+            holdoutIDsSeries = pd.Series(current["holdoutIDs"][k], name="id")
+            os.makedirs(f"{runPath}/holdoutLabels", exist_ok=True)
+            os.makedirs(f"{runPath}/holdoutIDs", exist_ok=True)
+            pd.Series(holdoutLabelsSeries).to_csv(f"{runPath}/holdoutLabels/{k+1}.csv")
+            pd.Series(holdoutIDsSeries).to_csv(f"{runPath}/holdoutIDs/{k+1}.csv")
 
-            trainLabelsSeries = pd.Series(current["trainLabels"][k], name="trainLabel")
-            trainLabelsSeries.index = current["trainIDs"][k]
-            trainLabelsSeries.index.name = "id"
+        if current["globalExplanations"][k] is not None:
+            os.makedirs(f"{runPath}/featureImportance/modelCoefficients", exist_ok=True)
+            current["globalExplanations"][k].to_csv(
+                f"{runPath}/featureImportance/modelCoefficients/{k+1}.csv"
+            )
 
-            trainIDsSeries = pd.Series(current["trainIDs"][k], name="id")
-
-            os.makedirs(f"{runPath}/testLabels", exist_ok=True)
-            os.makedirs(f"{runPath}/testIDs", exist_ok=True)
-            os.makedirs(f"{runPath}/trainLabels", exist_ok=True)
-            os.makedirs(f"{runPath}/trainIDs", exist_ok=True)
-
-            testLabelsSeries.to_csv(f"{runPath}/testLabels/{k+1}.csv")
-            testIDsSeries.to_csv(f"{runPath}/testIDs/{k+1}.csv")
-            trainLabelsSeries.to_csv(f"{runPath}/trainLabels/{k+1}.csv")
-            trainIDsSeries.to_csv(f"{runPath}/trainIDs/{k+1}.csv")
-
+        if config["model"]["calculateShapelyExplanations"]:
+            os.makedirs(
+                f"{runPath}/featureImportance/shapelyExplanations", exist_ok=True
+            )
+            pd.DataFrame.from_dict(
+                {
+                    "feature_name": [
+                        name for name in current["localExplanations"][0].feature_names
+                    ],
+                    "value": [
+                        np.mean(current["localExplanations"][k].values[:, featureIndex])
+                        for featureIndex in range(
+                            len(current["localExplanations"][0].feature_names)
+                        )
+                    ],
+                    "standard_deviation": [
+                        np.std(current["localExplanations"][k].values[:, featureIndex])
+                        for featureIndex in range(
+                            len(current["localExplanations"][0].feature_names)
+                        )
+                    ],
+                },
+                dtype=object,
+            ).set_index("feature_name").to_csv(
+                f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv"
+            )
             if len(current["holdoutLabels"][k]) > 0:
-                holdoutLabelsSeries = pd.Series(
-                    current["holdoutLabels"][k], name="testLabel"
-                )
-                holdoutLabelsSeries.index = current["holdoutIDs"][k]
-                holdoutLabelsSeries.index.name = "id"
-                holdoutIDsSeries = pd.Series(current["holdoutIDs"][k], name="id")
-                os.makedirs(f"{runPath}/holdoutLabels", exist_ok=True)
-                os.makedirs(f"{runPath}/holdoutIDs", exist_ok=True)
-                pd.Series(holdoutLabelsSeries).to_csv(
-                    f"{runPath}/holdoutLabels/{k+1}.csv"
-                )
-                pd.Series(holdoutIDsSeries).to_csv(f"{runPath}/holdoutIDs/{k+1}.csv")
-
-            if current["globalExplanations"][k] is not None:
                 os.makedirs(
-                    f"{runPath}/featureImportance/modelCoefficients", exist_ok=True
-                )
-                current["globalExplanations"][k].to_csv(
-                    f"{runPath}/featureImportance/modelCoefficients/{k+1}.csv"
-                )
-
-            if config["model"]["calculateShapelyExplanations"]:
-                os.makedirs(
-                    f"{runPath}/featureImportance/shapelyExplanations", exist_ok=True
+                    f"{runPath}/featureImportance/shapelyExplanations/holdout",
+                    exist_ok=True,
                 )
                 pd.DataFrame.from_dict(
                     {
                         "feature_name": [
                             name
-                            for name in current["localExplanations"][0].feature_names
+                            for name in current["holdoutLocalExplanations"][
+                                0
+                            ].feature_names
                         ],
                         "value": [
                             np.mean(
-                                current["localExplanations"][k].values[:, featureIndex]
+                                current["holdoutLocalExplanations"][k].values[
+                                    :, featureIndex
+                                ]
                             )
                             for featureIndex in range(
-                                len(current["localExplanations"][0].feature_names)
+                                len(
+                                    current["holdoutLocalExplanations"][0].feature_names
+                                )
                             )
                         ],
                         "standard_deviation": [
                             np.std(
-                                current["localExplanations"][k].values[:, featureIndex]
+                                current["holdoutLocalExplanations"][k].values[
+                                    :, featureIndex
+                                ]
                             )
                             for featureIndex in range(
-                                len(current["localExplanations"][0].feature_names)
+                                len(
+                                    current["holdoutLocalExplanations"][0].feature_names
+                                )
                             )
                         ],
                     },
                     dtype=object,
                 ).set_index("feature_name").to_csv(
-                    f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv"
+                    f"{runPath}/featureImportance/shapelyExplanations/holdout/{k+1}.csv"
                 )
-                if len(current["holdoutLabels"][k]) > 0:
-                    os.makedirs(
-                        f"{runPath}/featureImportance/shapelyExplanations/holdout",
-                        exist_ok=True,
-                    )
-                    pd.DataFrame.from_dict(
-                        {
-                            "feature_name": [
-                                name
-                                for name in current["holdoutLocalExplanations"][
-                                    0
-                                ].feature_names
-                            ],
-                            "value": [
-                                np.mean(
-                                    current["holdoutLocalExplanations"][k].values[
-                                        :, featureIndex
-                                    ]
-                                )
-                                for featureIndex in range(
-                                    len(
-                                        current["holdoutLocalExplanations"][
-                                            0
-                                        ].feature_names
-                                    )
-                                )
-                            ],
-                            "standard_deviation": [
-                                np.std(
-                                    current["holdoutLocalExplanations"][k].values[
-                                        :, featureIndex
-                                    ]
-                                )
-                                for featureIndex in range(
-                                    len(
-                                        current["holdoutLocalExplanations"][
-                                            0
-                                        ].feature_names
-                                    )
-                                )
-                            ],
-                        },
-                        dtype=object,
-                    ).set_index("feature_name").to_csv(
-                        f"{runPath}/featureImportance/shapelyExplanations/holdout/{k+1}.csv"
-                    )
 
             sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
 

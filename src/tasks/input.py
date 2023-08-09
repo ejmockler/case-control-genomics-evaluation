@@ -7,6 +7,8 @@ import numpy as np
 
 from multiprocess import Pool, Manager, managers
 
+from tasks.data import Genotype, GenotypeData, GenotypeGroup
+
 
 @task(retries=1000)
 def filterTable(table, filterString):
@@ -269,6 +271,14 @@ def prepareDatasets(
     return embedding
 
 
+def createGenotypeDataframe(genotype_dict, filteredVCF):
+    df = pd.DataFrame.from_dict(genotype_dict)
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+    df.index.name = filteredVCF.index.name
+    df.index = filteredVCF.index
+    return df
+
+
 @flow(task_runner=ConcurrentTaskRunner(), log_prints=True)
 def processInputFiles(config):
     clinicalData, externalSamples, annotatedVCF = load(config)
@@ -414,39 +424,38 @@ def processInputFiles(config):
             elif "holdout" in alias:
                 print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
-    caseGenotypes = pd.DataFrame.from_dict(caseGenotypeDict)
-    caseGenotypes = caseGenotypes.loc[:, ~caseGenotypes.columns.duplicated()].copy()
-    caseGenotypes.index.name = filteredVCF.index.name
-    caseGenotypes.index = filteredVCF.index
-    controlGenotypes = pd.DataFrame.from_dict(controlGenotypeDict)
-    controlGenotypes = controlGenotypes.loc[
-        :, ~controlGenotypes.columns.duplicated()
-    ].copy()
-    controlGenotypes.index.name = filteredVCF.index.name
-    controlGenotypes.index = filteredVCF.index
+    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF)
+    controlGenotypesDataframe = createGenotypeDataframe(controlGenotypeDict, filteredVCF)
 
-    holdoutCaseGenotypes = pd.DataFrame()
-    if resolvedHoldoutCaseIDs:
-        holdoutCaseGenotypes = pd.DataFrame.from_dict(holdoutCaseGenotypeDict)
-        holdoutCaseGenotypes = holdoutCaseGenotypes.loc[
-            :, ~holdoutCaseGenotypes.columns.duplicated()
-        ].copy()
-        holdoutCaseGenotypes.index.name = filteredVCF.index.name
-        holdoutCaseGenotypes.index = filteredVCF.index
-        holdoutCaseIDs = resolvedHoldoutCaseIDs
+    holdoutCaseGenotypesDataframe = (
+        createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF)
+        if resolvedHoldoutCaseIDs
+        else (pd.DataFrame(), [])
+    )
+    holdoutControlGenotypesDataframe = (
+        createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF)
+        if resolvedHoldoutControlIDs
+        else (pd.DataFrame(), [])
+    )
 
-    holdoutControlGenotypes = pd.DataFrame()
-    if resolvedHoldoutControlIDs:
-        holdoutControlGenotypes = pd.DataFrame.from_dict(holdoutControlGenotypeDict)
-        holdoutControlGenotypes = holdoutControlGenotypes.loc[
-            :, ~holdoutControlGenotypes.columns.duplicated()
-        ].copy()
-        holdoutControlGenotypes.index.name = filteredVCF.index.name
-        holdoutControlGenotypes.index = filteredVCF.index
-        holdoutControlIDs = resolvedHoldoutControlIDs
+    caseGenotypes = Genotype(caseGenotypesDataframe, resolvedCaseIDs, "Case")
+    controlGenotypes = Genotype(controlGenotypesDataframe, resolvedControlIDs, "Control")
+    holdoutCaseGenotypes = Genotype(
+        holdoutCaseGenotypesDataframe, resolvedHoldoutCaseIDs, "Holdout Case"
+    )
+    holdoutControlGenotypes = Genotype(
+        holdoutControlGenotypesDataframe,
+        resolvedHoldoutControlIDs,
+        "Holdout Control",
+    )
 
-    caseIDs = resolvedCaseIDs
-    controlIDs = resolvedControlIDs
+    genotypeData = GenotypeData(
+        caseGenotypes,
+        controlGenotypes,
+        holdoutCaseGenotypes,
+        holdoutControlGenotypes,
+        filteredClinicalData,
+    )
 
     print(f"\n{len(caseIDs)} cases:\n {caseIDs}")
     print(f"\n{len(controlIDs)} controls:\n {controlIDs}")
@@ -455,75 +464,7 @@ def processInputFiles(config):
     if resolvedHoldoutControlIDs:
         print(f"\n{len(holdoutControlIDs)} holdout controls:\n {holdoutControlIDs}")
 
-    # prepare a dict to hold column names from each dataframe
-    df_dict = {
-        "caseGenotypes": caseGenotypes.columns.tolist(),
-        "controlGenotypes": controlGenotypes.columns.tolist(),
-        "holdoutCaseGenotypes": holdoutCaseGenotypes.columns.tolist(),
-        "holdoutControlGenotypes": holdoutControlGenotypes.columns.tolist(),
-    }
-
-    # prepare a dict to hold duplicates
-    dup_dict = {}
-
-    # check each list against all others for duplicates
-    for df_name, columns in df_dict.items():
-        other_columns = [
-            col for name, cols in df_dict.items() if name != df_name for col in cols
-        ]
-        duplicates = set(columns) & set(other_columns)
-        if duplicates:
-            dup_dict[df_name] = duplicates
-
-    # if any duplicates found, raise an assertion error with details
-    if dup_dict:
-        raise AssertionError(
-            f"Duplicate columns exist in the following dataframes: {dup_dict}"
-        )
-
-    # if no duplicates found, print a success message
-    print("No duplicate columns found!")
-
-    # filter allele frequencies
-    allGenotypes = pd.concat(
-        [
-            caseGenotypes.dropna(how="any", axis=0),
-            controlGenotypes.dropna(how="any", axis=0),
-            holdoutCaseGenotypes.dropna(how="any", axis=0),
-            holdoutControlGenotypes.dropna(how="any", axis=0),
-        ],
-        axis=1,
-    )
-    filteredGenotypes = allGenotypes.loc[
-        allGenotypes.gt(0).sum(axis=1).divide(len(allGenotypes.columns))
-        >= config["vcfLike"]["minAlleleFrequency"]
-    ]
-    print(
-        f"Filtered {len(filteredVCF) - len(filteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
-    )
-    print(f"Kept {len(filteredGenotypes)} alleles")
-
-    caseGenotypes = filteredGenotypes.loc[:, caseGenotypes.columns]
-    controlGenotypes = filteredGenotypes.loc[:, controlGenotypes.columns]
-
-    if len(holdoutCaseGenotypes) > 0:
-        holdoutCaseGenotypes = filteredGenotypes.loc[:, holdoutCaseGenotypes.columns]
-    if len(holdoutControlGenotypes) > 0:
-        holdoutControlGenotypes = filteredGenotypes.loc[
-            :, holdoutControlGenotypes.columns
-        ]
-
-    return [
-        caseGenotypes,
-        caseIDs,
-        holdoutCaseGenotypes,
-        holdoutCaseIDs,
-        controlGenotypes,
-        controlIDs,
-        holdoutControlGenotypes,
-        holdoutControlIDs,
-        filteredClinicalData,
-    ]
+    return genotypeData
 
 
 def toMultiprocessDict(orig_dict, manager):
