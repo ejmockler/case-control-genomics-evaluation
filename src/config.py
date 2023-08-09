@@ -80,7 +80,7 @@ config = {
         "bootstrapIterations": 50,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
-        "lastIteration": 49,
+        "lastIteration": 50,
         "sequesteredIDs": [],
     },
     "model": {

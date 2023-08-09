@@ -194,7 +194,6 @@ def main():
     newWellClassified = True
     countSuffix = 1
 
-    projectSummaryPath = f"projects/{config['tracking']['project']}__summary"
     baseProjectPath = config["tracking"]["project"]
     while newWellClassified:
         gc.collect()
@@ -231,21 +230,6 @@ def main():
             clinicalData,
         )
 
-        if (
-            len(
-                currentResults.loc[
-                    (currentResults["label"] == 1)
-                    & (
-                        currentResults["accuracy"]
-                        >= metaconfig["samples"]["accurateThreshold"]
-                    )
-                ]
-            )
-            == 0
-        ):
-            newWellClassified = False
-            break
-
         samplePerplexities["accuracy"] = currentResults.loc[
             currentResults.index.intersection(samplePerplexities.index)
         ]["accuracy"]
@@ -272,13 +256,22 @@ def main():
         baselineFeatureResults.to_csv(
             f"projects/{config['tracking']['project']}/baselineFeatureSampleResults.csv"
         )
+        if (
+            len(
+                currentResults.loc[
+                    (currentResults["label"] == 1)
+                    & (
+                        currentResults["accuracy"]
+                        >= metaconfig["samples"]["accurateThreshold"]
+                    )
+                ]
+            )
+            == 0
+        ):
+            newWellClassified = False
+            break
         sequesterSamples()
         countSuffix += 1
-
-    os.makedirs(
-        projectSummaryPath,
-        exist_ok=True,
-    )
 
 
 if __name__ == "__main__":

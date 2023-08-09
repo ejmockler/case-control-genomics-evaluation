@@ -385,6 +385,9 @@ def processInputFiles(config):
             missingHoldoutControlIDs,
             resolvedHoldoutControlIDs,
         ) = holdoutControlGenotypeFutures.result()
+    else:
+        holdoutCaseGenotypeDict = {}
+        holdoutControlGenotypeDict = {}
 
     for alias, (IDs, genotypeDict) in {
         "caseAlias": (missingCaseIDs, caseGenotypeDict),
