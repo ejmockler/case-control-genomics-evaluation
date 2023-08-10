@@ -48,23 +48,3 @@ stack = {
         "n_estimators": Integer(10, 100),
     },
 }
-
-
-class ClassificationResult:
-    def __init__(self):
-        self.trainIndices = []
-        self.testIndices = []
-        self.holdoutIndices = []
-        self.globalExplanations = []
-        # ... other attributes
-
-    def calculate_test_AUC(self, labels, probabilities):
-        return [
-            roc_auc_score(
-                label,
-                (probability[:, 1] if len(probability.shape) > 1 else probability),
-            )
-            for label, probability in zip(labels, probabilities)
-        ]
-
-    # ... other methods to calculate or update attributes

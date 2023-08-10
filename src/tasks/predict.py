@@ -1,3 +1,4 @@
+from inspect import isclass
 from io import StringIO
 import json
 import os
@@ -5,9 +6,11 @@ import pickle
 from fastnumbers import check_real
 import matplotlib
 
+from tasks.input import prepareDatasets
+
 matplotlib.use("agg")
 from neptune.types import File
-from prefect import task
+from prefect import flow, task
 
 from skopt import BayesSearchCV
 
@@ -132,46 +135,21 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
             index=embedding["holdoutSampleIndex"],
         )
     embeddingDF.index.name = "id"
-    if config["tracking"]["remote"]:
-        runTracker = neptune.init_run(
-            project=f'{config["tracking"]["entity"]}/{config["tracking"]["project"]}',
-            api_token=config["tracking"]["token"],
-        )
-        runTracker["sys/tags"].add(model.__class__.__name__)
-        runTracker["bootstrapIteration"] = runNumber + 1
-        runTracker["config"] = {
-            key: (item if check_real(item) or isinstance(item, str) else str(item))
-            for key, item in config.items()
-        }
-
-        runTracker["embedding"].upload(serializeDataFrame(embeddingDF))
-        if "holdoutSamples" in embedding:
-            runTracker["holdoutEmbedding"].upload(
-                serializeDataFrame(holdoutEmbeddingDF)
-            )
-        runTracker["clinicalData"].upload(
-            serializeDataFrame(clinicalData.loc[clinicalData.index.isin(clinicalIDs)])
-        )
-
-        runTracker["nVariants"] = len(embedding["variantIndex"])
-        runID = runTracker["sys/id"].fetch()
-        runTracker.stop()
-    else:
-        runPath = f"projects/{config['tracking']['project']}/bootstraps/{runNumber+1}/{model.__class__.__name__}"
-        if not os.path.exists(runPath):
-            os.makedirs(runPath, exist_ok=True)
-        with open(f"{runPath}/config.json", "w") as file:
-            json.dump(config, file)
-        embeddingDF.to_csv(f"{runPath}/embedding.csv")
-        if "holdoutSamples" in embedding:
-            holdoutEmbeddingDF.to_csv(f"{runPath}/holdoutEmbedding.csv")
-        clinicalData.loc[clinicalData.index.isin(clinicalIDs)].to_csv(
-            f"{runPath}/clinicalData.csv"
-        )
-        # hack to log metrics as filenames
-        with open(f"{runPath}/nVariants_{len(embedding['variantIndex'])}", "w") as file:
-            pass
-        runID = runPath
+    runPath = f"projects/{config['tracking']['project']}/bootstraps/{runNumber+1}/{model.__class__.__name__}"
+    if not os.path.exists(runPath):
+        os.makedirs(runPath, exist_ok=True)
+    with open(f"{runPath}/config.json", "w") as file:
+        json.dump(config, file)
+    embeddingDF.to_csv(f"{runPath}/embedding.csv")
+    if "holdoutSamples" in embedding:
+        holdoutEmbeddingDF.to_csv(f"{runPath}/holdoutEmbedding.csv")
+    clinicalData.loc[clinicalData.index.isin(clinicalIDs)].to_csv(
+        f"{runPath}/clinicalData.csv"
+    )
+    # hack to log metric as filename
+    with open(f"{runPath}/nVariants_{len(embedding['variantIndex'])}", "w") as file:
+        pass
+    runID = runPath
     return runID
 
 
@@ -369,15 +347,6 @@ def trackResults(runID, current, config):
     gc.collect()
 
 
-def clone_model(model):
-    ModelClass = type(model)  # Get the type of the model
-    params = model.get_params()  # Get the parameters of the model
-    cloned_model = ModelClass(
-        **params
-    )  # Initialize a new object of the same type with the same parameters
-    return cloned_model
-
-
 def evaluate(
     trainSamples,
     trainLabels,
@@ -455,38 +424,425 @@ def evaluate(
     )
 
 
-def processSampleResult(fold, k, sampleID, current, results):
-    probability = (
+@flow(task_runner=RayTaskRunner())
+def classify(
+    runNumber,
+    model,
+    hyperParameterSpace,
+    genotypeData,
+    clinicalData,
+    innerCvIterator,
+    outerCvIterator,
+    results,
+    config,
+    track=True,
+):
+    trainIDs = set()
+    testIDs = set()
+    holdoutIDs = set()
+    results[runNumber] = {}
+    embedding = prepareDatasets(
+        genotypeData.case.genotype,
+        genotypeData.control.genotype,
+        genotypeData.holdout_case.genotype,
+        genotypeData.holdout_control.genotype,
+        verbose=(True if runNumber == 0 else False),
+    )
+
+    clinicalIDs = list()
+    sampleIndex = (
+        embedding["sampleIndex"]
+        if len(embedding["holdoutSamples"]) == 0
+        else embedding["sampleIndex"] + embedding["holdoutSampleIndex"]
+    )
+
+    for id in sampleIndex:
+        clinicalIDs.extend(id.split("__"))
+
+    totalSampleCount = len(embedding["samples"])
+    caseCount = np.count_nonzero(embedding["labels"])
+    print(f"{totalSampleCount} samples\n")
+    print(f"{caseCount} cases\n")
+    print(f"{totalSampleCount - caseCount} controls\n")
+    if len(embedding["holdoutSamples"]) > 0:
+        holdoutCaseCount = np.count_nonzero(embedding["holdoutLabels"])
+        print(f"{len(embedding['holdoutSamples'])} holdout samples\n")
+        print(f"{holdoutCaseCount} holdout cases\n")
+        print(
+            f"{len(embedding['holdoutSamples']) - holdoutCaseCount} holdout controls\n"
+        )
+
+    current = {}
+    print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
+
+    if track:
+        runID = beginTracking.submit(
+            model, runNumber, embedding, clinicalData, clinicalIDs, config
+        )
+
+    # outer cross-validation
+    crossValIndices = list(
+        outerCvIterator.split(embedding["samples"], embedding["labels"])
+    )
+    current["trainIndices"] = [train for train, _ in crossValIndices]
+    current["testIndices"] = [test for _, test in crossValIndices]
+    trainIDs.update(
+        *[
+            np.array(embedding["sampleIndex"])[indices]
+            for indices in current["trainIndices"]
+        ]
+    )
+    testIDs.update(
+        *[
+            np.array(embedding["sampleIndex"])[indices]
+            for indices in current["testIndices"]
+        ]
+    )
+    holdoutIDs.update(*np.array(embedding["holdoutSampleIndex"]))
+
+    evaluate_args = [
         (
-            current["probabilities"][fold][k]
-            if len(current["probabilities"][fold][k]) <= 1
-            else current["probabilities"][fold][k][1]
+            embedding["samples"][trainIndices],
+            embedding["labels"][trainIndices],
+            embedding["samples"][testIndices],
+            embedding["labels"][testIndices],
+            model,
+            embedding,
+            hyperParameterSpace,
+            innerCvIterator,
+            np.array([embedding["sampleIndex"][i] for i in trainIndices]),
+            np.array([embedding["sampleIndex"][i] for i in testIndices]),
+            embedding["variantIndex"],
+            config,
         )
-        if k < len(current["testIDs"][fold])
-        else (
-            current["holdoutProbabilities"][fold][k - len(current["testIDs"][fold])]
-            if len(
-                current["holdoutProbabilities"][fold][k - len(current["testIDs"][fold])]
+        for trainIndices, testIndices in zip(
+            current["trainIndices"], current["testIndices"]
+        )
+    ]
+
+    # run models sequentially with SHAP to avoid memory issues
+    # if config["model"]["calculateShapelyExplanations"]:
+    outerCrossValResults = []
+    for args in evaluate_args:
+        result = evaluate(*args)
+        outerCrossValResults.append(result)
+        gc.collect()
+    outerCrossValResults = list(map(list, zip(*outerCrossValResults)))
+    # else:
+    # outerCrossValResults = zip(
+    #     *Parallel(n_jobs=-1)(delayed(evaluate)(*args) for args in evaluate_args)
+    # )
+
+    # TODO implement object to structure these results
+    resultNames = [
+        "globalExplanations",
+        "localExplanations",
+        "holdoutLocalExplanations",
+        "probabilities",
+        "holdoutProbabilities",
+        "predictions",
+        "holdoutPredictions",
+        "testLabels",
+        "trainLabels",
+        "holdoutLabels",
+        "trainIDs",
+        "testIDs",
+        "holdoutIDs",
+        "fittedOptimizer",
+        "shapExplainer",
+        "shapMasker",
+    ]
+    current = {
+        **current,
+        **{name: result for name, result in zip(resultNames, outerCrossValResults)},
+    }
+
+    current["testAUC"] = [
+        roc_auc_score(
+            labels,
+            (probabilities[:, 1] if len(probabilities.shape) > 1 else probabilities),
+        )
+        for labels, probabilities in zip(
+            current["testLabels"], current["probabilities"]
+        )
+    ]
+    current["averageTestAUC"] = np.mean(current["testAUC"])
+
+    current["testFPR"] = np.linspace(0, 1, 100)  # Define common set of FPR values
+    current["testTPR"] = []
+    for labels, probabilities in zip(current["testLabels"], current["probabilities"]):
+        fpr, tpr, thresholds = roc_curve(
+            labels,
+            (probabilities[:, 1] if len(probabilities.shape) > 1 else probabilities),
+        )
+
+        # Interpolate TPR at common FPR values
+        tpr_interpolated = np.interp(current["testFPR"], fpr, tpr)
+        current["testTPR"].append(tpr_interpolated)
+    current["averageTestTPR"] = np.mean(current["testTPR"], axis=0)
+
+    if len(embedding["holdoutSamples"]) > 0:
+        current["holdoutAUC"] = [
+            roc_auc_score(
+                labels,
+                (
+                    probabilities[:, 1]
+                    if len(probabilities.shape) > 1
+                    else probabilities
+                ),
             )
-            <= 1
-            else current["holdoutProbabilities"][fold][
-                k - len(current["testIDs"][fold])
-            ][1]
-        )
+            for labels, probabilities in zip(
+                current["holdoutLabels"], current["holdoutProbabilities"]
+            )
+        ]
+        current["averageHoldoutAUC"] = np.mean(current["holdoutAUC"])
+        current["holdoutFPR"] = np.linspace(
+            0, 1, 100
+        )  # Define common set of FPR values
+        current["holdoutTPR"] = []
+        for labels, probabilities in zip(
+            current["holdoutLabels"], current["holdoutProbabilities"]
+        ):
+            fpr, tpr, thresholds = roc_curve(
+                labels,
+                (
+                    probabilities[:, 1]
+                    if len(probabilities.shape) > 1
+                    else probabilities
+                ),
+            )
+            tpr_interpolated = np.interp(current["holdoutFPR"], fpr, tpr)
+            current["holdoutTPR"].append(tpr_interpolated)
+        current["averageHoldoutTPR"] = np.mean(current["holdoutTPR"], axis=0)
+
+    if config["model"]["calculateShapelyExplanations"]:
+        current["averageShapelyExplanations"] = pd.DataFrame.from_dict(
+            {
+                "feature_name": [
+                    name for name in current["localExplanations"][0].feature_names
+                ],
+                "value": [
+                    np.mean(
+                        np.hstack(
+                            [
+                                np.mean(localExplanations.values[:, featureIndex])
+                                for localExplanations in current["localExplanations"]
+                            ]
+                        )
+                    )
+                    for featureIndex in range(
+                        len(current["localExplanations"][0].feature_names)
+                    )
+                ],
+                "standard_deviation": [
+                    np.mean(
+                        np.hstack(
+                            [
+                                np.std(localExplanations.values[:, featureIndex])
+                                for localExplanations in current["localExplanations"]
+                            ]
+                        )
+                    )
+                    for featureIndex in range(
+                        len(current["localExplanations"][0].feature_names)
+                    )
+                ],
+            },
+            dtype=object,
+        ).set_index("feature_name")
+        if len(embedding["holdoutSamples"]) > 0:
+            current["averageHoldoutShapelyExplanations"] = pd.DataFrame.from_dict(
+                {
+                    "feature_name": [
+                        name
+                        for name in current["holdoutLocalExplanations"][0].feature_names
+                    ],
+                    "value": [
+                        np.mean(
+                            np.hstack(
+                                [
+                                    np.mean(localExplanations.values[:, featureIndex])
+                                    for localExplanations in current[
+                                        "holdoutLocalExplanations"
+                                    ]
+                                ]
+                            )
+                        )
+                        for featureIndex in range(
+                            len(current["holdoutLocalExplanations"][0].feature_names)
+                        )
+                    ],
+                    "standard_deviation": [
+                        np.mean(
+                            np.hstack(
+                                [
+                                    np.std(localExplanations.values[:, featureIndex])
+                                    for localExplanations in current[
+                                        "holdoutLocalExplanations"
+                                    ]
+                                ]
+                            )
+                        )
+                        for featureIndex in range(
+                            len(current["holdoutLocalExplanations"][0].feature_names)
+                        )
+                    ],
+                },
+                dtype=object,
+            ).set_index("feature_name")
+    gc.collect()
+
+    if current["globalExplanations"][0] is not None:
+        df = pd.concat(current["globalExplanations"]).reset_index()
+        # calculate mean
+        mean_df = df.groupby("feature_name").mean()
+        # calculate standard deviation
+        std_df = df.groupby("feature_name").std()
+        # rename std_df columns
+        std_df.columns = "stdDev_" + std_df.columns
+        # join mean and std dataframe
+        averageGlobalExplanations = pd.concat([mean_df, std_df], axis=1)
+        current["averageGlobalExplanations"] = averageGlobalExplanations
+
+    caseAccuracy = np.mean(
+        [
+            np.divide(
+                np.sum((predictions[labels == 1] == 1).astype(int)),
+                np.sum((labels == 1).astype(int)),
+            )
+            for predictions, labels in zip(
+                current["predictions"], current["testLabels"]
+            )
+        ]
+    )
+    controlAccuracy = np.mean(
+        [
+            np.divide(
+                np.sum((predictions[labels == 0] == 0).astype(int)),
+                np.sum((labels == 0).astype(int)),
+            )
+            for predictions, labels in zip(
+                current["predictions"], current["testLabels"]
+            )
+        ]
     )
 
-    label = (
-        current["testLabels"][fold][k]
-        if k < len(current["testIDs"][fold])
-        else current["holdoutLabels"][fold][k - len(current["testIDs"][fold])]
-    )
+    results[runNumber] = current
 
-    if sampleID in results["samples"]:
-        results["samples"][sampleID] = np.append(
-            results["samples"][sampleID], probability
+    if track:
+        resultsFuture = trackResults.submit(runID.result(), current, config)
+
+        # plot AUC & hyperparameter convergence
+        plotSubtitle = f"""
+            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+            Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+            
+            {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
+            {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+
+        if len(current["holdoutLabels"]) > 0:
+            holdoutCaseAccuracy = np.mean(
+                [
+                    np.divide(
+                        np.sum((predictions[labels == 1] == 1).astype(int)),
+                        np.sum((labels == 1).astype(int)),
+                    )
+                    for predictions, labels in zip(
+                        current["holdoutPredictions"],
+                        current["holdoutLabels"],
+                    )
+                ]
+            )
+            holdoutControlAccuracy = np.mean(
+                [
+                    np.divide(
+                        np.sum((predictions[labels == 0] == 0).astype(int)),
+                        np.sum((labels == 0).astype(int)),
+                    )
+                    for predictions, labels in zip(
+                        current["holdoutPredictions"],
+                        current["holdoutLabels"],
+                    )
+                ]
+            )
+            holdoutPlotSubtitle = f"""
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                
+                Ethnically variable holdout
+                {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
+                {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+            holdoutVisualizationFuture = trackBootstrapVisualizations.submit(
+                runID.result(),
+                holdoutPlotSubtitle,
+                model.__class__.__name__,
+                current,
+                holdout=True,
+                config=config,
+            )
+            gc.collect()
+
+        visualizationFuture = trackBootstrapVisualizations.submit(
+            runID.result(),
+            plotSubtitle,
+            model.__class__.__name__,
+            current,
+            config=config,
         )
 
-    else:
-        results["samples"][sampleID] = np.atleast_1d(probability)
-        results["labels"][sampleID] = label
+        visualizationFuture.wait()
+        if len(current["holdoutLabels"]) > 0:
+            holdoutVisualizationFuture.wait()
+        resultsFuture.wait()
+
+    results[runNumber]["testCount"] = len(trainIDs)
+    results[runNumber]["trainCount"] = len(testIDs)
+    results[runNumber]["holdoutCount"] = len(holdoutIDs)
+
+    return results
+
+
+@flow()
+def bootstrap(
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
+    clinicalData,
+    model,
+    hyperParameterSpace,
+    innerCvIterator,
+    outerCvIterator,
+    config,
+    track=True,
+):
+    gc.collect()
+    results = {}
+    results["samples"] = {}
+    results["labels"] = {}
+    results["model"] = model.__class__.__name__
+
+    # parallelize with workflow engine in cluster environment
+    for runNumber in range(
+        config["sampling"]["lastIteration"],
+        config["sampling"]["bootstrapIterations"],
+    ):
+        # update results for every bootstrap iteration
+        results = classify(
+            runNumber,
+            model,
+            hyperParameterSpace,
+            caseGenotypes,
+            controlGenotypes,
+            holdoutCaseGenotypes,
+            holdoutControlGenotypes,
+            clinicalData,
+            innerCvIterator,
+            outerCvIterator,
+            results,
+            config,
+            track,
+        )
+        gc.collect()
+
     return results
