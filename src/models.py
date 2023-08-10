@@ -6,11 +6,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import SVC
-from sklearn.base import BaseEstimator
 from xgboost import XGBClassifier
 
 from skopt.space import Categorical, Integer, Real
-import numpy as np
 
 
 class RadialBasisSVC(SVC):

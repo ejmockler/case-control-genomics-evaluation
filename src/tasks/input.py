@@ -7,7 +7,7 @@ import numpy as np
 
 from multiprocess import Pool, Manager, managers
 
-from tasks.data import Genotype, GenotypeData, GenotypeGroup
+from tasks.data import Genotype, GenotypeData
 
 
 @task(retries=1000)
@@ -425,21 +425,26 @@ def processInputFiles(config):
                 print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
     caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF)
-    controlGenotypesDataframe = createGenotypeDataframe(controlGenotypeDict, filteredVCF)
+    controlGenotypesDataframe = createGenotypeDataframe(
+        controlGenotypeDict, filteredVCF
+    )
 
     holdoutCaseGenotypesDataframe = (
         createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF)
         if resolvedHoldoutCaseIDs
-        else (pd.DataFrame(), [])
+        else pd.DataFrame()
     )
+
     holdoutControlGenotypesDataframe = (
         createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF)
         if resolvedHoldoutControlIDs
-        else (pd.DataFrame(), [])
+        else pd.DataFrame()
     )
 
     caseGenotypes = Genotype(caseGenotypesDataframe, resolvedCaseIDs, "Case")
-    controlGenotypes = Genotype(controlGenotypesDataframe, resolvedControlIDs, "Control")
+    controlGenotypes = Genotype(
+        controlGenotypesDataframe, resolvedControlIDs, "Control"
+    )
     holdoutCaseGenotypes = Genotype(
         holdoutCaseGenotypesDataframe, resolvedHoldoutCaseIDs, "Holdout Case"
     )
@@ -454,7 +459,6 @@ def processInputFiles(config):
         controlGenotypes,
         holdoutCaseGenotypes,
         holdoutControlGenotypes,
-        filteredClinicalData,
     )
 
     print(f"\n{len(caseIDs)} cases:\n {caseIDs}")
@@ -464,7 +468,7 @@ def processInputFiles(config):
     if resolvedHoldoutControlIDs:
         print(f"\n{len(holdoutControlIDs)} holdout controls:\n {holdoutControlIDs}")
 
-    return genotypeData
+    return genotypeData, filteredClinicalData
 
 
 def toMultiprocessDict(orig_dict, manager):

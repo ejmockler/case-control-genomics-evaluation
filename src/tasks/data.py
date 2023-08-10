@@ -19,22 +19,25 @@ class Genotype:
 
 @dataclass
 class GenotypeData:
-    case_genotype_group: Genotype
-    holdout_case_genotype_group: Genotype
-    control_genotype_group: Genotype
-    holdout_control_genotype_group: Genotype
-    filtered_clinical_data: pd.DataFrame
+    case: Genotype
+    holdout_case: Genotype
+    control: Genotype
+    holdout_control: Genotype
 
     def __post_init__(self):
         self._check_duplicates()
 
     def _check_duplicates(self):
-        # prepare a dict to hold column names from each dataframe
+        # prepare a dict to hold hashable representations of each dataframe
         df_dict = {
-            "case_genotypes": self.case_genotype_group.genotypes,
-            "control_genotypes": self.control_genotype_group.genotypes,
-            "holdout_case_genotypes": self.holdout_case_genotype_group.genotypes,
-            "holdout_control_genotypes": self.holdout_control_genotype_group.genotypes,
+            "case_genotypes": [tuple(row) for row in self.case.genotype.values],
+            "control_genotypes": [tuple(row) for row in self.control.genotype.values],
+            "holdout_case_genotypes": [
+                tuple(row) for row in self.holdout_case.genotype.values
+            ],
+            "holdout_control_genotypes": [
+                tuple(row) for row in self.holdout_control.genotype.values
+            ],
         }
 
         # prepare a dict to hold duplicates
@@ -50,7 +53,9 @@ class GenotypeData:
             ]
             duplicates = set(genotypes) & set(other_genotypes)
             if duplicates:
-                dup_dict[df_name] = duplicates
+                dup_dict[df_name] = list(
+                    duplicates
+                )  # Convert set back to list to show duplicates
 
         # if any duplicates found, raise an assertion error with details
         if dup_dict:
@@ -72,24 +77,24 @@ class GenotypeData:
         )
         print(f"Kept {len(filtered_genotypes)} alleles")
 
-        self.case_genotype_group.genotypes = [
+        self.case.genotype = [
             Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-            for geno in self.case_genotype_group.genotypes
+            for geno in self.case.genotype
         ]
-        self.control_genotype_group.genotypes = [
+        self.control.genotype = [
             Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-            for geno in self.control_genotype_group.genotypes
+            for geno in self.control.genotype
         ]
 
-        if len(self.holdout_case_genotype_group.genotypes) > 0:
-            self.holdout_case_genotype_group.genotypes = [
+        if len(self.holdout_case.genotype) > 0:
+            self.holdout_case.genotype = [
                 Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-                for geno in self.holdout_case_genotype_group.genotypes
+                for geno in self.holdout_case.genotype
             ]
-        if len(self.holdout_control_genotype_group.genotypes) > 0:
-            self.holdout_control_genotype_group.genotypes = [
+        if len(self.holdout_control.genotype) > 0:
+            self.holdout_control.genotype = [
                 Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-                for geno in self.holdout_control_genotype_group.genotypes
+                for geno in self.holdout_control.genotype
             ]
 
 
