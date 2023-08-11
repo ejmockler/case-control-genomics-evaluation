@@ -456,17 +456,19 @@ def processInputFiles(config):
 
     genotypeData = GenotypeData(
         caseGenotypes,
-        controlGenotypes,
         holdoutCaseGenotypes,
+        controlGenotypes,
         holdoutControlGenotypes,
     )
 
-    print(f"\n{len(caseIDs)} cases:\n {caseIDs}")
-    print(f"\n{len(controlIDs)} controls:\n {controlIDs}")
+    print(f"\n{len(resolvedCaseIDs)} cases:\n {resolvedCaseIDs}")
+    print(f"\n{len(resolvedControlIDs)} controls:\n {resolvedControlIDs}")
     if resolvedHoldoutCaseIDs:
-        print(f"\n{len(holdoutCaseIDs)} holdout cases:\n {holdoutCaseIDs}")
+        print(f"\n{len(resolvedHoldoutCaseIDs)} holdout cases:\n {holdoutCaseIDs}")
     if resolvedHoldoutControlIDs:
-        print(f"\n{len(holdoutControlIDs)} holdout controls:\n {holdoutControlIDs}")
+        print(
+            f"\n{len(resolvedHoldoutControlIDs)} holdout controls:\n {holdoutControlIDs}"
+        )
 
     return genotypeData, filteredClinicalData
 

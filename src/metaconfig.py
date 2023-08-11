@@ -13,5 +13,5 @@ metaconfig = {
             },
         },
     },
-    "tracking": {"lastIteration": 5},
+    "tracking": {"lastIteration": 0},
 }

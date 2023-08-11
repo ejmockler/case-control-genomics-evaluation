@@ -3,12 +3,16 @@ from io import StringIO
 import json
 import os
 import pickle
-from fastnumbers import check_real
 import matplotlib
 
-from tasks.input import prepareDatasets
-
 matplotlib.use("agg")
+
+from sklearn.metrics import roc_auc_score, roc_curve
+
+from tasks.input import prepareDatasets
+from tasks.visualize import trackBootstrapVisualizations
+from prefect_ray.task_runners import RayTaskRunner
+
 from neptune.types import File
 from prefect import flow, task
 
@@ -19,7 +23,6 @@ from copy import deepcopy
 
 import pandas as pd
 import numpy as np
-import neptune
 import shap
 
 import gc
@@ -429,7 +432,10 @@ def classify(
     runNumber,
     model,
     hyperParameterSpace,
-    genotypeData,
+    caseGenotypes,
+    controlGenotypes,
+    holdoutCaseGenotypes,
+    holdoutControlGenotypes,
     clinicalData,
     innerCvIterator,
     outerCvIterator,
@@ -442,10 +448,10 @@ def classify(
     holdoutIDs = set()
     results[runNumber] = {}
     embedding = prepareDatasets(
-        genotypeData.case.genotype,
-        genotypeData.control.genotype,
-        genotypeData.holdout_case.genotype,
-        genotypeData.holdout_control.genotype,
+        caseGenotypes,
+        controlGenotypes,
+        holdoutCaseGenotypes,
+        holdoutControlGenotypes,
         verbose=(True if runNumber == 0 else False),
     )
 

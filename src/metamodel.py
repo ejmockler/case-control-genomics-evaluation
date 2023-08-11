@@ -170,7 +170,7 @@ def readSampleIDs(table, label):
     return sampleIDs.index.tolist()
 
 
-def sequesterSamples():
+def sequesterOutlierSamples():
     samples = {
         "accurate": pd.read_csv(
             f"projects/{config['tracking']['project']}/accurateSamples.csv",
@@ -199,17 +199,14 @@ def main():
         gc.collect()
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
         if countSuffix <= metaconfig["tracking"]["lastIteration"]:
-            sequesterSamples()
+            sequesterOutlierSamples()
             countSuffix += 1
             continue
         else:
             (
                 results,
+                genotypeData,
                 clinicalData,
-                caseGenotypes,
-                controlGenotypes,
-                holdoutCaseGenotypes,
-                holdoutControlGenotypes,
             ) = runMLstack(config)
             config["sampling"]["lastIteration"] = 0
         currentResults = pd.read_csv(
@@ -223,10 +220,10 @@ def main():
             baselineFeatureResults,
         ) = measureIterations(
             currentResults,
-            caseGenotypes,
-            controlGenotypes,
-            holdoutCaseGenotypes,
-            holdoutControlGenotypes,
+            genotypeData.case.genotype,
+            genotypeData.control.genotype,
+            genotypeData.holdout_case.genotype,
+            genotypeData.holdout_control.genotype,
             clinicalData,
         )
 
@@ -270,7 +267,7 @@ def main():
         ):
             newWellClassified = False
             break
-        sequesterSamples()
+        sequesterOutlierSamples()
         countSuffix += 1
 
 

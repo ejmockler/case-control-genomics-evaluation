@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from joblib import Parallel, delayed
 from prefect import task
 from sklearn.metrics import roc_auc_score, roc_curve
 from tqdm import tqdm
@@ -116,6 +117,90 @@ class ClassificationResult:
         ]
 
     # ... other methods to calculate or update attributes
+
+
+@task()
+def load_fold_dataframe(args):
+    field, runID = args
+    try:
+        if field == "testLabels" or field == "featureImportance/modelCoefficients":
+            return pd.concat(
+                [pd.read_csv(f"{field}/{runID}_{i}.csv") for i in range(1, 11)]
+            )
+        elif "average" in field.lower():
+            return pd.read_csv(f"{field}/{runID}_average.csv")
+        else:
+            return pd.read_csv(f"{field}/{runID}.csv")
+    except:
+        pass
+
+
+def serializeBootstrapResults(modelResult, sampleResults):
+    for j in range(
+        config["sampling"]["lastIteration"],
+        config["sampling"]["bootstrapIterations"],
+    ):
+        current = modelResult[j]
+        sample_result_args = [
+            (fold, k, sampleID, current, modelResult)
+            for fold in range(config["sampling"]["crossValIterations"])
+            for k, sampleID in enumerate(
+                [*current["testIDs"][fold], *current["holdoutIDs"][fold]]
+            )
+        ]
+        Parallel(n_jobs=-1, backend="threading")(
+            delayed(processSampleResult)(*args) for args in sample_result_args
+        )
+    for sampleID in modelResult["samples"].keys():
+        if sampleID not in sampleResults:
+            # label, probability
+            sampleResults[sampleID] = [
+                modelResult["labels"][sampleID],
+                modelResult["samples"][sampleID],
+            ]
+        else:
+            sampleResults[sampleID][1] = np.append(
+                sampleResults[sampleID][1], modelResult["samples"][sampleID]
+            )
+    return sampleResults
+
+
+def serializeResultsDataframe(sampleResults):
+    for sampleID in sampleResults:
+        # add accuracy
+        sampleResults[sampleID].append(
+            np.mean(
+                np.mean(
+                    [
+                        (
+                            np.around(probability[1])
+                            if len(probability.shape) > 0
+                            else np.around(probability)
+                        )
+                        == sampleResults[sampleID][0]  # label index
+                        for probability in np.hstack(
+                            np.array(sampleResults[sampleID][1])
+                        )  # probability index
+                    ]
+                ),
+            )
+        )
+
+    sampleResultsDataFrame = pd.DataFrame.from_dict(
+        sampleResults, orient="index", columns=["label", "probability", "accuracy"]
+    )
+    sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
+        "probability"
+    ].map(
+        lambda x: np.mean(
+            np.array(x)[:, 1]
+            if np.array(x).ndim > 1 and np.array(x).shape[1] > 1
+            else np.mean(np.array(x))
+        )
+    )
+    np.set_printoptions(threshold=np.inf)
+    sampleResultsDataFrame.index.name = "id"
+    return sampleResultsDataFrame
 
 
 def processSampleResult(fold, k, sampleID, current, results):

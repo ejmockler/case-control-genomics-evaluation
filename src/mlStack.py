@@ -1,48 +1,34 @@
 import asyncio
-from inspect import isclass
 import pickle
 import os
-import sys
 import numpy as np
 import neptune
 import pandas as pd
 import ray
-import plotly.express as px
 import matplotlib
-from tqdm import tqdm
 
-from tasks.data import recoverPastRuns
+from tasks.data import (
+    recoverPastRuns,
+    serializeBootstrapResults,
+    serializeResultsDataframe,
+)
+from tasks.visualize import trackProjectVisualizations
 
 matplotlib.use("agg")
 
-from prefect_ray.task_runners import RayTaskRunner
-from prefect.task_runners import ConcurrentTaskRunner
+
 from prefect import flow, task
-from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
 
 from tasks.input import (
-    fromMultiprocessDict,
     processInputFiles,
-    prepareDatasets,
-    toMultiprocessDict,
 )
 from tasks.predict import (
-    beginTracking,
     bootstrap,
-    evaluate,
-    serializeDataFrame,
-    trackResults,
 )
-from tasks.visualize import (
-    trackBootstrapVisualizations,
-)
-from tasks.data import processSampleResults
-from neptune.types import File
 from config import config
 from models import stack as modelStack
 
-import gc
 from joblib import Parallel, delayed
 
 
@@ -72,90 +58,6 @@ def download_file(run_id, field="sampleResults", extension="csv", config=config)
     run.stop()
 
 
-@task()
-def load_fold_dataframe(args):
-    field, runID = args
-    try:
-        if field == "testLabels" or field == "featureImportance/modelCoefficients":
-            return pd.concat(
-                [pd.read_csv(f"{field}/{runID}_{i}.csv") for i in range(1, 11)]
-            )
-        elif "average" in field.lower():
-            return pd.read_csv(f"{field}/{runID}_average.csv")
-        else:
-            return pd.read_csv(f"{field}/{runID}.csv")
-    except:
-        pass
-
-
-def serializeBootstrapResults(modelResult, sampleResults):
-    for j in range(
-        config["sampling"]["lastIteration"],
-        config["sampling"]["bootstrapIterations"],
-    ):
-        current = modelResult[j]
-        sample_result_args = [
-            (fold, k, sampleID, current, modelResult)
-            for fold in range(config["sampling"]["crossValIterations"])
-            for k, sampleID in enumerate(
-                [*current["testIDs"][fold], *current["holdoutIDs"][fold]]
-            )
-        ]
-        Parallel(n_jobs=-1, backend="threading")(
-            delayed(processSampleResult)(*args) for args in sample_result_args
-        )
-    for sampleID in modelResult["samples"].keys():
-        if sampleID not in sampleResults:
-            # label, probability
-            sampleResults[sampleID] = [
-                modelResult["labels"][sampleID],
-                modelResult["samples"][sampleID],
-            ]
-        else:
-            sampleResults[sampleID][1] = np.append(
-                sampleResults[sampleID][1], modelResult["samples"][sampleID]
-            )
-    return sampleResults
-
-
-def serializeResultsDataframe(sampleResults):
-    for sampleID in sampleResults:
-        # add accuracy
-        sampleResults[sampleID].append(
-            np.mean(
-                np.mean(
-                    [
-                        (
-                            np.around(probability[1])
-                            if len(probability.shape) > 0
-                            else np.around(probability)
-                        )
-                        == sampleResults[sampleID][0]  # label index
-                        for probability in np.hstack(
-                            np.array(sampleResults[sampleID][1])
-                        )  # probability index
-                    ]
-                ),
-            )
-        )
-
-    sampleResultsDataFrame = pd.DataFrame.from_dict(
-        sampleResults, orient="index", columns=["label", "probability", "accuracy"]
-    )
-    sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
-        "probability"
-    ].map(
-        lambda x: np.mean(
-            np.array(x)[:, 1]
-            if np.array(x).ndim > 1 and np.array(x).shape[1] > 1
-            else np.mean(np.array(x))
-        )
-    )
-    np.set_printoptions(threshold=np.inf)
-    sampleResultsDataFrame.index.name = "id"
-    return sampleResultsDataFrame
-
-
 @flow()
 def main(
     config=config,
@@ -174,7 +76,10 @@ def main(
 
     bootstrap_args = [
         (
-            genotypeData,
+            genotypeData.case.genotype,
+            genotypeData.control.genotype,
+            genotypeData.holdout_case.genotype,
+            genotypeData.holdout_control.genotype,
             clinicalData,
             model,
             hyperParameterSpace,
@@ -334,30 +239,17 @@ def main(
                         .groupby("feature_name")
                         .mean()
                     )
-                if config["tracking"]["remote"]:
-                    projectTracker["averageShapelyExplanations"].upload(
-                        serializeDataFrame(averageShapelyExplanationsDataFrame)
+                os.makedirs(
+                    f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
+                    exist_ok=True,
+                )
+                averageShapelyExplanationsDataFrame.to_csv(
+                    f"projects/{config['tracking']['project']}/averageShapelyExplanations.csv"
+                )
+                if "averageHoldoutShapelyExplanations" in modelResult[j]:
+                    averageHoldoutShapelyExplanationsDataFrame.to_csv(
+                        f"projects/{config['tracking']['project']}/averageHoldoutShapelyExplanations.csv"
                     )
-                    if "averageHoldoutShapelyExplanations" in modelResult[j]:
-                        projectTracker[
-                            "averageHoldoutShapelyExplanationsDataFrame"
-                        ].upload(
-                            serializeDataFrame(
-                                averageHoldoutShapelyExplanationsDataFrame
-                            )
-                        )
-                else:
-                    os.makedirs(
-                        f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
-                        exist_ok=True,
-                    )
-                    averageShapelyExplanationsDataFrame.to_csv(
-                        f"projects/{config['tracking']['project']}/averageShapelyExplanations.csv"
-                    )
-                    if "averageHoldoutShapelyExplanations" in modelResult[j]:
-                        averageHoldoutShapelyExplanationsDataFrame.to_csv(
-                            f"projects/{config['tracking']['project']}/averageHoldoutShapelyExplanations.csv"
-                        )
             if "globalExplanations" in bootstrapResult and isinstance(
                 bootstrapResult["globalExplanations"][0], pd.DataFrame
             ):
@@ -374,18 +266,13 @@ def main(
                 .groupby("feature_name")
                 .mean()
             )
-            if config["tracking"]["remote"]:
-                projectTracker[f"averageModelCoefficients/{modelName}"].upload(
-                    serializeDataFrame(averageGlobalExplanationsDataFrame)
-                )
-            else:
-                os.makedirs(
-                    f"projects/{config['tracking']['project']}/averageModelCoefficients/",
-                    exist_ok=True,
-                )
-                averageGlobalExplanationsDataFrame.to_csv(
-                    f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
-                )
+            os.makedirs(
+                f"projects/{config['tracking']['project']}/averageModelCoefficients/",
+                exist_ok=True,
+            )
+            averageGlobalExplanationsDataFrame.to_csv(
+                f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
+            )
 
         # Calculate mean over bootstraps (axis=0) for each TPR value
         tprFprAucByInstance[modelName][0] = np.mean(
@@ -410,22 +297,25 @@ def main(
         lambda x: np.array2string(np.array(x), separator=",")
     )
 
-    if config["tracking"]["remote"]:
-        projectTracker["sampleResults"].upload(
-            serializeDataFrame(sampleResultsDataFrame)
-        )
-        projectTracker["sampleResultsObject"].upload(
-            File.as_pickle(sampleResultsDataFrame)
-        )
-    else:
-        sampleResultsDataFrame.to_csv(
-            f"projects/{config['tracking']['project']}/sampleResults.csv"
-        )
+    sampleResultsDataFrame.to_csv(
+        f"projects/{config['tracking']['project']}/sampleResults.csv"
+    )
 
-    s
+    trackProjectVisualizations(
+        sampleResultsDataFrame,
+        genotypeData,
+        results,
+        modelStack,
+        tprFprAucByInstance,
+        holdoutTprFprAucByInstance,
+        holdoutLabelsProbabilitiesByModelName,
+        testLabelsProbabilitiesByModelName,
+        config=config,
+    )
 
     return (
         results,
+        genotypeData,
         clinicalData,
     )
 
@@ -449,11 +339,4 @@ if __name__ == "__main__":
     if clearHistory:
         asyncio.run(remove_all_flows())
 
-    results = asyncio.run(main())
-    pickle.dump(
-        results,
-        open(
-            f"projects/{config['tracking']['project']}/results_{config['tracking']['project']}.pkl",
-            "wb",
-        ),
-    )
+    main()

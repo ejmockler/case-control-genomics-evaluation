@@ -1,9 +1,6 @@
-from env import neptune_api_token
-
-
 config = {
     "vcfLike": {
-        "path": "../notebook/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -13,21 +10,20 @@ config = {
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of first sample ID in compound sample ID
         "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency
-        "minAlleleFrequency": 0.05,  # filter out variants with allele frequency less than this
+        "minAlleleFrequency": 0.01,  # filter out variants with allele frequency less than this
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "Nucleoporin genes",  # name of the experiment
+        "name": "ALSoD genes, male individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPS-50",
+        "project": "ALS-ALSoD-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
-        "token": neptune_api_token,
         "remote": False,  # if True, log to Neptune
     },
     "clinicalTable": {
-        "path": "../notebook/ACWM.xlsx",  # clinical data as Excel spreadsheet
+        "path": "../adhoc analysis/ACWM.xlsx",  # clinical data as Excel spreadsheet
         "idColumn": "ExternalSampleId",  # genotype ID header
         "subjectIdColumn": "ExternalSubjectId",  # unique ID for each patient
         "labelColumn": "Subject Group",  # header that has case/control labels
@@ -37,15 +33,15 @@ config = {
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85 & Sex=='Male'",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
-            "../notebook/igsr-1000 genomes phase 3 release.tsv",
-            # "../notebook/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
-            "../notebook/ACWM_ethnicallyVariable.tsv",
-            "../notebook/ACWM_ethnicallyVariable.tsv",
-            "../notebook/igsr-1000 genomes phase 3 release.tsv",
+            "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
+            # "../adhoc analysis/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
+            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
+            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
+            "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
         ],  # external sample table
         "label": [
             "control",
@@ -69,18 +65,18 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Population name`!='Finnish'",  # remove finnish samples due to unusual homogeneity (verify w/ PCA)
+            "`Superpopulation code`=='EUR' & `Sex`=='male'",
             # "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
-            "`Superpopulation code`!='EUR' & `Population name`!='Finnish'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Male'",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Male'",
+            "`Superpopulation code`!='EUR' & `Sex`=='male'",
         ],
     },
     "sampling": {
         "bootstrapIterations": 50,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
-        "lastIteration": 50,
+        "lastIteration": 0,
         "sequesteredIDs": [],
     },
     "model": {
