@@ -1,4 +1,3 @@
-from inspect import isclass
 from io import StringIO
 import json
 import os
@@ -19,7 +18,6 @@ from prefect import flow, task
 from skopt import BayesSearchCV
 
 from config import config
-from copy import deepcopy
 
 import pandas as pd
 import numpy as np
@@ -109,7 +107,7 @@ def optimizeHyperparameters(
         parameterSpace,
         cv=cvIterator,
         n_jobs=n_jobs,
-        n_points=4,
+        n_points=2,
         return_train_score=True,
         n_iter=25,
         scoring=metricFunction,
@@ -124,7 +122,6 @@ def serializeDataFrame(dataframe):
     return File.from_stream(stream, extension="csv")
 
 
-@task(retries=1000)
 def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config):
     embeddingDF = pd.DataFrame(
         data=embedding["samples"],
@@ -156,7 +153,6 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
     return runID
 
 
-@task(retries=1000)
 def trackResults(runID, current, config):
     sampleResultsDataframe = pd.DataFrame.from_dict(
         {
@@ -482,7 +478,7 @@ def classify(
     print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
 
     if track:
-        runID = beginTracking.submit(
+        runID = beginTracking(
             model, runNumber, embedding, clinicalData, clinicalIDs, config
         )
 
@@ -736,7 +732,7 @@ def classify(
     results[runNumber] = current
 
     if track:
-        resultsFuture = trackResults.submit(runID.result(), current, config)
+        trackResults(runID, current, config)
 
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
@@ -778,8 +774,8 @@ def classify(
                 Ethnically variable holdout
                 {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
                 {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
-            holdoutVisualizationFuture = trackBootstrapVisualizations.submit(
-                runID.result(),
+            trackBootstrapVisualizations(
+                runID,
                 holdoutPlotSubtitle,
                 model.__class__.__name__,
                 current,
@@ -788,18 +784,13 @@ def classify(
             )
             gc.collect()
 
-        visualizationFuture = trackBootstrapVisualizations.submit(
-            runID.result(),
+        trackBootstrapVisualizations(
+            runID,
             plotSubtitle,
             model.__class__.__name__,
             current,
             config=config,
         )
-
-        visualizationFuture.wait()
-        if len(current["holdoutLabels"]) > 0:
-            holdoutVisualizationFuture.wait()
-        resultsFuture.wait()
 
     results[runNumber]["testCount"] = len(trainIDs)
     results[runNumber]["trainCount"] = len(testIDs)
