@@ -203,6 +203,8 @@ def trackResults(runID, current, config):
         trainLabelsSeries.to_csv(f"{runPath}/trainLabels/{k+1}.csv")
         trainIDsSeries.to_csv(f"{runPath}/trainIDs/{k+1}.csv")
 
+        sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
+
         if len(current["holdoutLabels"][k]) > 0:
             holdoutLabelsSeries = pd.Series(
                 current["holdoutLabels"][k], name="testLabel"
@@ -290,9 +292,6 @@ def trackResults(runID, current, config):
                     f"{runPath}/featureImportance/shapelyExplanations/holdout/{k+1}.csv"
                 )
 
-            sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
-
-        if config["model"]["calculateShapelyExplanations"]:
             with open(
                 f"{runPath}/featureImportance/shapelyExplanations/shapExplainersPerFold.pkl",
                 "wb",
