@@ -109,7 +109,7 @@ def optimizeHyperparameters(
         n_jobs=n_jobs,
         n_points=2,
         return_train_score=True,
-        n_iter=25,
+        n_iter=20,
         scoring=metricFunction,
     )
     optimizer.fit(samples, labels)
@@ -558,6 +558,7 @@ def classify(
         **{name: result for name, result in zip(resultNames, outerCrossValResults)},
     }
 
+    current["embedding"] = embedding
     current["testAUC"] = [
         roc_auc_score(
             labels,

@@ -575,7 +575,7 @@ def trackProjectVisualizations(
 
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
         
-        {config["tracking"]["name"]}, {len(genotypeData.case.genotype)} variants
+        {config["tracking"]["name"]}, {results[0]['embedding']["samples"].shape[1]} variants
         Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
         {len(seenCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(seenControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
@@ -672,7 +672,7 @@ def trackProjectVisualizations(
     if bootstrapHoldoutCount > 0:
         holdoutPlotSubtitle = f"""
             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-            {config["tracking"]["name"]}, {len(genotypeData.case.genotype)} variants
+            {config["tracking"]["name"]}, {results[0]["embedding"]["samples"].shape[1]} variants
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
             Ethnically variable holdout
