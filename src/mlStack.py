@@ -110,7 +110,10 @@ def main(
     for i in range(len(modelStack)):
         modelResult = results[i]
         modelName = modelResult["model"]
-        sampleResults = serializeBootstrapResults(modelResult, sampleResults)
+        sampleResults[modelName] = serializeBootstrapResults(
+            modelResult,
+            sampleResults,
+        )
         if modelName not in testLabelsProbabilitiesByModelName:
             testLabelsProbabilitiesByModelName[modelName] = [[], []]
         if modelName not in holdoutLabelsProbabilitiesByModelName:
@@ -120,6 +123,7 @@ def main(
         if modelName not in holdoutTprFprAucByInstance:
             holdoutTprFprAucByInstance[modelName] = [[], [], 0]
         globalExplanationsList = []
+        modelSampleResultList = []
         for j in range(config["sampling"]["bootstrapIterations"]):
             bootstrapResult = modelResult[j]
             testFlattenedCrossValIndex = 0
@@ -258,6 +262,27 @@ def main(
                 lastVariantCount = variantCount
 
                 globalExplanationsList += bootstrapResult["globalExplanations"]
+            modelSampleResultList += pd.DataFrame.from_dict(
+                {
+                    "probability": [
+                        probability[1]
+                        for foldResults in [
+                            *bootstrapResult["probabilities"],
+                            *bootstrapResult["holdoutProbabilities"],
+                        ]
+                        for probability in foldResults
+                    ],
+                    "id": [
+                        id
+                        for foldResults in [
+                            *bootstrapResult["testIDs"],
+                            *bootstrapResult["holdoutIDs"],
+                        ]
+                        for id in foldResults
+                    ],
+                },
+                dtype=object,
+            ).set_index("id")
 
         if globalExplanationsList:
             averageGlobalExplanationsDataFrame = (
@@ -267,12 +292,23 @@ def main(
                 .mean()
             )
             os.makedirs(
-                f"projects/{config['tracking']['project']}/averageModelCoefficients/",
+                f"projects/{config['tracking']['project']}/modelSummary/{modelName}/",
                 exist_ok=True,
             )
             averageGlobalExplanationsDataFrame.to_csv(
-                f"projects/{config['tracking']['project']}/averageModelCoefficients/{modelName}.csv"
+                f"projects/{config['tracking']['project']}/modelSummary/{modelName}/averageFeatureCoefficients.csv"
             )
+
+        os.makedirs(
+            f"projects/{config['tracking']['project']}/modelSummary/{modelName}/",
+            exist_ok=True,
+        )
+        averageModelSampleResultDataFrame = (
+            pd.concat(modelSampleResultList).reset_index().groupby("id").mean()
+        )
+        averageModelSampleResultDataFrame.to_csv(
+            f"projects/{config['tracking']['project']}/modelSummary/{modelName}/averageSampleResults.csv"
+        )
 
         # Calculate mean over bootstraps (axis=0) for each TPR value
         tprFprAucByInstance[modelName][0] = np.mean(

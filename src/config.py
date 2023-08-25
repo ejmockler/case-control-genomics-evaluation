@@ -16,9 +16,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSoD genes, male individuals",  # name of the experiment
+        "name": "ALSoD genes, female individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-1MAF",
+        "project": "ALS-ALSoD-females-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -33,7 +33,7 @@ config = {
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "pct_european>=0.85 & Sex=='Male'",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85 & Sex=='Female'",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
@@ -65,11 +65,11 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Sex`=='male'",
+            "`Superpopulation code`=='EUR' & `Sex`=='female'",
             # "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Male'",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Male'",
-            "`Superpopulation code`!='EUR' & `Sex`=='male'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Female'",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Female'",
+            "`Superpopulation code`!='EUR' & `Sex`=='female'",
         ],
     },
     "sampling": {

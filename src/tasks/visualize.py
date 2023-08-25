@@ -762,13 +762,16 @@ def trackProjectVisualizations(
     aucPlot.savefig(
         f"projects/{config['tracking']['project']}/aucPlot.png", bbox_inches="tight"
     )
-    confusionMatrixPath = f"projects/{config['tracking']['project']}/confusionMatrix"
-    os.makedirs(confusionMatrixPath, exist_ok=True)
+
     for name, confusionMatrix in zip(
         list(testLabelsProbabilitiesByModelName.keys()), confusionMatrixInstanceList
     ):
+        confusionMatrixPath = (
+            f"projects/{config['tracking']['project']}/modelSummary/{name}"
+        )
+        os.makedirs(confusionMatrixPath, exist_ok=True)
         confusionMatrix.savefig(
-            f"{confusionMatrixPath}/{name}.svg",
+            f"{confusionMatrixPath}/confusionMatrix.svg",
             bbox_inches="tight",
         )
     averageConfusionMatrix.savefig(
@@ -822,16 +825,16 @@ def trackProjectVisualizations(
             f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.png",
             bbox_inches="tight",
         )
-        confusionMatrixPath = (
-            f"projects/{config['tracking']['project']}/confusionMatrix/holdout"
-        )
-        os.makedirs(confusionMatrixPath, exist_ok=True)
         for name, confusionMatrix in zip(
             list(testLabelsProbabilitiesByModelName.keys()),
             holdoutConfusionMatrixInstanceList,
         ):
+            confusionMatrixPath = (
+                f"projects/{config['tracking']['project']}/modelSummary/holdout/{name}"
+            )
+            os.makedirs(confusionMatrixPath, exist_ok=True)
             confusionMatrix.savefig(
-                f"{confusionMatrixPath}/{name}.svg", bbox_inches="tight"
+                f"{confusionMatrixPath}/confusionMatrix.svg", bbox_inches="tight"
             )
         averageHoldoutConfusionMatrix.savefig(
             f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.svg",

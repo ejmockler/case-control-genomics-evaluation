@@ -1,7 +1,10 @@
 from dataclasses import dataclass
+from typing import Optional
 from joblib import Parallel, delayed
 from prefect import task
 from sklearn.metrics import roc_auc_score, roc_curve
+from shap import Explainer
+from shap.maskers import Masker
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -20,6 +23,9 @@ class Genotype:
 
 @dataclass
 class GenotypeData:
+    """ "Initializes storage for genotypes and their transformation methods."""
+
+    # TODO add allele model method
     case: Genotype
     holdout_case: Genotype
     control: Genotype
@@ -99,24 +105,166 @@ class GenotypeData:
             ]
 
 
-class ClassificationResult:
-    def __init__(self):
-        self.trainIndices = []
-        self.testIndices = []
-        self.holdoutIndices = []
-        self.globalExplanations = []
-        # ... other attributes
+@dataclass
+class SampleMetadata:
+    """Initializes storage for sample metadata."""
 
-    def calculate_test_AUC(self, labels, probabilities):
-        return [
+    ids: list[str]
+    labels: list[str]
+    set: Optional[str]
+    global_feature_explanations: Optional[pd.DataFrame]
+
+
+@dataclass
+class FoldResult(SampleMetadata):
+    """Initializes storage for sample results."""
+
+    probabilities: list
+    local_feature_explanations: Optional[pd.DataFrame]
+    shap_explainer: Optional[list[Explainer]]
+    shap_masker: Optional[list[Masker]]
+    fitted_optimizer: object
+    auc: Optional[list[float]]
+    tpr: Optional[list[float]]
+    fpr = np.linspace(0, 1, 100)  # Define common set of FPR values
+
+    def __post_init__(self):
+        self.calculate_AUC()
+        self.calculate_positive_ratios()
+
+    def calculate_AUC(self):
+        self.auc = [
             roc_auc_score(
                 label,
                 (probability[:, 1] if len(probability.shape) > 1 else probability),
             )
-            for label, probability in zip(labels, probabilities)
+            for label, probability in zip(self.labels, self.probabilities)
         ]
 
+    def calculate_positive_ratios(self):
+        fpr, tpr, thresholds = roc_curve(
+            self.labels,
+            (
+                self.probabilities[:, 1]
+                if len(self.probabilities.shape) > 1
+                else self.probabilities
+            ),
+        )
+        self.tpr = np.interp(self.fpr, fpr, tpr)
+
+
+@dataclass
+class EvaluationResult:
+    """Initializes storage for a cross-validated model; contains evaluation metrics and training data."""
+
+    test: list[FoldResult]
+    average_test_local_feature_explanations: Optional[pd.DataFrame]
+    average_test_auc: float
+    average_test_tpr: list[float]
+    average_test_fpr: list[float]
+
+    holdout: list[FoldResult]
+    average_holdout_local_feature_explanations: Optional[pd.DataFrame]
+    average_holdout_auc: float
+    average_holdout_tpr: list[float]
+    average_holdout_fpr: list[float]
+
+    train: list[SampleMetadata]
+    global_average_feature_explanations: Optional[pd.DataFrame]
+
+    def __post_init__(self):
+        self.test.set = "test"
+        self.holdout.set = "holdout"
+        self.train.set = "train"
+        self.calculate_average_AUC()
+        self.calculate_average_positive_ratios()
+
+    def calculate_average_AUC(self):
+        # Calculate average AUC for test set
+        self.average_test_auc = np.mean([fold.auc for fold in self.test])
+
+        # Calculate average AUC for holdout set
+        self.average_holdout_auc = np.mean([fold.auc for fold in self.holdout])
+
+    def calculate_average_positive_ratios(self):
+        # Calculate average TPR for test set
+        self.average_test_tpr = np.mean([fold.tpr for fold in self.test], axis=0)
+
+        # Calculate average TPR for holdout set
+        self.average_holdout_tpr = np.mean([fold.tpr for fold in self.holdout], axis=0)
+
+        # Calculate average FPR for test set
+        self.average_test_fpr = np.mean([fold.fpr for fold in self.test], axis=0)
+
+        # Calculate average FPR for holdout set
+        self.average_holdout_fpr = np.mean([fold.fpr for fold in self.holdout], axis=0)
+
+    def calculate_average_local_feature_explanations(self):
+        # Calculate average local explanations for test set
+        if all(fold.local_feature_explanations is not None for fold in self.test):
+            self.average_test_local_feature_explanations = (
+                pd.concat(
+                    [
+                        fold.local_feature_explanations
+                        for fold in self.test
+                        if fold.local_feature_explanations is not None
+                    ]
+                )
+                .reset_index(drop=True)
+                .groupby("feature_name")
+                .mean()
+            )
+
+        # Calculate average local explanations for holdout set
+        if all(fold.local_feature_explanations is not None for fold in self.train):
+            self.average_holdout_local_feature_explanations = (
+                pd.concat(
+                    [
+                        fold.local_feature_explanations
+                        for fold in self.holdout
+                        if fold.local_feature_explanations is not None
+                    ]
+                )
+                .reset_index(drop=True)
+                .groupby("feature_name")
+                .mean()
+            )
+
+    def calculate_average_global_feature_explanations(self):
+        # global explanations only apply to train set
+        if all(fold.global_feature_explanations is not None for fold in self.train):
+            self.global_average_feature_explanations = (
+                pd.concat(
+                    [
+                        fold.global_feature_explanations
+                        for fold in self.train
+                        if fold.global_feature_explanations is not None
+                    ]
+                )
+                .reset_index()
+                .groupby("feature_name")
+                .mean()
+            )
+
     # ... other methods to calculate or update attributes
+
+
+@dataclass
+class BootstrapResult:
+    """Initializes storage for a model bootstrap."""
+
+    iteration_results: list[EvaluationResult]
+    model_name: str
+
+
+@dataclass
+class ClassificationResults:
+    """Initializes storage for all model results across bootstraps."""
+
+    models: list[BootstrapResult]
+    sample_results: pd.DataFrame
+    feature_importance: pd.DataFrame
+    hyperparameters: pd.DataFrame
 
 
 @task()
@@ -166,28 +314,34 @@ def serializeBootstrapResults(modelResult, sampleResults):
 
 
 def serializeResultsDataframe(sampleResults):
-    for sampleID in sampleResults:
-        # add accuracy
-        sampleResults[sampleID].append(
-            np.mean(
+    for modelName in sampleResults:
+        for sampleID in sampleResults[modelName]:
+            # add accuracy
+            sampleResults[modelName][sampleID].append(
                 np.mean(
-                    [
-                        (
-                            np.around(probability[1])
-                            if len(probability.shape) > 0
-                            else np.around(probability)
-                        )
-                        == sampleResults[sampleID][0]  # label index
-                        for probability in np.hstack(
-                            np.array(sampleResults[sampleID][1])
-                        )  # probability index
-                    ]
-                ),
+                    np.mean(
+                        [
+                            (
+                                np.around(probability[1])
+                                if len(probability.shape) > 0
+                                else np.around(probability)
+                            )
+                            == sampleResults[sampleID][0]  # label index
+                            for probability in np.hstack(
+                                np.array(sampleResults[sampleID][1])
+                            )  # probability index
+                        ]
+                    ),
+                )
             )
-        )
 
-    sampleResultsDataFrame = pd.DataFrame.from_dict(
-        sampleResults, orient="index", columns=["label", "probability", "accuracy"]
+    sampleResultsDataFrame = pd.DataFrame(
+        [
+            [sampleID, modelName, *sampleResults[modelName][sampleID]]
+            for sampleID in sampleResults[modelName]
+            for modelName in sampleResults
+        ],
+        columns=["id", "model", "label", "probability", "accuracy"],
     )
     sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
         "probability"
@@ -198,8 +352,10 @@ def serializeResultsDataframe(sampleResults):
             else np.mean(np.array(x))
         )
     )
+    sampleResultsDataFrame = sampleResultsDataFrame.set_index(
+        ["id", "model"], drop=False
+    )
     np.set_printoptions(threshold=np.inf)
-    sampleResultsDataFrame.index.name = "id"
     return sampleResultsDataFrame
 
 
