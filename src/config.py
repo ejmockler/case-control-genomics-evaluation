@@ -8,7 +8,8 @@ config = {
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
-        "compoundSampleIdStartIndex": 1,  # index of first sample ID in compound sample ID
+        "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
+        "compoundSampleMetaIdStartIndex": 0,  # index of clinical ID in compound sample ID
         "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency
         "minAlleleFrequency": 0.01,  # filter out variants with allele frequency less than this
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
