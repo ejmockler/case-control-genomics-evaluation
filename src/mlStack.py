@@ -8,6 +8,8 @@ import ray
 import matplotlib
 
 from tasks.data import (
+    BootstrapResult,
+    ClassificationResults,
     recoverPastRuns,
     serializeBootstrapResults,
     serializeResultsDataframe,
@@ -96,19 +98,15 @@ def main(
 
     results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
 
-    testLabelsProbabilitiesByModelName = dict()
-    holdoutLabelsProbabilitiesByModelName = dict()
-    tprFprAucByInstance = dict()
-    holdoutTprFprAucByInstance = dict()
     variantCount = 0
     lastVariantCount = 0
-    sampleResults = {}
+    classificationResults = ClassificationResults()
 
     if config["sampling"]["lastIteration"] > 0:
         results = recoverPastRuns(modelStack, results)
 
     for i in range(len(modelStack)):
-        modelResult = results[i]
+        modelResult = BootstrapResult()
         modelName = modelResult["model"]
         sampleResults[modelName] = serializeBootstrapResults(
             modelResult,

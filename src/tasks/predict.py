@@ -175,9 +175,9 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
 
 
 def trackResults(runID: str, evaluationResult: EvaluationResult, config):
-    sampleResultsDataframe = evaluationResult.create_sample_results_dataframe()
     runPath = runID
-
+    sampleResultsDataframe = evaluationResult.create_sample_results_dataframe()
+    sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
     for k in range(config["sampling"]["crossValIterations"]):
         if config["model"]["hyperparameterOptimization"]:
             hyperparameterDir = f"{runPath}/hyperparameters"
@@ -186,28 +186,26 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
                 json.dump(evaluationResult.test[k].fitted_optimizer.best_params_, file)
 
         os.makedirs(f"{runPath}/testLabels", exist_ok=True)
-        os.makedirs(f"{runPath}/testIDs", exist_ok=True)
         os.makedirs(f"{runPath}/trainLabels", exist_ok=True)
-        os.makedirs(f"{runPath}/trainIDs", exist_ok=True)
 
-        testLabelsSeries.to_csv(f"{runPath}/testLabels/{k+1}.csv")
-        testIDsSeries.to_csv(f"{runPath}/testIDs/{k+1}.csv")
-        trainLabelsSeries.to_csv(f"{runPath}/trainLabels/{k+1}.csv")
-        trainIDsSeries.to_csv(f"{runPath}/trainIDs/{k+1}.csv")
+        pd.Series(
+            evaluationResult.test[k].labels,
+            index=evaluationResult.test[k].ids,
+            name="testLabels",
+        ).to_csv(f"{runPath}/testLabels/{k+1}.csv")
+        pd.Series(
+            evaluationResult.train[k].labels,
+            index=evaluationResult.train[k].ids,
+            name="trainLabels",
+        ).to_csv(f"{runPath}/trainLabels/{k+1}.csv")
 
-        sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
-
-        if len(current["holdoutLabels"][k]) > 0:
-            holdoutLabelsSeries = pd.Series(
-                current["holdoutLabels"][k], name="testLabel"
-            )
-            holdoutLabelsSeries.index = current["holdoutIDs"][k]
-            holdoutLabelsSeries.index.name = "id"
-            holdoutIDsSeries = pd.Series(current["holdoutIDs"][k], name="id")
+        if len(evaluationResult.holdout[k].labels) > 0:
             os.makedirs(f"{runPath}/holdoutLabels", exist_ok=True)
-            os.makedirs(f"{runPath}/holdoutIDs", exist_ok=True)
-            pd.Series(holdoutLabelsSeries).to_csv(f"{runPath}/holdoutLabels/{k+1}.csv")
-            pd.Series(holdoutIDsSeries).to_csv(f"{runPath}/holdoutIDs/{k+1}.csv")
+            pd.Series(
+                evaluationResult.holdout[k].labels,
+                index=evaluationResult.holdout[k].ids,
+                name="holdoutLabels",
+            ).to_csv(f"{runPath}/holdoutLabels/{k+1}.csv")
 
         if current["globalExplanations"][k] is not None:
             os.makedirs(f"{runPath}/featureImportance/modelCoefficients", exist_ok=True)
@@ -241,7 +239,7 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
             ).set_index("feature_name").to_csv(
                 f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv"
             )
-            if len(current["holdoutLabels"][k]) > 0:
+            if len(evaluationResult.holdout[k].labels) > 0:
                 os.makedirs(
                     f"{runPath}/featureImportance/shapelyExplanations/holdout",
                     exist_ok=True,
