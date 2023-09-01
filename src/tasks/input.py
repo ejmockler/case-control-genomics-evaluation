@@ -237,6 +237,7 @@ def prepareDatasets(
 
     variantIndex = list(samples.index)
     scaler = MinMaxScaler()
+    # TODO dataclass
     embedding = {
         "sampleIndex": crossValGenotypeIDs,
         "labels": np.array([1 if id in caseIDs else 0 for id in crossValGenotypeIDs]),

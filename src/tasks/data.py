@@ -106,31 +106,29 @@ class GenotypeData:
 
 
 @dataclass
-class SampleMetadata:
-    """Initializes storage for sample metadata."""
+class SampleData:
+    """Initializes storage for sample data. Vectors are samples x features."""
 
     ids: list[str]
     labels: list[str]
-    set: Optional[str]
-    global_feature_explanations: Optional[pd.DataFrame]
+    vectors: np.ndarray
 
 
 @dataclass
-class FoldResult(SampleMetadata):
+class FoldResult(SampleData):
     """Initializes storage for sample results."""
 
-    probabilities: list
+    probabilities: list[float]
+    global_feature_explanations: Optional[pd.DataFrame]
     local_feature_explanations: Optional[pd.DataFrame]
-    shap_explainer: Optional[list[Explainer]]
-    shap_masker: Optional[list[Masker]]
-    fitted_optimizer: object
-    auc: Optional[list[float]]
-    tpr: Optional[list[float]]
-    fpr = np.linspace(0, 1, 100)  # Define common set of FPR values
+    shap_explainer: Optional[Explainer]
+    shap_masker: Optional[Masker]
+    fitted_optimizer: Optional[object]
 
     def __post_init__(self):
         self.calculate_AUC()
         self.calculate_positive_ratios()
+        self.calculate_accuracy()
 
     def calculate_AUC(self):
         self.auc = [
@@ -142,6 +140,7 @@ class FoldResult(SampleMetadata):
         ]
 
     def calculate_positive_ratios(self):
+        self.fpr = np.linspace(0, 1, 100)  # Define common set of FPR values
         fpr, tpr, thresholds = roc_curve(
             self.labels,
             (
@@ -152,82 +151,72 @@ class FoldResult(SampleMetadata):
         )
         self.tpr = np.interp(self.fpr, fpr, tpr)
 
+    def calculate_accuracy(self):
+        self.case_accuracy = np.divide(
+            np.sum((np.around(self.probabilities)[self.labels == 1] == 1).astype(int)),
+            np.sum((self.labels == 1).astype(int)),
+        )
+        self.control_accuracy = np.divide(
+            np.sum((np.around(self.probabilities)[self.labels == 0] == 0).astype(int)),
+            np.sum((self.labels == 0).astype(int)),
+        )
+        self.accuracy = np.divide(
+            np.sum([self.case_accuracy, self.control_accuracy]), 2
+        )
+
 
 @dataclass
 class EvaluationResult:
     """Initializes storage for a cross-validated model; contains evaluation metrics and training data."""
 
-    test: list[FoldResult]
-    average_test_local_feature_explanations: Optional[pd.DataFrame]
-    average_test_auc: float
-    average_test_tpr: list[float]
-    average_test_fpr: list[float]
+    test: list[FoldResult] = []
+    holdout: list[FoldResult] = []
+    train: list[SampleData] = []
 
-    holdout: list[FoldResult]
-    average_holdout_local_feature_explanations: Optional[pd.DataFrame]
-    average_holdout_auc: float
-    average_holdout_tpr: list[float]
-    average_holdout_fpr: list[float]
-
-    train: list[SampleMetadata]
-    global_average_feature_explanations: Optional[pd.DataFrame]
-
-    def __post_init__(self):
-        self.test.set = "test"
-        self.holdout.set = "holdout"
-        self.train.set = "train"
+    def average(self):
         self.calculate_average_AUC()
         self.calculate_average_positive_ratios()
+        self.calculate_average_global_feature_explanations()
+        self.calculate_average_local_feature_explanations()
+        self.calculate_average_accuracies()
 
     def calculate_average_AUC(self):
-        # Calculate average AUC for test set
         self.average_test_auc = np.mean([fold.auc for fold in self.test])
-
-        # Calculate average AUC for holdout set
         self.average_holdout_auc = np.mean([fold.auc for fold in self.holdout])
 
     def calculate_average_positive_ratios(self):
-        # Calculate average TPR for test set
         self.average_test_tpr = np.mean([fold.tpr for fold in self.test], axis=0)
-
-        # Calculate average TPR for holdout set
         self.average_holdout_tpr = np.mean([fold.tpr for fold in self.holdout], axis=0)
-
-        # Calculate average FPR for test set
         self.average_test_fpr = np.mean([fold.fpr for fold in self.test], axis=0)
-
-        # Calculate average FPR for holdout set
         self.average_holdout_fpr = np.mean([fold.fpr for fold in self.holdout], axis=0)
 
     def calculate_average_local_feature_explanations(self):
-        # Calculate average local explanations for test set
-        if all(fold.local_feature_explanations is not None for fold in self.test):
+        all_test_explanations = []
+        all_test_ids = []
+        for fold in self.test:
+            if fold.local_feature_explanations is not None:
+                all_test_explanations.append(fold.local_feature_explanations)
+                all_test_ids.extend(fold.ids)
+        if all_test_explanations:
+            all_test_explanations_df = pd.concat(
+                all_test_explanations, keys=all_test_ids, names=["sample_id"]
+            )
             self.average_test_local_feature_explanations = (
-                pd.concat(
-                    [
-                        fold.local_feature_explanations
-                        for fold in self.test
-                        if fold.local_feature_explanations is not None
-                    ]
-                )
-                .reset_index(drop=True)
-                .groupby("feature_name")
-                .mean()
+                all_test_explanations_df.groupby("sample_id").mean()
             )
 
-        # Calculate average local explanations for holdout set
-        if all(fold.local_feature_explanations is not None for fold in self.train):
+        all_holdout_explanations = []
+        all_holdout_ids = []
+        for fold in self.holdout:
+            if fold.local_feature_explanations is not None:
+                all_holdout_explanations.append(fold.local_feature_explanations)
+                all_holdout_ids.extend(fold.ids)
+        if all_holdout_explanations:
+            all_holdout_explanations_df = pd.concat(
+                all_holdout_explanations, keys=all_holdout_ids, names=["sample_id"]
+            )
             self.average_holdout_local_feature_explanations = (
-                pd.concat(
-                    [
-                        fold.local_feature_explanations
-                        for fold in self.holdout
-                        if fold.local_feature_explanations is not None
-                    ]
-                )
-                .reset_index(drop=True)
-                .groupby("feature_name")
-                .mean()
+                all_holdout_explanations_df.groupby("sample_id").mean()
             )
 
     def calculate_average_global_feature_explanations(self):
@@ -246,25 +235,76 @@ class EvaluationResult:
                 .mean()
             )
 
+    def calculate_average_accuracies(self):
+        if self.test:
+            self.average_test_accuracy = np.mean([fold.accuracy for fold in self.test])
+
+        if self.holdout:
+            self.average_holdout_accuracy = np.mean(
+                [fold.accuracy for fold in self.holdout]
+            )
+
+        if self.test:
+            self.average_test_case_accuracy = np.mean(
+                [fold.case_accuracy for fold in self.test]
+            )
+            self.average_test_control_accuracy = np.mean(
+                [fold.control_accuracy for fold in self.test]
+            )
+
+        if self.holdout:
+            self.average_holdout_case_accuracy = np.mean(
+                [fold.case_accuracy for fold in self.holdout]
+            )
+            self.average_holdout_control_accuracy = np.mean(
+                [fold.control_accuracy for fold in self.holdout]
+            )
+
+        all_accuracies = []
+        if self.test:
+            all_accuracies.extend([fold.accuracy for fold in self.test])
+        if self.holdout:
+            all_accuracies.extend([fold.accuracy for fold in self.holdout])
+        if all_accuracies:
+            self.overall_average_accuracy = np.mean(all_accuracies)
+
+    def create_sample_results_dataframe(self):
+        # Extract probabilities and ids from test and holdout folds
+        all_probabilities = [
+            probability[1]  # Assuming probability is a 2-element list or tuple
+            for fold in self.test + self.holdout
+            for probability in fold.probabilities
+        ]
+
+        all_ids = [id for fold in self.test + self.holdout for id in fold.ids]
+
+        # Create DataFrame
+        sampleResultsDataframe = pd.DataFrame.from_dict(
+            {"probability": all_probabilities, "id": all_ids},
+            dtype=object,
+        ).set_index("id")
+
+        return sampleResultsDataframe
+
     # ... other methods to calculate or update attributes
 
 
 @dataclass
 class BootstrapResult:
-    """Initializes storage for a model bootstrap."""
+    """Initializes storage for model bootstrap."""
 
-    iteration_results: list[EvaluationResult]
     model_name: str
+    iteration_results: list[EvaluationResult] = []
 
 
 @dataclass
 class ClassificationResults:
     """Initializes storage for all model results across bootstraps."""
 
-    models: list[BootstrapResult]
-    sample_results: pd.DataFrame
-    feature_importance: pd.DataFrame
-    hyperparameters: pd.DataFrame
+    models: list[BootstrapResult] = []
+    sample_results: pd.DataFrame = pd.DataFrame()
+    feature_importance: pd.DataFrame = pd.DataFrame()
+    hyperparameters: pd.DataFrame = pd.DataFrame()
 
 
 @task()
