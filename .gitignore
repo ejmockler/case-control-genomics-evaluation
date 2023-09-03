@@ -144,6 +144,9 @@ shapExplanations*
 *Labels
 projects/
 
-
 # neptune.ai
 .neptune
+
+# os
+.DS_Store
+
