@@ -190,7 +190,13 @@ class EvaluationResult:
         self.average_test_fpr = np.mean([fold.fpr for fold in self.test], axis=0)
         self.average_holdout_fpr = np.mean([fold.fpr for fold in self.holdout], axis=0)
 
+    def calculate_average_global_feature_explanations(self):
+        if all(fold.global_feature_explanations is not None for fold in self.test):
+            concatenated = pd.concat([fold.global_feature_explanations for fold in self.test])
+            self.average_global_feature_explanations = concatenated.groupby('feature_name').agg(['average', 'standard_deviation'])
+
     def calculate_average_local_feature_explanations(self):
+        # For test set
         all_test_explanations = []
         all_test_ids = []
         for fold in self.test:
@@ -198,13 +204,10 @@ class EvaluationResult:
                 all_test_explanations.append(fold.local_feature_explanations)
                 all_test_ids.extend(fold.ids)
         if all_test_explanations:
-            all_test_explanations_df = pd.concat(
-                all_test_explanations, keys=all_test_ids, names=["sample_id"]
-            )
-            self.average_test_local_feature_explanations = (
-                all_test_explanations_df.groupby("sample_id").mean()
-            )
+            all_test_explanations_df = pd.concat(all_test_explanations, keys=all_test_ids, names=["sample_id"])
+            self.average_test_local_feature_explanations = all_test_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
 
+        # For holdout set
         all_holdout_explanations = []
         all_holdout_ids = []
         for fold in self.holdout:
@@ -212,28 +215,9 @@ class EvaluationResult:
                 all_holdout_explanations.append(fold.local_feature_explanations)
                 all_holdout_ids.extend(fold.ids)
         if all_holdout_explanations:
-            all_holdout_explanations_df = pd.concat(
-                all_holdout_explanations, keys=all_holdout_ids, names=["sample_id"]
-            )
-            self.average_holdout_local_feature_explanations = (
-                all_holdout_explanations_df.groupby("sample_id").mean()
-            )
+            all_holdout_explanations_df = pd.concat(all_holdout_explanations, keys=all_holdout_ids, names=["sample_id"])
+            self.average_holdout_local_feature_explanations = all_holdout_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
 
-    def calculate_average_global_feature_explanations(self):
-        # global explanations only apply to train set
-        if all(fold.global_feature_explanations is not None for fold in self.train):
-            self.global_average_feature_explanations = (
-                pd.concat(
-                    [
-                        fold.global_feature_explanations
-                        for fold in self.train
-                        if fold.global_feature_explanations is not None
-                    ]
-                )
-                .reset_index()
-                .groupby("feature_name")
-                .mean()
-            )
 
     def calculate_average_accuracies(self):
         if self.test:

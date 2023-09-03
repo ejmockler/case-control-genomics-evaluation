@@ -207,130 +207,42 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
                 name="holdoutLabels",
             ).to_csv(f"{runPath}/holdoutLabels/{k+1}.csv")
 
-        if current["globalExplanations"][k] is not None:
-            os.makedirs(f"{runPath}/featureImportance/modelCoefficients", exist_ok=True)
-            current["globalExplanations"][k].to_csv(
-                f"{runPath}/featureImportance/modelCoefficients/{k+1}.csv"
-            )
-
-        if config["model"]["calculateShapelyExplanations"]:
-            os.makedirs(
-                f"{runPath}/featureImportance/shapelyExplanations", exist_ok=True
-            )
-            pd.DataFrame.from_dict(
-                {
-                    "feature_name": [
-                        name for name in current["localExplanations"][0].feature_names
-                    ],
-                    "value": [
-                        np.mean(current["localExplanations"][k].values[:, featureIndex])
-                        for featureIndex in range(
-                            len(current["localExplanations"][0].feature_names)
-                        )
-                    ],
-                    "standard_deviation": [
-                        np.std(current["localExplanations"][k].values[:, featureIndex])
-                        for featureIndex in range(
-                            len(current["localExplanations"][0].feature_names)
-                        )
-                    ],
-                },
-                dtype=object,
-            ).set_index("feature_name").to_csv(
-                f"{runPath}/featureImportance/shapelyExplanations/{k+1}.csv"
-            )
-            if len(evaluationResult.holdout[k].labels) > 0:
-                os.makedirs(
-                    f"{runPath}/featureImportance/shapelyExplanations/holdout",
-                    exist_ok=True,
-                )
-                pd.DataFrame.from_dict(
-                    {
-                        "feature_name": [
-                            name
-                            for name in current["holdoutLocalExplanations"][
-                                0
-                            ].feature_names
-                        ],
-                        "value": [
-                            np.mean(
-                                current["holdoutLocalExplanations"][k].values[
-                                    :, featureIndex
-                                ]
-                            )
-                            for featureIndex in range(
-                                len(
-                                    current["holdoutLocalExplanations"][0].feature_names
-                                )
-                            )
-                        ],
-                        "standard_deviation": [
-                            np.std(
-                                current["holdoutLocalExplanations"][k].values[
-                                    :, featureIndex
-                                ]
-                            )
-                            for featureIndex in range(
-                                len(
-                                    current["holdoutLocalExplanations"][0].feature_names
-                                )
-                            )
-                        ],
-                    },
-                    dtype=object,
-                ).set_index("feature_name").to_csv(
-                    f"{runPath}/featureImportance/shapelyExplanations/holdout/{k+1}.csv"
-                )
-
-            with open(
-                f"{runPath}/featureImportance/shapelyExplanations/shapExplainersPerFold.pkl",
-                "wb",
-            ) as file:
-                pickle.dump(current["shapExplainer"], file)
-            with open(
-                f"{runPath}/featureImportance/shapelyExplanations/shapMaskersPerFold.pkl",
-                "wb",
-            ) as file:
-                pickle.dump(current["shapMasker"], file)
-            current["averageShapelyExplanations"].to_csv(
-                f"{runPath}/averageLocalExplanations.csv"
-            )
-            if len(current["holdoutLabels"][0]) > 0:
-                current["averageHoldoutShapelyExplanations"].to_csv(
-                    f"{runPath}/averageHoldoutLocalExplanations.csv"
-                )
-
-        if current["globalExplanations"][0] is not None:
-            current["averageGlobalExplanations"].to_csv(
+    if evaluationResult.average_global_feature_explanations is not None:
+        evaluationResult.average_global_feature_explanations.to_csv(
                 f"{runPath}/averageGlobalExplanations.csv"
             )
+        
+    if config["model"]["calculateShapelyExplanations"]:
+        evaluationResult.average_test_local_feature_explanations.to_csv(
+            f"{runPath}/averageLocalExplanations.csv"
+        )
+        if evaluationResult.average_holdout_local_feature_explanations:
+            evaluationResult.average_holdout_local_feature_explanations.to_csv(
+                f"{runPath}/averageHoldoutLocalExplanations.csv"
+            )
 
-        if config["model"]["hyperparameterOptimization"]:
-            with open(f"{runPath}/hyperparameters/fittedOptimizer.pkl", "wb") as file:
-                pickle.dump(current["fittedOptimizer"], file)
-
+    with open(
+        f"{runPath}/trainCount_{np.mean([len(foldResult.labels) for foldResult in evaluationResult.train])}",
+        "w",
+    ) as file:
+        pass
+    with open(
+        f"{runPath}/testCount_{np.mean([len(foldResult.labels) for foldResult in evaluationResult.test])}",
+        "w",
+    ) as file:
+        pass
+    with open(f"{runPath}/meanAUC_{evaluationResult.average_test_auc}", "w") as file:
+        pass
+    if evaluationResult.holdout:
         with open(
-            f"{runPath}/trainCount_{np.mean([len(idList) for idList in current['trainIDs']])}",
-            "w",
+            f"{runPath}/meanHoldoutAUC_{evaluationResult.average_holdout_auc}", "w"
         ) as file:
             pass
         with open(
-            f"{runPath}/testCount_{np.mean([len(idList) for idList in current['testIDs']])}",
+            f"{runPath}/holdoutCount_{np.mean([len(foldResult.labels) for foldResult in evaluationResult.holdout])}",
             "w",
         ) as file:
             pass
-        with open(f"{runPath}/meanAUC_{np.mean(current['testAUC'])}", "w") as file:
-            pass
-        if "holdoutAUC" in current:
-            with open(
-                f"{runPath}/meanHoldoutAUC_{np.mean(current['holdoutAUC'])}", "w"
-            ) as file:
-                pass
-            with open(
-                f"{runPath}/holdoutCount_{np.mean([len(idList) for idList in current['holdoutIDs']])}",
-                "w",
-            ) as file:
-                pass
 
     gc.collect()
 
