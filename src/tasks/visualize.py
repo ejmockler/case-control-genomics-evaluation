@@ -20,6 +20,7 @@ from skopt.plots import plot_convergence
 import shap
 import gc
 from config import config
+from tasks.data import EvaluationResult
 
 matplotlib.use("agg")
 
@@ -266,19 +267,21 @@ def plotOptimizer(title, resultsByInstance):
 
 
 def plotSample(
-    j, k, runID, modelName, plotSubtitle, current, holdout=False, config=config
+    j, k, runID, modelName, plotSubtitle, modelResults, holdout=False, config=config
 ):
     import matplotlib.pyplot as plt
     import shap
 
     currentLabel = (
-        current["testLabels"][j][k] if not holdout else current["holdoutLabels"][j][k]
+        modelResults.test[j].labels[k] if not holdout else modelResults.holdout[j].labels[k]
     )
-    sampleID = current["testIDs"][j][k] if not holdout else current["holdoutIDs"][j][k]
+    sampleID = (
+        modelResults.test[j].ids[k] if not holdout else modelResults.holdout[j].ids[k]
+    )
     localExplanations = (
-        current["localExplanations"][j]
-        if not holdout
-        else current["holdoutLocalExplanations"][j]
+        modelResults.test[j].shap_explanation
+        if not holdout else
+        modelResults.holdout[j].shap_explanation
     )
     waterfallPlot = plt.figure()
     title = "\n".join(
@@ -347,17 +350,16 @@ def plotSample(
 
 
 def trackBootstrapVisualizations(
-    runID, plotSubtitle, modelName, current, holdout=False, config=config
+    runID: str, plotSubtitle: str, modelName: str, modelResults: EvaluationResult, holdout=False, config=config
 ):
     aucName = "aucPlot" if not holdout else "aucPlotHoldout"
     probabilities = (
-        current["probabilities"] if not holdout else current["holdoutProbabilities"]
+        [probabilities for probabilities in (modelResults.test if not holdout else modelResults.holdout)]
     )
-    predictions = (
-        current["predictions"] if not holdout else current["holdoutPredictions"]
-    )
-    labels = current["testLabels"] if not holdout else current["holdoutLabels"]
-    ids = current["testIDs"] if not holdout else current["holdoutIDs"]
+
+    labels = modelResults.test.labels if not holdout else modelResults.holdout.labels
+    ids = modelResults.test.ids if not holdout else modelResults.holdout.ids
+    
     labelsProbabilitiesByFold = {
         f"Fold {k+1}": (
             labels[k],
@@ -368,7 +370,7 @@ def trackBootstrapVisualizations(
         for k in range(config["sampling"]["crossValIterations"])
     }
     labelsPredictionsByFold = {
-        f"Fold {k+1}": (labels[k], predictions[k])
+        f"Fold {k+1}": (labels[k], np.argmax(probabilities[k], axis=1))
         for k in range(config["sampling"]["crossValIterations"])
     }
 
@@ -412,7 +414,7 @@ def trackBootstrapVisualizations(
             {
                 f"Fold {k+1}": [
                     result
-                    for result in current["fittedOptimizer"][k].optimizer_results_
+                    for result in modelResults.test[k].fitted_optimizer.optimizer_results_
                 ]
                 for k in range(config["sampling"]["crossValIterations"])
             },
@@ -426,7 +428,7 @@ def trackBootstrapVisualizations(
         for j in range(config["sampling"]["crossValIterations"]):
             for k in range(len(ids[j])):
                 args.append(
-                    (j, k, runID, modelName, plotSubtitle, current, holdout, config)
+                    (j, k, runID, modelName, plotSubtitle, modelResults, holdout, config)
                 )
 
         for arg in args:

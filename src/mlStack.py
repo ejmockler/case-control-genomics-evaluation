@@ -100,151 +100,22 @@ def main(
 
     variantCount = 0
     lastVariantCount = 0
-    classificationResults = ClassificationResults()
+    classificationResults = ClassificationResults(models=results)
 
-    if config["sampling"]["lastIteration"] > 0:
-        results = recoverPastRuns(modelStack, results)
-
-    for i in range(len(modelStack)):
-        modelResult = BootstrapResult()
-        modelName = modelResult["model"]
-        sampleResults[modelName] = serializeBootstrapResults(
-            modelResult,
-            sampleResults,
+    # TODO run recovery for results dataclass
+    # if config["sampling"]["lastIteration"] > 0:
+    #     results = recoverPastRuns(modelStack, results)
+    
+    if config["sampling"]["calculateShapelyExplanations"]:
+        os.makedirs(
+            f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
+            exist_ok=True,
         )
-        if modelName not in testLabelsProbabilitiesByModelName:
-            testLabelsProbabilitiesByModelName[modelName] = [[], []]
-        if modelName not in holdoutLabelsProbabilitiesByModelName:
-            holdoutLabelsProbabilitiesByModelName[modelName] = [[], []]
-        if modelName not in tprFprAucByInstance:
-            tprFprAucByInstance[modelName] = [[], [], 0]
-        if modelName not in holdoutTprFprAucByInstance:
-            holdoutTprFprAucByInstance[modelName] = [[], [], 0]
-        globalExplanationsList = []
-        modelSampleResultList = []
+    for i in range(len(modelStack)):
         for j in range(config["sampling"]["bootstrapIterations"]):
-            bootstrapResult = modelResult[j]
-            testFlattenedCrossValIndex = 0
-            holdoutFlattenedCrossValIndex = 0
             for k in range(config["sampling"]["crossValIterations"]):
                 # append labels
-                testLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
-                    (
-                        testLabelsProbabilitiesByModelName[modelName][0],
-                        *[foldLabel for foldLabel in bootstrapResult["testLabels"][k]],
-                    )
-                )
-                holdoutLabelsProbabilitiesByModelName[modelName][0] = np.hstack(
-                    (
-                        holdoutLabelsProbabilitiesByModelName[modelName][0],
-                        *[
-                            foldLabel
-                            for foldLabel in bootstrapResult["holdoutLabels"][k]
-                        ],
-                    )
-                )
-                # append probabilities
-                testLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
-                    [
-                        testLabelsProbabilitiesByModelName[modelName][1],
-                        np.array(bootstrapResult["probabilities"][k])[:, 1]
-                        if len(bootstrapResult["probabilities"][k][0].shape) >= 1
-                        else np.ravel(
-                            bootstrapResult["probabilities"][
-                                testFlattenedCrossValIndex : testFlattenedCrossValIndex
-                                + len(bootstrapResult["testLabels"][k])
-                            ]
-                        ),  # probabilities from recovered bootstrap runs are 1D
-                    ]
-                )
-                testFlattenedCrossValIndex += len(bootstrapResult["testLabels"][k])
-                holdoutLabelsProbabilitiesByModelName[modelName][1] = np.hstack(
-                    [
-                        holdoutLabelsProbabilitiesByModelName[modelName][1],
-                        np.array(bootstrapResult["holdoutProbabilities"][k])[:, 1]
-                        if len(bootstrapResult["holdoutProbabilities"][k][0].shape) >= 1
-                        else np.ravel(
-                            bootstrapResult["holdoutProbabilities"][
-                                holdoutFlattenedCrossValIndex : holdoutFlattenedCrossValIndex
-                                + len(bootstrapResult["holdoutLabels"][k])
-                            ]
-                        ),
-                    ]
-                )
-                holdoutFlattenedCrossValIndex += len(
-                    bootstrapResult["holdoutLabels"][k]
-                )
-            if j == 0:
-                tprFprAucByInstance[modelName][0] = [bootstrapResult["averageTestTPR"]]
-                tprFprAucByInstance[modelName][1] = bootstrapResult["testFPR"]
-                tprFprAucByInstance[modelName][2] = [bootstrapResult["averageTestAUC"]]
-                if "averageHoldoutAUC" in bootstrapResult:
-                    holdoutTprFprAucByInstance[modelName][0] = [
-                        bootstrapResult["averageHoldoutTPR"]
-                    ]
-                    holdoutTprFprAucByInstance[modelName][1] = bootstrapResult[
-                        "holdoutFPR"
-                    ]
-                    holdoutTprFprAucByInstance[modelName][2] = [
-                        bootstrapResult["averageHoldoutAUC"]
-                    ]
-            else:
-                tprFprAucByInstance[modelName][0] = np.concatenate(
-                    [
-                        tprFprAucByInstance[modelName][0],
-                        [bootstrapResult["averageTestTPR"]],
-                    ]
-                )
-                tprFprAucByInstance[modelName][2] = np.concatenate(
-                    [
-                        tprFprAucByInstance[modelName][2],
-                        [bootstrapResult["averageTestAUC"]],
-                    ]
-                )
-                if "averageHoldoutAUC" in bootstrapResult:
-                    holdoutTprFprAucByInstance[modelName][0] = np.concatenate(
-                        [
-                            holdoutTprFprAucByInstance[modelName][0],
-                            [bootstrapResult["averageHoldoutTPR"]],
-                        ]
-                    )
-                    holdoutTprFprAucByInstance[modelName][2] = np.concatenate(
-                        [
-                            holdoutTprFprAucByInstance[modelName][2],
-                            [bootstrapResult["averageHoldoutAUC"]],
-                        ]
-                    )
-
-            if config["model"]["calculateShapelyExplanations"]:
-                averageShapelyExplanationsDataFrame = (
-                    pd.concat(
-                        [
-                            modelResult[j]["averageShapelyExplanations"]
-                            for j in range(config["sampling"]["bootstrapIterations"])
-                        ]
-                    )
-                    .reset_index()
-                    .groupby("feature_name")
-                    .mean()
-                )
-                if "averageHoldoutShapelyExplanations" in modelResult[j]:
-                    averageHoldoutShapelyExplanationsDataFrame = (
-                        pd.concat(
-                            [
-                                modelResult[j]["averageHoldoutShapelyExplanations"]
-                                for j in range(
-                                    config["sampling"]["bootstrapIterations"]
-                                )
-                            ]
-                        )
-                        .reset_index()
-                        .groupby("feature_name")
-                        .mean()
-                    )
-                os.makedirs(
-                    f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
-                    exist_ok=True,
-                )
+                
                 averageShapelyExplanationsDataFrame.to_csv(
                     f"projects/{config['tracking']['project']}/averageShapelyExplanations.csv"
                 )
@@ -260,6 +131,7 @@ def main(
                 lastVariantCount = variantCount
 
                 globalExplanationsList += bootstrapResult["globalExplanations"]
+            
             modelSampleResultList += pd.DataFrame.from_dict(
                 {
                     "probability": [

@@ -87,24 +87,11 @@ def getFeatureImportances(model, testData, holdoutData, featureLabels, config):
         )
 
         # Get SHAP values
-        shapValuesArray = shapExplainer(testData.vectors).values
-
-        # Convert to DataFrame
-        shapValues = pd.DataFrame(
-            data=shapValuesArray, index=testData.ids, columns=featureLabels
-        )
-        shapValues.index.name = "sample_id"
+        shapValues = shapExplainer(testData.vectors)
 
         # Same for holdout data
         if len(holdoutData.vectors) > 0:
-            holdoutShapValuesArray = shapExplainer(holdoutData.vectors).values
-
-            holdoutShapValues = pd.DataFrame(
-                data=holdoutShapValuesArray,
-                index=holdoutData.ids,
-                columns=featureLabels,
-            )
-            holdoutShapValues.index.name = "sample_id"
+            holdoutShapValues = shapExplainer(holdoutData.vectors)
 
     return modelCoefficientDF, shapValues, holdoutShapValues, shapExplainer, masker
 
@@ -291,9 +278,9 @@ def evaluate(
             probabilities,
             modelValues,
             shapValues,
-            fittedOptimizer,
             shapExplainer,
             shapMasker,
+            fittedOptimizer
         ),
         FoldResult(
             holdoutData.ids,
@@ -411,46 +398,23 @@ def classify(
             {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
-            {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(caseAccuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(controlAccuracy)} accuracy
-            {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+            {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
+            {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold"""
 
-        if len(current["holdoutLabels"]) > 0:
-            holdoutCaseAccuracy = np.mean(
-                [
-                    np.divide(
-                        np.sum((predictions[labels == 1] == 1).astype(int)),
-                        np.sum((labels == 1).astype(int)),
-                    )
-                    for predictions, labels in zip(
-                        current["holdoutPredictions"],
-                        current["holdoutLabels"],
-                    )
-                ]
-            )
-            holdoutControlAccuracy = np.mean(
-                [
-                    np.divide(
-                        np.sum((predictions[labels == 0] == 0).astype(int)),
-                        np.sum((labels == 0).astype(int)),
-                    )
-                    for predictions, labels in zip(
-                        current["holdoutPredictions"],
-                        current["holdoutLabels"],
-                    )
-                ]
-            )
+        if modelResults.holdout:
             holdoutPlotSubtitle = f"""
                 {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
                 Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
                 
                 Ethnically variable holdout
-                {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
-                {int(np.around(np.mean([len(indices) for indices in current["trainIndices"]])))}±1 train, {int(np.around(np.mean([len(indices) for indices in current["testIndices"]])))}±1 test samples per x-val fold"""
+                {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_control_accuracy)} accuracy
+                {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold"""
+
             trackBootstrapVisualizations(
                 runID,
                 holdoutPlotSubtitle,
                 model.__class__.__name__,
-                current,
+                modelResults,
                 holdout=True,
                 config=config,
             )
@@ -460,7 +424,7 @@ def classify(
             runID,
             plotSubtitle,
             model.__class__.__name__,
-            current,
+            modelResults,
             config=config,
         )
 

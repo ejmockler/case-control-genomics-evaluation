@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from joblib import Parallel, delayed
 from prefect import task
@@ -120,7 +120,7 @@ class FoldResult(SampleData):
 
     probabilities: list[float]
     global_feature_explanations: Optional[pd.DataFrame]
-    local_feature_explanations: Optional[pd.DataFrame]
+    shap_explanation: Optional[object]
     shap_explainer: Optional[Explainer]
     shap_masker: Optional[Masker]
     fitted_optimizer: Optional[object]
@@ -129,6 +129,14 @@ class FoldResult(SampleData):
         self.calculate_AUC()
         self.calculate_positive_ratios()
         self.calculate_accuracy()
+        
+    @property
+    def local_feature_explanations(self):
+        localExplanationsDataframe = pd.DataFrame(
+            data=self.local_feature_explanations, index=self.ids, columns=self.shap_explainer.feature_names
+        )
+        localExplanationsDataframe.index.name = "sample_id"
+        return localExplanationsDataframe
 
     def calculate_AUC(self):
         self.auc = [
@@ -163,15 +171,15 @@ class FoldResult(SampleData):
         self.accuracy = np.divide(
             np.sum([self.case_accuracy, self.control_accuracy]), 2
         )
-
-
+        
 @dataclass
 class EvaluationResult:
     """Initializes storage for a cross-validated model; contains evaluation metrics and training data."""
 
-    test: list[FoldResult] = []
-    holdout: list[FoldResult] = []
-    train: list[SampleData] = []
+    train: list[SampleData] = field(default_factory=list)
+    test: list[FoldResult] = field(default_factory=list)
+    holdout: Optional[list[FoldResult]] = field(default_factory=list)
+
 
     def average(self):
         self.calculate_average_AUC()
@@ -208,15 +216,16 @@ class EvaluationResult:
             self.average_test_local_feature_explanations = all_test_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
 
         # For holdout set
-        all_holdout_explanations = []
-        all_holdout_ids = []
-        for fold in self.holdout:
-            if fold.local_feature_explanations is not None:
-                all_holdout_explanations.append(fold.local_feature_explanations)
-                all_holdout_ids.extend(fold.ids)
-        if all_holdout_explanations:
-            all_holdout_explanations_df = pd.concat(all_holdout_explanations, keys=all_holdout_ids, names=["sample_id"])
-            self.average_holdout_local_feature_explanations = all_holdout_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
+        if self.holdout:
+            all_holdout_explanations = []
+            all_holdout_ids = []
+            for fold in self.holdout:
+                if fold.local_feature_explanations is not None:
+                    all_holdout_explanations.append(fold.local_feature_explanations)
+                    all_holdout_ids.extend(fold.ids)
+            if all_holdout_explanations:
+                all_holdout_explanations_df = pd.concat(all_holdout_explanations, keys=all_holdout_ids, names=["sample_id"])
+                self.average_holdout_local_feature_explanations = all_holdout_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
 
 
     def calculate_average_accuracies(self):
@@ -266,7 +275,7 @@ class EvaluationResult:
         sampleResultsDataframe = pd.DataFrame.from_dict(
             {"probability": all_probabilities, "id": all_ids},
             dtype=object,
-        ).set_index("id")
+        ).groupby('id').mean()
 
         return sampleResultsDataframe
 
@@ -278,14 +287,26 @@ class BootstrapResult:
     """Initializes storage for model bootstrap."""
 
     model_name: str
-    iteration_results: list[EvaluationResult] = []
+    iteration_results: list[EvaluationResult] = field(default_factory=list)
+    
+    def create_average_results_dataframe(self):
+        # Create a list of DataFrames from each iteration
+        dfs = [res.create_sample_results_dataframe() for res in self.iteration_results]
+        
+        # Concatenate DataFrames along a new axis to make it easier to compute mean and std dev
+        combined_df = pd.concat(dfs, axis=1)
+
+        # Calculate mean and standard deviation for each sample id
+        result_df = combined_df.aggregate(['average_probability', 'standard_deviation'], axis=1)
+
+        return result_df
 
 
 @dataclass
 class ClassificationResults:
     """Initializes storage for all model results across bootstraps."""
 
-    models: list[BootstrapResult] = []
+    models: list[BootstrapResult] = field(default_factory=list)
     sample_results: pd.DataFrame = pd.DataFrame()
     feature_importance: pd.DataFrame = pd.DataFrame()
     hyperparameters: pd.DataFrame = pd.DataFrame()
