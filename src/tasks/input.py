@@ -239,12 +239,12 @@ def prepareDatasets(
     scaler = MinMaxScaler()
     # TODO dataclass
     embedding = {
-        "sampleIndex": crossValGenotypeIDs,
+        "sampleIndex": np.array(crossValGenotypeIDs),
         "labels": np.array([1 if id in caseIDs else 0 for id in crossValGenotypeIDs]),
         "samples": scaler.fit_transform(
             samples
         ).transpose(),  # samples are now rows (samples, variants)
-        "excessMajorIndex": excessIDs,
+        "excessMajorIndex": np.array(excessIDs),
         "excessMajorLabels": [1 if id in caseIDs else 0 for id in excessIDs],
         "excessMajorSamples": scaler.fit_transform(excessMajorSamples).transpose(),
         "variantIndex": variantIndex,
@@ -255,12 +255,12 @@ def prepareDatasets(
         embedding = {
             **embedding,
             **{
-                "holdoutSampleIndex": holdoutTestIDs,
+                "holdoutSampleIndex": np.array(holdoutTestIDs),
                 "holdoutLabels": np.array(
                     [1 if id in holdoutCaseIDs else 0 for id in holdoutTestIDs]
                 ),
                 "holdoutSamples": scaler.fit_transform(holdoutSamples).transpose(),
-                "excessHoldoutMajorIndex": holdoutExcessIDs,
+                "excessHoldoutMajorIndex": np.array(holdoutExcessIDs),
                 "excessHoldoutMajorLabels": [
                     1 if id in holdoutCaseIDs else 0 for id in holdoutExcessIDs
                 ],

@@ -178,12 +178,12 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
         pd.Series(
             evaluationResult.test[k].labels,
             index=evaluationResult.test[k].ids,
-            name="testLabels",
+            name="labels",
         ).to_csv(f"{runPath}/testLabels/{k+1}.csv")
         pd.Series(
             evaluationResult.train[k].labels,
             index=evaluationResult.train[k].ids,
-            name="trainLabels",
+            name="labels",
         ).to_csv(f"{runPath}/trainLabels/{k+1}.csv")
 
         if len(evaluationResult.holdout[k].labels) > 0:
@@ -191,21 +191,27 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
             pd.Series(
                 evaluationResult.holdout[k].labels,
                 index=evaluationResult.holdout[k].ids,
-                name="holdoutLabels",
+                name="labels",
             ).to_csv(f"{runPath}/holdoutLabels/{k+1}.csv")
 
     if evaluationResult.average_global_feature_explanations is not None:
         evaluationResult.average_global_feature_explanations.to_csv(
-                f"{runPath}/averageGlobalExplanations.csv"
-            )
-        
-    if config["model"]["calculateShapelyExplanations"]:
-        evaluationResult.average_test_local_feature_explanations.to_csv(
-            f"{runPath}/averageLocalExplanations.csv"
+            f"{runPath}/averageGlobalExplanations.csv"
         )
-        if evaluationResult.average_holdout_local_feature_explanations:
-            evaluationResult.average_holdout_local_feature_explanations.to_csv(
-                f"{runPath}/averageHoldoutLocalExplanations.csv"
+
+    if config["model"]["calculateShapelyExplanations"]:
+        evaluationResult.average_test_local_case_explanations.to_csv(
+            f"{runPath}/averageLocalCaseExplanations.csv"
+        )
+        evaluationResult.average_test_local_control_explanations.to_csv(
+            f"{runPath}/averageLocalControlExplanations.csv"
+        )
+        if evaluationResult.holdout:
+            evaluationResult.average_holdout_local_case_explanations.to_csv(
+                f"{runPath}/averageHoldoutLocalCaseExplanations.csv"
+            )
+            evaluationResult.average_holdout_local_control_explanations.to_csv(
+                f"{runPath}/averageHoldoutLocalControlExplanations.csv"
             )
 
     with open(
@@ -272,6 +278,7 @@ def evaluate(
 
     return (
         FoldResult(
+            "test",
             testData.ids,
             testData.labels,
             testData.vectors,
@@ -280,9 +287,10 @@ def evaluate(
             shapValues,
             shapExplainer,
             shapMasker,
-            fittedOptimizer
+            fittedOptimizer,
         ),
         FoldResult(
+            "holdout",
             holdoutData.ids,
             holdoutData.labels,
             holdoutData.vectors,
@@ -318,7 +326,7 @@ def classify(
 
     clinicalIDs = list()
 
-    for id in embedding["sampleIndex"] + embedding["holdoutSampleIndex"]:
+    for id in np.hstack([embedding["sampleIndex"], embedding["holdoutSampleIndex"]]):
         clinicalIDs.extend(
             id.split(config["vcfLike"]["compoundSampleIdDelimiter"])[
                 config["vcfLike"]["compoundSampleMetaIdStartIndex"]
@@ -350,11 +358,11 @@ def classify(
     crossValIndices = list(
         outerCvIterator.split(embedding["samples"], embedding["labels"])
     )
-
     holdoutData = SampleData(
         set="holdout",
-        ids=embedding["holdoutSamples"],
+        ids=embedding["holdoutSampleIndex"],
         labels=embedding["holdoutLabels"],
+        vectors=embedding["holdoutSamples"],
     )
 
     evaluate_args = [
@@ -363,11 +371,13 @@ def classify(
                 set="train",
                 ids=embedding["sampleIndex"][trainIndices],
                 labels=embedding["labels"][trainIndices],
+                vectors=embedding["samples"][trainIndices],
             ),
             SampleData(
                 set="test",
                 ids=embedding["sampleIndex"][testIndices],
                 labels=embedding["labels"][testIndices],
+                vectors=embedding["samples"][testIndices],
             ),
             holdoutData,
             model,

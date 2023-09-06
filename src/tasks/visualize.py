@@ -273,15 +273,17 @@ def plotSample(
     import shap
 
     currentLabel = (
-        modelResults.test[j].labels[k] if not holdout else modelResults.holdout[j].labels[k]
+        modelResults.test[j].labels[k]
+        if not holdout
+        else modelResults.holdout[j].labels[k]
     )
     sampleID = (
         modelResults.test[j].ids[k] if not holdout else modelResults.holdout[j].ids[k]
     )
     localExplanations = (
         modelResults.test[j].shap_explanation
-        if not holdout else
-        modelResults.holdout[j].shap_explanation
+        if not holdout
+        else modelResults.holdout[j].shap_explanation
     )
     waterfallPlot = plt.figure()
     title = "\n".join(
@@ -297,21 +299,7 @@ def plotSample(
     )
 
     plt.title(title)
-    # patch parameter bug: https://github.com/slundberg/shap/issues/2362
-    to_pass = SimpleNamespace(
-        **{
-            "values": localExplanations[k].values[:, 1]
-            if len(localExplanations[k].values.shape) > 1
-            else localExplanations[k].values,
-            "data": localExplanations[k].data,
-            "display_data": None,
-            "feature_names": localExplanations.feature_names,
-            "base_values": localExplanations[k].base_values[currentLabel]
-            if len(localExplanations[k].base_values.shape) == 1
-            else localExplanations[k].base_values,
-        }
-    )
-    shap.plots.waterfall(to_pass, show=False)
+    shap.plots.waterfall(localExplanations[k, :, 1], show=False)
     plt.tight_layout()
     plt.close(waterfallPlot)
 
@@ -350,23 +338,33 @@ def plotSample(
 
 
 def trackBootstrapVisualizations(
-    runID: str, plotSubtitle: str, modelName: str, modelResults: EvaluationResult, holdout=False, config=config
+    runID: str,
+    plotSubtitle: str,
+    modelName: str,
+    modelResults: EvaluationResult,
+    holdout=False,
+    config=config,
 ):
     aucName = "aucPlot" if not holdout else "aucPlotHoldout"
-    probabilities = (
-        [probabilities for probabilities in (modelResults.test if not holdout else modelResults.holdout)]
-    )
+    probabilities = [
+        fold.probabilities
+        for fold in (modelResults.test if not holdout else modelResults.holdout)
+    ]
 
-    labels = modelResults.test.labels if not holdout else modelResults.holdout.labels
-    ids = modelResults.test.ids if not holdout else modelResults.holdout.ids
-    
+    labels = [
+        fold.labels
+        for fold in (modelResults.test if not holdout else modelResults.holdout)
+    ]
+    ids = [
+        fold.ids
+        for fold in (modelResults.test if not holdout else modelResults.holdout)
+    ]
+
     labelsProbabilitiesByFold = {
         f"Fold {k+1}": (
             labels[k],
             np.array(probabilities[k])[:, 1],
         )
-        if len(probabilities[k][0].shape) >= 1
-        else (labels[k], probabilities[k])
         for k in range(config["sampling"]["crossValIterations"])
     }
     labelsPredictionsByFold = {
@@ -414,7 +412,9 @@ def trackBootstrapVisualizations(
             {
                 f"Fold {k+1}": [
                     result
-                    for result in modelResults.test[k].fitted_optimizer.optimizer_results_
+                    for result in modelResults.test[
+                        k
+                    ].fitted_optimizer.optimizer_results_
                 ]
                 for k in range(config["sampling"]["crossValIterations"])
             },
@@ -428,7 +428,16 @@ def trackBootstrapVisualizations(
         for j in range(config["sampling"]["crossValIterations"]):
             for k in range(len(ids[j])):
                 args.append(
-                    (j, k, runID, modelName, plotSubtitle, modelResults, holdout, config)
+                    (
+                        j,
+                        k,
+                        runID,
+                        modelName,
+                        plotSubtitle,
+                        modelResults,
+                        holdout,
+                        config,
+                    )
                 )
 
         for arg in args:

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from functools import cached_property
+from typing import Iterable, Optional, Union
 from joblib import Parallel, delayed
 from prefect import task
 from sklearn.metrics import roc_auc_score, roc_curve
@@ -8,6 +9,7 @@ from shap.maskers import Masker
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
+import numpy.typing as npt
 import os
 import pickle
 
@@ -109,43 +111,66 @@ class GenotypeData:
 class SampleData:
     """Initializes storage for sample data. Vectors are samples x features."""
 
+    set: str
     ids: list[str]
     labels: list[str]
     vectors: np.ndarray
 
 
 @dataclass
+class AggregatedMetric:
+    """Base class for aggregate evaluation metrics with standard deviation."""
+
+    data: Union[npt.NDArray[np.floating], list[float]]
+    ndims: int = 0
+
+    @cached_property
+    def mean(self) -> np.floating:
+        return np.mean(self.data, axis=self.ndims)
+
+    @cached_property
+    def std_dev(self) -> np.floating:
+        return np.std(self.data, axis=self.ndims)
+
+
+@dataclass
 class FoldResult(SampleData):
     """Initializes storage for sample results."""
 
-    probabilities: list[float]
-    global_feature_explanations: Optional[pd.DataFrame]
-    shap_explanation: Optional[object]
-    shap_explainer: Optional[Explainer]
-    shap_masker: Optional[Masker]
-    fitted_optimizer: Optional[object]
+    probabilities: np.ndarray  # each element is a 2-element sublist of binary probabilities
+    global_feature_explanations: Optional[pd.DataFrame] = None
+    shap_explanation: Optional[object] = None
+    shap_explainer: Optional[Explainer] = None
+    shap_masker: Optional[Masker] = None
+    fitted_optimizer: Optional[object] = None
 
     def __post_init__(self):
         self.calculate_AUC()
         self.calculate_positive_ratios()
         self.calculate_accuracy()
-        
-    @property
-    def local_feature_explanations(self):
-        localExplanationsDataframe = pd.DataFrame(
-            data=self.local_feature_explanations, index=self.ids, columns=self.shap_explainer.feature_names
+
+    @cached_property
+    def local_case_explanations(self):
+        localCaseExplanationsDataframe = pd.DataFrame(
+            data=self.shap_explanation.values[:, :, 1],
+            index=self.ids,
+            columns=self.shap_explanation.feature_names,
         )
-        localExplanationsDataframe.index.name = "sample_id"
-        return localExplanationsDataframe
+        localCaseExplanationsDataframe.index.name = "sample_id"
+        return localCaseExplanationsDataframe
+
+    @cached_property
+    def local_control_explanations(self):
+        localControlExplanationsDataframe = pd.DataFrame(
+            data=self.shap_explanation.values[:, :, 1],
+            index=self.ids,
+            columns=self.shap_explanation.feature_names,
+        )
+        localControlExplanationsDataframe.index.name = "sample_id"
+        return localControlExplanationsDataframe
 
     def calculate_AUC(self):
-        self.auc = [
-            roc_auc_score(
-                label,
-                (probability[:, 1] if len(probability.shape) > 1 else probability),
-            )
-            for label, probability in zip(self.labels, self.probabilities)
-        ]
+        self.auc = roc_auc_score(self.labels, self.probabilities[:, 1])
 
     def calculate_positive_ratios(self):
         self.fpr = np.linspace(0, 1, 100)  # Define common set of FPR values
@@ -160,32 +185,39 @@ class FoldResult(SampleData):
         self.tpr = np.interp(self.fpr, fpr, tpr)
 
     def calculate_accuracy(self):
-        self.case_accuracy = np.divide(
-            np.sum((np.around(self.probabilities)[self.labels == 1] == 1).astype(int)),
-            np.sum((self.labels == 1).astype(int)),
+        # Predicted labels based on probabilities
+        predicted_labels = np.around(self.probabilities[:, 1])
+
+        # Number of correct predictions
+        correct_predictions = np.sum(predicted_labels == self.labels)
+
+        # Overall accuracy
+        self.accuracy = correct_predictions / len(self.labels)
+
+        # For the case accuracy
+        positive_labels = self.labels == 1
+        self.case_accuracy = np.sum(predicted_labels[positive_labels] == 1) / np.sum(
+            positive_labels
         )
-        self.control_accuracy = np.divide(
-            np.sum((np.around(self.probabilities)[self.labels == 0] == 0).astype(int)),
-            np.sum((self.labels == 0).astype(int)),
+
+        # For the control accuracy
+        negative_labels = self.labels == 0
+        self.control_accuracy = np.sum(predicted_labels[negative_labels] == 0) / np.sum(
+            negative_labels
         )
-        self.accuracy = np.divide(
-            np.sum([self.case_accuracy, self.control_accuracy]), 2
-        )
-        
+
+
 @dataclass
 class EvaluationResult:
     """Initializes storage for a cross-validated model; contains evaluation metrics and training data."""
 
     train: list[SampleData] = field(default_factory=list)
     test: list[FoldResult] = field(default_factory=list)
-    holdout: Optional[list[FoldResult]] = field(default_factory=list)
-
+    holdout: list[FoldResult] = field(default_factory=list)
 
     def average(self):
         self.calculate_average_AUC()
         self.calculate_average_positive_ratios()
-        self.calculate_average_global_feature_explanations()
-        self.calculate_average_local_feature_explanations()
         self.calculate_average_accuracies()
 
     def calculate_average_AUC(self):
@@ -198,35 +230,62 @@ class EvaluationResult:
         self.average_test_fpr = np.mean([fold.fpr for fold in self.test], axis=0)
         self.average_holdout_fpr = np.mean([fold.fpr for fold in self.holdout], axis=0)
 
-    def calculate_average_global_feature_explanations(self):
+    @staticmethod
+    def aggregate_explanations(explanations):
+        """Aggregate the explanations across folds."""
+        concatenated_df = pd.concat(explanations)
+        grouped = concatenated_df.groupby(level=0)
+        means = grouped.mean()
+        stds = grouped.std()
+        return pd.concat([means, stds], axis=1, keys=["mean", "std"])
+
+    @cached_property
+    def average_global_feature_explanations(self):
         if all(fold.global_feature_explanations is not None for fold in self.test):
-            concatenated = pd.concat([fold.global_feature_explanations for fold in self.test])
-            self.average_global_feature_explanations = concatenated.groupby('feature_name').agg(['average', 'standard_deviation'])
+            concatenated = pd.concat(
+                [fold.global_feature_explanations for fold in self.test]
+            )
+            return concatenated.groupby("feature_name").agg(
+                ["mean", "std"],
+            )
 
-    def calculate_average_local_feature_explanations(self):
-        # For test set
+    @cached_property
+    def average_test_local_case_explanations(self):
         all_test_explanations = []
-        all_test_ids = []
         for fold in self.test:
-            if fold.local_feature_explanations is not None:
-                all_test_explanations.append(fold.local_feature_explanations)
-                all_test_ids.extend(fold.ids)
+            if fold.shap_explanation is not None:
+                all_test_explanations.append(fold.local_case_explanations)
         if all_test_explanations:
-            all_test_explanations_df = pd.concat(all_test_explanations, keys=all_test_ids, names=["sample_id"])
-            self.average_test_local_feature_explanations = all_test_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
+            return self.aggregate_explanations(all_test_explanations)
 
-        # For holdout set
+    @cached_property
+    def average_holdout_local_case_explanations(self):
         if self.holdout:
             all_holdout_explanations = []
-            all_holdout_ids = []
             for fold in self.holdout:
-                if fold.local_feature_explanations is not None:
-                    all_holdout_explanations.append(fold.local_feature_explanations)
-                    all_holdout_ids.extend(fold.ids)
+                if fold.shap_explanation is not None:
+                    all_holdout_explanations.append(fold.local_case_explanations)
             if all_holdout_explanations:
-                all_holdout_explanations_df = pd.concat(all_holdout_explanations, keys=all_holdout_ids, names=["sample_id"])
-                self.average_holdout_local_feature_explanations = all_holdout_explanations_df.groupby('sample_id').agg(['average', 'standard_deviation'])
+                return self.aggregate_explanations(all_holdout_explanations)
 
+    @cached_property
+    def average_test_local_control_explanations(self):
+        all_test_explanations = []
+        for fold in self.test:
+            if fold.shap_explanation is not None:
+                all_test_explanations.append(fold.local_control_explanations)
+        if all_test_explanations:
+            return self.aggregate_explanations(all_test_explanations)
+
+    @cached_property
+    def average_holdout_local_control_explanations(self):
+        if self.holdout:
+            all_holdout_explanations = []
+            for fold in self.holdout:
+                if fold.shap_explanation is not None:
+                    all_holdout_explanations.append(fold.local_control_explanations)
+            if all_holdout_explanations:
+                return self.aggregate_explanations(all_holdout_explanations)
 
     def calculate_average_accuracies(self):
         if self.test:
@@ -272,14 +331,13 @@ class EvaluationResult:
         all_ids = [id for fold in self.test + self.holdout for id in fold.ids]
 
         # Create DataFrame
-        sampleResultsDataframe = pd.DataFrame.from_dict(
-            {"probability": all_probabilities, "id": all_ids},
-            dtype=object,
-        ).groupby('id').mean()
+        sampleResultsDataframe = (
+            pd.DataFrame.from_dict({"probability": all_probabilities, "id": all_ids})
+            .groupby("id")
+            .mean()
+        )
 
         return sampleResultsDataframe
-
-    # ... other methods to calculate or update attributes
 
 
 @dataclass
@@ -288,16 +346,17 @@ class BootstrapResult:
 
     model_name: str
     iteration_results: list[EvaluationResult] = field(default_factory=list)
-    
-    def create_average_results_dataframe(self):
+
+    @cached_property
+    def average_sample_results_dataframe(self):
         # Create a list of DataFrames from each iteration
         dfs = [res.create_sample_results_dataframe() for res in self.iteration_results]
-        
+
         # Concatenate DataFrames along a new axis to make it easier to compute mean and std dev
         combined_df = pd.concat(dfs, axis=1)
 
         # Calculate mean and standard deviation for each sample id
-        result_df = combined_df.aggregate(['average_probability', 'standard_deviation'], axis=1)
+        result_df = combined_df.aggregate(["mean", "std"], axis=1)
 
         return result_df
 
@@ -306,10 +365,7 @@ class BootstrapResult:
 class ClassificationResults:
     """Initializes storage for all model results across bootstraps."""
 
-    models: list[BootstrapResult] = field(default_factory=list)
-    sample_results: pd.DataFrame = pd.DataFrame()
-    feature_importance: pd.DataFrame = pd.DataFrame()
-    hyperparameters: pd.DataFrame = pd.DataFrame()
+    modelResults: list[BootstrapResult] = field(default_factory=list)
 
 
 @task()

@@ -1,7 +1,7 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
-        "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
+        "path": "../adhoc analysis/exampleVCFlike.xlsx",  # variant call table with annotations
+        "sheet": "Sheet1",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
             "position",
@@ -75,13 +75,13 @@ config = {
     },
     "sampling": {
         "bootstrapIterations": 50,
-        "crossValIterations": 10,  # number of validations per bootstrap iteration
+        "crossValIterations": 2,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],
     },
     "model": {
         "hyperparameterOptimization": True,
-        "calculateShapelyExplanations": False,
+        "calculateShapelyExplanations": True,
     },
 }
