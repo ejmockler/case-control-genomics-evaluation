@@ -14,7 +14,7 @@ from tasks.data import (
     serializeBootstrapResults,
     serializeResultsDataframe,
 )
-from tasks.visualize import trackProjectVisualizations
+from tasks.visualize import trackModelVisualizations, trackProjectVisualizations
 
 matplotlib.use("agg")
 
@@ -97,115 +97,30 @@ def main(
     #     results.append(bootstrap(*args))
 
     results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
-
-    variantCount = 0
-    lastVariantCount = 0
     classificationResults = ClassificationResults(modelResults=results)
 
     # TODO run recovery for results dataclass
     # if config["sampling"]["lastIteration"] > 0:
-    #     results = recoverPastRuns(modelStack, results)
-
-    # if config["sampling"]["calculateShapelyExplanations"]:
-    #     os.makedirs(
-    #         f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
-    #         exist_ok=True,
-    #     )
-    # for i in range(len(modelStack)):
-    #     for j in range(config["sampling"]["bootstrapIterations"]):
-    #         for k in range(config["sampling"]["crossValIterations"]):
-    #             # append labels
-
-    #             averageShapelyExplanationsDataFrame.to_csv(
-    #                 f"projects/{config['tracking']['project']}/averageShapelyExplanations.csv"
-    #             )
-    #             if "averageHoldoutShapelyExplanations" in modelResult[j]:
-    #                 averageHoldoutShapelyExplanationsDataFrame.to_csv(
-    #                     f"projects/{config['tracking']['project']}/averageHoldoutShapelyExplanations.csv"
-    #                 )
-    #         if "globalExplanations" in bootstrapResult and isinstance(
-    #             bootstrapResult["globalExplanations"][0], pd.DataFrame
-    #         ):
-    #             variantCount = bootstrapResult["globalExplanations"][0].shape[0]
-    #             assert lastVariantCount == variantCount or lastVariantCount == 0
-    #             lastVariantCount = variantCount
-
-    #             globalExplanationsList += bootstrapResult["globalExplanations"]
-
-    #         modelSampleResultList += pd.DataFrame.from_dict(
-    #             {
-    #                 "probability": [
-    #                     probability[1]
-    #                     for foldResults in [
-    #                         *bootstrapResult["probabilities"],
-    #                         *bootstrapResult["holdoutProbabilities"],
-    #                     ]
-    #                     for probability in foldResults
-    #                 ],
-    #                 "id": [
-    #                     id
-    #                     for foldResults in [
-    #                         *bootstrapResult["testIDs"],
-    #                         *bootstrapResult["holdoutIDs"],
-    #                     ]
-    #                     for id in foldResults
-    #                 ],
-    #             },
-    #             dtype=object,
-    #         ).set_index("id")
-
-    #     if globalExplanationsList:
-    #         averageGlobalExplanationsDataFrame = (
-    #             pd.concat(globalExplanationsList)
-    #             .reset_index()
-    #             .groupby("feature_name")
-    #             .mean()
-    #         )
-    #         os.makedirs(
-    #             f"projects/{config['tracking']['project']}/modelSummary/{modelName}/",
-    #             exist_ok=True,
-    #         )
-    #         averageGlobalExplanationsDataFrame.to_csv(
-    #             f"projects/{config['tracking']['project']}/modelSummary/{modelName}/averageFeatureCoefficients.csv"
-    #         )
-
-    #     os.makedirs(
-    #         f"projects/{config['tracking']['project']}/modelSummary/{modelName}/",
-    #         exist_ok=True,
-    #     )
-    #     averageModelSampleResultDataFrame = (
-    #         pd.concat(modelSampleResultList).reset_index().groupby("id").mean()
-    #     )
-    #     averageModelSampleResultDataFrame.to_csv(
-    #         f"projects/{config['tracking']['project']}/modelSummary/{modelName}/averageSampleResults.csv"
-    #     )
-
-    #     # Calculate mean over bootstraps (axis=0) for each TPR value
-    #     tprFprAucByInstance[modelName][0] = np.mean(
-    #         tprFprAucByInstance[modelName][0], axis=0
-    #     )
-    #     # Same for AUC
-    #     tprFprAucByInstance[modelName][2] = np.mean(
-    #         tprFprAucByInstance[modelName][2], axis=0
-    #     )
-    #     if "averageHoldoutAUC" in bootstrapResult:
-    #         holdoutTprFprAucByInstance[modelName][0] = np.mean(
-    #             holdoutTprFprAucByInstance[modelName][0],
-    #             axis=0,
-    #         )
-    #         holdoutTprFprAucByInstance[modelName][2] = np.mean(
-    #             holdoutTprFprAucByInstance[modelName][2],
-    #             axis=0,
-    #         )
-
-    # sampleResultsDataFrame = serializeResultsDataframe(sampleResults)
-    # sampleResultsDataFrame["probability"] = sampleResultsDataFrame["probability"].map(
-    #     lambda x: np.array2string(np.array(x), separator=",")
+    #     results = recoverPastRuns(moding(np.array(x), separator=",")
     # )
 
-    # sampleResultsDataFrame.to_csv(
-    #     f"projects/{config['tracking']['project']}/sampleResults.csv"
-    # )
+    if config["sampling"]["calculateShapelyExplanations"]:
+        os.makedirs(
+            f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
+            exist_ok=True,
+        )
+        
+    for i in range(len(modelStack)):
+        modelResult = classificationResults.modelResults[i]
+        modelResult.calculate_average_accuracies()
+        os.makedirs(
+            f"projects/{config['tracking']['project']}/{modelResult.model_name}/",
+            exist_ok=True,
+        )
+        modelResult.average_sample_results_dataframe(
+            ).to_csv(f"projects/{config['tracking']['project']}/{modelResult.model_name}/averagedSampleResults.csv")
+        trackModelVisualizations(modelResult, config=config)
+
 
     # trackProjectVisualizations(
     #     sampleResultsDataFrame,

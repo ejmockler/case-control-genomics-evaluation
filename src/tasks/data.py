@@ -319,25 +319,63 @@ class EvaluationResult:
             all_accuracies.extend([fold.accuracy for fold in self.holdout])
         if all_accuracies:
             self.overall_average_accuracy = np.mean(all_accuracies)
-
-    def create_sample_results_dataframe(self):
+   
+    @cached_property
+    def sample_results_dataframe(self):
         # Extract probabilities and ids from test and holdout folds
         all_probabilities = [
-            probability[1]  # Assuming probability is a 2-element list or tuple
-            for fold in self.test + self.holdout
+            probability[1]  # Assuming probability exists for each binary class
+            for fold in self.test + (self.holdout if self.holdout else [])
             for probability in fold.probabilities
         ]
 
-        all_ids = [id for fold in self.test + self.holdout for id in fold.ids]
+        all_labels = [label for fold in self.test + (self.holdout if self.holdout else []) for label in fold.labels]
+
+        all_ids = [id for fold in self.test + (self.holdout if self.holdout else []) for id in fold.ids]
 
         # Create DataFrame
-        sampleResultsDataframe = (
-            pd.DataFrame.from_dict({"probability": all_probabilities, "id": all_ids})
-            .groupby("id")
-            .mean()
-        )
+        df = pd.DataFrame({
+            "probability": all_probabilities,
+            "rounded_probability": np.around(all_probabilities).astype(int),
+            "label": all_labels,
+            "id": all_ids
+        })
+
+        # Calculate correctness of each classification
+        df["correct"] = (df["rounded_probability"] == df["label"]).astype(int)
+
+        # Group by ID and compute average accuracy and mean probability for each group
+        sampleResultsDataframe = df.groupby('id').agg({
+            "probability": "mean",  # average probability
+            "correct": "mean"  # accuracy as proportion of correct classifications
+        })
 
         return sampleResultsDataframe
+    
+    @cached_property
+    def holdout_ids(self):
+        return [fold.ids for fold in self.holdout]
+    
+    @cached_property
+    def holdout_labels(self):
+        return [fold.labels for fold in self.holdout]
+    
+    @cached_property
+    def test_ids(self):
+        return [fold.ids for fold in self.test]
+    
+    @cached_property
+    def test_labels(self):
+        return [fold.labels for fold in self.test]
+    
+    @cached_property
+    def train_ids(self):
+        return [fold.ids for fold in self.train]
+    
+    @cached_property
+    def train_labels(self):
+        return [fold.labels for fold in self.train]
+    
 
 
 @dataclass
@@ -350,16 +388,65 @@ class BootstrapResult:
     @cached_property
     def average_sample_results_dataframe(self):
         # Create a list of DataFrames from each iteration
-        dfs = [res.create_sample_results_dataframe() for res in self.iteration_results]
-
+        dfs = [res.sample_results_dataframe for res in self.iteration_results]
+        
         # Concatenate DataFrames along a new axis to make it easier to compute mean and std dev
-        combined_df = pd.concat(dfs, axis=1)
+        combined_df = pd.concat(dfs, axis=1, keys=range(len(dfs)))
 
         # Calculate mean and standard deviation for each sample id
-        result_df = combined_df.aggregate(["mean", "std"], axis=1)
+        result_df = pd.DataFrame()
+        result_df["average_probability"] = combined_df['probability'].mean(axis=1)
+        result_df["probability_std_dev"] = combined_df['probability'].std(axis=1)
+        result_df["average_accuracy"] = combined_df['correct'].mean(axis=1)
+        result_df["accuracy_std_dev"] = combined_df['correct'].std(axis=1)
 
         return result_df
 
+    def calculate_average_accuracies(self):
+        # Test accuracies
+        all_test_accuracies = [res.average_test_accuracy for res in self.iteration_results]
+        self.average_test_accuracy = np.mean(all_test_accuracies)
+        
+        all_test_case_accuracies = [res.average_test_case_accuracy for res in self.iteration_results]
+        self.average_test_case_accuracy = np.mean(all_test_case_accuracies)
+        
+        all_test_control_accuracies = [res.average_test_control_accuracy for res in self.iteration_results]
+        self.average_test_control_accuracy = np.mean(all_test_control_accuracies)
+
+        # Holdout accuracies
+        all_holdout_accuracies = [res.average_holdout_accuracy for res in self.iteration_results if res.holdout]
+        if all_holdout_accuracies:
+            self.average_holdout_accuracy = np.mean(all_holdout_accuracies)
+            
+            all_holdout_case_accuracies = [res.average_holdout_case_accuracy for res in self.iteration_results if res.holdout]
+            self.average_holdout_case_accuracy = np.mean(all_holdout_case_accuracies)
+            
+            all_holdout_control_accuracies = [res.average_holdout_control_accuracy for res in self.iteration_results if res.holdout]
+            self.average_holdout_control_accuracy = np.mean(all_holdout_control_accuracies)
+
+    @cached_property
+    def test_labels(self):
+        return [res.test_labels for res in self.iteration_results]
+    
+    @cached_property
+    def test_ids(self):
+        return [res.test_ids for res in self.iteration_results]
+    
+    @cached_property
+    def holdout_labels(self):
+        return [res.holdout_labels for res in self.iteration_results if res.holdout]
+    
+    @cached_property
+    def holdout_ids(self):
+        return [res.holdout_ids for res in self.iteration_results if res.holdout]
+    
+    @cached_property
+    def train_labels(self):
+        return [res.train_labels for res in self.iteration_results]
+    
+    @cached_property
+    def train_ids(self):
+        return [res.train_ids for res in self.iteration_results]
 
 @dataclass
 class ClassificationResults:
