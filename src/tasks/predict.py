@@ -151,7 +151,7 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
     embeddingDF.to_csv(f"{runPath}/embedding.csv")
     if "holdoutSamples" in embedding:
         holdoutEmbeddingDF.to_csv(f"{runPath}/holdoutEmbedding.csv")
-    clinicalData.loc[clinicalData.index.isin(clinicalIDs)].to_csv(
+    clinicalData.loc[clinicalData.index.intersection(clinicalIDs)].to_csv(
         f"{runPath}/clinicalData.csv"
     )
     # hack to log metric as filename
@@ -163,8 +163,9 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
 
 def trackResults(runID: str, evaluationResult: EvaluationResult, config):
     runPath = runID
-    sampleResultsDataframe = evaluationResult.create_sample_results_dataframe()
+    sampleResultsDataframe = evaluationResult.sample_results_dataframe
     sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
+    evaluationResult.average()
     for k in range(config["sampling"]["crossValIterations"]):
         if config["model"]["hyperparameterOptimization"]:
             hyperparameterDir = f"{runPath}/hyperparameters"
@@ -327,11 +328,12 @@ def classify(
     clinicalIDs = list()
 
     for id in np.hstack([embedding["sampleIndex"], embedding["holdoutSampleIndex"]]):
-        clinicalIDs.extend(
-            id.split(config["vcfLike"]["compoundSampleIdDelimiter"])[
-                config["vcfLike"]["compoundSampleMetaIdStartIndex"]
-            ]
-        )
+        if config["vcfLike"]["compoundSampleIdDelimiter"] in id:
+            clinicalIDs.append(
+                id.split(config["vcfLike"]["compoundSampleIdDelimiter"])[
+                    config["vcfLike"]["compoundSampleMetaIdStartIndex"]
+                ]
+            )
 
     # TODO get counts via instance functions of embedding
     totalSampleCount = len(embedding["samples"])
@@ -398,7 +400,6 @@ def classify(
         modelResults.test.append(testResult)
         modelResults.holdout.append(holdoutResult)
         gc.collect()
-    modelResults.average()
 
     if track:
         trackResults(runID, modelResults, config)

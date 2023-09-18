@@ -99,17 +99,14 @@ def main(
     results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
     classificationResults = ClassificationResults(modelResults=results)
 
-    # TODO run recovery for results dataclass
+    # TODO recover existing runs into results dataclass
     # if config["sampling"]["lastIteration"] > 0:
     #     results = recoverPastRuns(moding(np.array(x), separator=",")
     # )
 
-    if config["sampling"]["calculateShapelyExplanations"]:
-        os.makedirs(
-            f"projects/{config['tracking']['project']}/averageShapelyExplanations/",
-            exist_ok=True,
-        )
-        
+    if config["model"]["calculateShapelyExplanations"]:
+        pass
+
     for i in range(len(modelStack)):
         modelResult = classificationResults.modelResults[i]
         modelResult.calculate_average_accuracies()
@@ -117,10 +114,30 @@ def main(
             f"projects/{config['tracking']['project']}/{modelResult.model_name}/",
             exist_ok=True,
         )
-        modelResult.average_sample_results_dataframe(
-            ).to_csv(f"projects/{config['tracking']['project']}/{modelResult.model_name}/averagedSampleResults.csv")
+        modelResult.sample_results_dataframe.to_csv(
+            f"projects/{config['tracking']['project']}/{modelResult.model_name}/sampleResults.csv"
+        )
+        if modelResult.average_global_feature_explanations is not None:
+            modelResult.average_global_feature_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/globalFeatures.csv"
+            )
+        if modelResult.average_test_local_case_explanations is not None:
+            modelResult.average_test_local_case_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/testCaseLocalFeatures.csv"
+            )
+        if modelResult.average_test_local_control_explanations is not None:
+            modelResult.average_test_local_control_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/testControlLocalFeatures.csv"
+            )
+        if modelResult.average_holdout_local_case_explanations is not None:
+            modelResult.average_holdout_local_case_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutCaseLocalFeatures.csv"
+            )
+        if modelResult.average_holdout_local_control_explanations is not None:
+            modelResult.average_holdout_local_control_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutControlLocalFeatures.csv"
+            )
         trackModelVisualizations(modelResult, config=config)
-
 
     # trackProjectVisualizations(
     #     sampleResultsDataFrame,

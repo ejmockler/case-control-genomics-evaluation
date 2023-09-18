@@ -319,7 +319,7 @@ class EvaluationResult:
             all_accuracies.extend([fold.accuracy for fold in self.holdout])
         if all_accuracies:
             self.overall_average_accuracy = np.mean(all_accuracies)
-   
+
     @cached_property
     def sample_results_dataframe(self):
         # Extract probabilities and ids from test and holdout folds
@@ -329,53 +329,74 @@ class EvaluationResult:
             for probability in fold.probabilities
         ]
 
-        all_labels = [label for fold in self.test + (self.holdout if self.holdout else []) for label in fold.labels]
+        all_labels = [
+            label
+            for fold in self.test + (self.holdout if self.holdout else [])
+            for label in fold.labels
+        ]
 
-        all_ids = [id for fold in self.test + (self.holdout if self.holdout else []) for id in fold.ids]
+        all_ids = [
+            id
+            for fold in self.test + (self.holdout if self.holdout else [])
+            for id in fold.ids
+        ]
 
         # Create DataFrame
-        df = pd.DataFrame({
-            "probability": all_probabilities,
-            "rounded_probability": np.around(all_probabilities).astype(int),
-            "label": all_labels,
-            "id": all_ids
-        })
+        df = pd.DataFrame(
+            {
+                "probability": all_probabilities,
+                "prediction": np.around(all_probabilities).astype(int),
+                "label": all_labels,
+                "id": all_ids,
+            }
+        )
 
         # Calculate correctness of each classification
-        df["correct"] = (df["rounded_probability"] == df["label"]).astype(int)
+        df["correct"] = (df["prediction"] == df["label"]).astype(int)
 
-        # Group by ID and compute average accuracy and mean probability for each group
-        sampleResultsDataframe = df.groupby('id').agg({
-            "probability": "mean",  # average probability
-            "correct": "mean"  # accuracy as proportion of correct classifications
-        })
+        # Group by ID and compute aggregated values
+        aggregation_dict = {
+            "probability": [("mean", "mean"), ("std", "std")],
+            "correct": [("mean", "mean"), ("std", "std")],
+            "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
+            "label": [("first", "first")],  # Get the first label for each id
+        }
+        sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
+        # Flatten MultiIndex columns for easier referencing
+        sampleResultsDataframe.columns = [
+            f"{col[0]}_{col[1]}" if col[1] not in ["first", "most_frequent"] else col[0]
+            for col in sampleResultsDataframe.columns
+        ]
+        # Rename 'label_first' back to 'label'
+        sampleResultsDataframe = sampleResultsDataframe.rename(
+            columns={"label_first": "label"}
+        )
         return sampleResultsDataframe
-    
+
     @cached_property
     def holdout_ids(self):
         return [fold.ids for fold in self.holdout]
-    
+
     @cached_property
     def holdout_labels(self):
         return [fold.labels for fold in self.holdout]
-    
+
     @cached_property
     def test_ids(self):
         return [fold.ids for fold in self.test]
-    
+
     @cached_property
     def test_labels(self):
         return [fold.labels for fold in self.test]
-    
+
     @cached_property
     def train_ids(self):
         return [fold.ids for fold in self.train]
-    
+
     @cached_property
     def train_labels(self):
         return [fold.labels for fold in self.train]
-    
 
 
 @dataclass
@@ -386,67 +407,190 @@ class BootstrapResult:
     iteration_results: list[EvaluationResult] = field(default_factory=list)
 
     @cached_property
-    def average_sample_results_dataframe(self):
-        # Create a list of DataFrames from each iteration
-        dfs = [res.sample_results_dataframe for res in self.iteration_results]
-        
-        # Concatenate DataFrames along a new axis to make it easier to compute mean and std dev
-        combined_df = pd.concat(dfs, axis=1, keys=range(len(dfs)))
+    def sample_results_dataframe(self):
+        all_probabilities = []
+        all_labels = []
+        all_ids = []
 
-        # Calculate mean and standard deviation for each sample id
-        result_df = pd.DataFrame()
-        result_df["average_probability"] = combined_df['probability'].mean(axis=1)
-        result_df["probability_std_dev"] = combined_df['probability'].std(axis=1)
-        result_df["average_accuracy"] = combined_df['correct'].mean(axis=1)
-        result_df["accuracy_std_dev"] = combined_df['correct'].std(axis=1)
+        # Iterate over each EvaluationResult in iteration_results
+        for eval_result in self.iteration_results:
+            test_folds = eval_result.test
+            holdout_folds = eval_result.holdout if eval_result.holdout else []
 
-        return result_df
+            all_probabilities.extend(
+                [
+                    probability[1]  # Assuming probability exists for each binary class
+                    for fold in test_folds + holdout_folds
+                    for probability in fold.probabilities
+                ]
+            )
+
+            all_labels.extend(
+                [label for fold in test_folds + holdout_folds for label in fold.labels]
+            )
+
+            all_ids.extend(
+                [id for fold in test_folds + holdout_folds for id in fold.ids]
+            )
+
+        # Create DataFrame
+        df = pd.DataFrame(
+            {
+                "probability": all_probabilities,
+                "prediction": np.around(all_probabilities).astype(int),
+                "label": all_labels,
+                "id": all_ids,
+            }
+        )
+
+        # Calculate correctness of each classification
+        df["correct"] = (df["prediction"] == df["label"]).astype(int)
+
+        # Group by ID and compute aggregated values
+        aggregation_dict = {
+            "probability": [("mean", "mean"), ("std", "std")],
+            "correct": [("mean", "mean"), ("std", "std")],
+            "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
+            "label": [("first", "first")],  # Get the first label for each id
+        }
+        sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
+
+        # Flatten MultiIndex columns for easier referencing
+        sampleResultsDataframe.columns = [
+            "_".join(col) for col in sampleResultsDataframe.columns
+        ]
+        # Rename 'label_first' back to 'label'
+        sampleResultsDataframe = sampleResultsDataframe.rename(
+            columns={"label_first": "label"}
+        )
+
+        return sampleResultsDataframe
+
+    def get_aggregated_attribute(self, attribute_name, level=0):
+        if getattr(self.iteration_results[0], attribute_name) is None:
+            return None
+        means_list = [
+            getattr(res, attribute_name).xs("mean", axis=1, level=level)
+            for res in self.iteration_results
+            if getattr(res, attribute_name) is not None
+        ]
+        stds_list = [
+            getattr(res, attribute_name).xs("std", axis=1, level=level)
+            for res in self.iteration_results
+            if getattr(res, attribute_name) is not None
+        ]
+
+        return self.aggregate_feature_importances(means_list, stds_list)
+
+    @cached_property
+    def average_global_feature_explanations(self):
+        return self.get_aggregated_attribute(
+            "average_global_feature_explanations", level=1
+        )
+
+    @cached_property
+    def average_test_local_case_explanations(self):
+        return self.get_aggregated_attribute("average_test_local_case_explanations")
+
+    @cached_property
+    def average_test_local_control_explanations(self):
+        return self.get_aggregated_attribute("average_test_local_control_explanations")
+
+    @cached_property
+    def average_holdout_local_case_explanations(self):
+        return self.get_aggregated_attribute("average_holdout_local_case_explanations")
+
+    @cached_property
+    def average_holdout_local_control_explanations(self):
+        return self.get_aggregated_attribute(
+            "average_holdout_local_control_explanations"
+        )
+
+    def aggregate_feature_importances(self, means_list, stds_list):
+        """Aggregate feature importances across multiple EvaluationResults."""
+        concatenated_means = pd.concat(means_list, axis=1)
+        concatenated_stds = pd.concat(stds_list, axis=1)
+
+        # Convert STDs to variances
+        concatenated_variances = concatenated_stds**2
+
+        # Calculate mean of means and mean of variances
+        overall_mean = concatenated_means.mean(axis=1)
+        overall_variance = concatenated_variances.mean(axis=1)
+
+        # Convert variance back to STD
+        overall_std = np.sqrt(overall_variance)
+
+        return pd.concat([overall_mean, overall_std], axis=1, keys=["mean", "std"])
 
     def calculate_average_accuracies(self):
+        for res in self.iteration_results:
+            res.average()
         # Test accuracies
-        all_test_accuracies = [res.average_test_accuracy for res in self.iteration_results]
+        all_test_accuracies = [
+            res.average_test_accuracy for res in self.iteration_results
+        ]
         self.average_test_accuracy = np.mean(all_test_accuracies)
-        
-        all_test_case_accuracies = [res.average_test_case_accuracy for res in self.iteration_results]
+
+        all_test_case_accuracies = [
+            res.average_test_case_accuracy for res in self.iteration_results
+        ]
         self.average_test_case_accuracy = np.mean(all_test_case_accuracies)
-        
-        all_test_control_accuracies = [res.average_test_control_accuracy for res in self.iteration_results]
+
+        all_test_control_accuracies = [
+            res.average_test_control_accuracy for res in self.iteration_results
+        ]
         self.average_test_control_accuracy = np.mean(all_test_control_accuracies)
 
         # Holdout accuracies
-        all_holdout_accuracies = [res.average_holdout_accuracy for res in self.iteration_results if res.holdout]
+        all_holdout_accuracies = [
+            res.average_holdout_accuracy
+            for res in self.iteration_results
+            if res.holdout
+        ]
         if all_holdout_accuracies:
             self.average_holdout_accuracy = np.mean(all_holdout_accuracies)
-            
-            all_holdout_case_accuracies = [res.average_holdout_case_accuracy for res in self.iteration_results if res.holdout]
+
+            all_holdout_case_accuracies = [
+                res.average_holdout_case_accuracy
+                for res in self.iteration_results
+                if res.holdout
+            ]
             self.average_holdout_case_accuracy = np.mean(all_holdout_case_accuracies)
-            
-            all_holdout_control_accuracies = [res.average_holdout_control_accuracy for res in self.iteration_results if res.holdout]
-            self.average_holdout_control_accuracy = np.mean(all_holdout_control_accuracies)
+
+            all_holdout_control_accuracies = [
+                res.average_holdout_control_accuracy
+                for res in self.iteration_results
+                if res.holdout
+            ]
+            self.average_holdout_control_accuracy = np.mean(
+                all_holdout_control_accuracies
+            )
 
     @cached_property
     def test_labels(self):
         return [res.test_labels for res in self.iteration_results]
-    
+
     @cached_property
     def test_ids(self):
         return [res.test_ids for res in self.iteration_results]
-    
+
     @cached_property
     def holdout_labels(self):
         return [res.holdout_labels for res in self.iteration_results if res.holdout]
-    
+
     @cached_property
     def holdout_ids(self):
         return [res.holdout_ids for res in self.iteration_results if res.holdout]
-    
+
     @cached_property
     def train_labels(self):
         return [res.train_labels for res in self.iteration_results]
-    
+
     @cached_property
     def train_ids(self):
         return [res.train_ids for res in self.iteration_results]
+
 
 @dataclass
 class ClassificationResults:
