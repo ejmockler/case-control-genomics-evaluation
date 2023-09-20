@@ -352,14 +352,15 @@ class EvaluationResult:
         )
 
         # Calculate correctness of each classification
-        df["correct"] = (df["prediction"] == df["label"]).astype(int)
+        df["accuracy"] = (df["prediction"] == df["label"]).astype(int)
 
         # Group by ID and compute aggregated values
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
-            "correct": [("mean", "mean"), ("std", "std")],
+            "accuracy": [("mean", "mean"), ("std", "std")],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
+            "id": [("draw_count", "size")],  # Count occurrences of each id
         }
         sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
@@ -368,35 +369,33 @@ class EvaluationResult:
             f"{col[0]}_{col[1]}" if col[1] not in ["first", "most_frequent"] else col[0]
             for col in sampleResultsDataframe.columns
         ]
+
         # Rename 'label_first' back to 'label'
         sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label"}
+            columns={"label_first": "label", "id_draw_count": "draw_count"}
         )
         return sampleResultsDataframe
 
-    @cached_property
-    def holdout_ids(self):
-        return [fold.ids for fold in self.holdout]
+    @staticmethod
+    def get_unique_samples(foldResults: Iterable[FoldResult]):
+        sampleDict = {}
+        for fold in foldResults:
+            for i, id in enumerate(fold.ids):
+                if id not in sampleDict:
+                    sampleDict[id] = fold.labels[i]
+        return sampleDict
 
     @cached_property
-    def holdout_labels(self):
-        return [fold.labels for fold in self.holdout]
+    def holdout_dict(self):
+        return self.get_unique_samples(self.holdout)
 
     @cached_property
-    def test_ids(self):
-        return [fold.ids for fold in self.test]
+    def test_dict(self):
+        return self.get_unique_samples(self.test)
 
     @cached_property
-    def test_labels(self):
-        return [fold.labels for fold in self.test]
-
-    @cached_property
-    def train_ids(self):
-        return [fold.ids for fold in self.train]
-
-    @cached_property
-    def train_labels(self):
-        return [fold.labels for fold in self.train]
+    def train_dict(self):
+        return self.get_unique_samples(self.train)
 
 
 @dataclass
@@ -444,14 +443,15 @@ class BootstrapResult:
         )
 
         # Calculate correctness of each classification
-        df["correct"] = (df["prediction"] == df["label"]).astype(int)
+        df["accuracy"] = (df["prediction"] == df["label"]).astype(int)
 
         # Group by ID and compute aggregated values
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
-            "correct": [("mean", "mean"), ("std", "std")],
+            "accuracy": [("mean", "mean"), ("std", "std")],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
+            "id": [("draw_count", "size")],  # Count occurrences of each id
         }
         sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
@@ -459,16 +459,17 @@ class BootstrapResult:
         sampleResultsDataframe.columns = [
             "_".join(col) for col in sampleResultsDataframe.columns
         ]
-        # Rename 'label_first' back to 'label'
+        # Rename 'label_first' back to 'label' and 'id_draw_count' to 'draw_count'
         sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label"}
+            columns={"label_first": "label", "id_draw_count": "draw_count"}
         )
 
         return sampleResultsDataframe
 
-    def get_aggregated_attribute(self, attribute_name, level=0):
+    def get_aggregated_attribute(self, attribute_name, agg_func=None, level=0):
         if getattr(self.iteration_results[0], attribute_name) is None:
             return None
+
         means_list = [
             getattr(res, attribute_name).xs("mean", axis=1, level=level)
             for res in self.iteration_results
@@ -480,7 +481,10 @@ class BootstrapResult:
             if getattr(res, attribute_name) is not None
         ]
 
-        return self.aggregate_feature_importances(means_list, stds_list)
+        if agg_func is None:
+            return self.aggregate_global_explanations(means_list, stds_list)
+        else:
+            return agg_func(means_list, stds_list)
 
     @cached_property
     def average_global_feature_explanations(self):
@@ -490,24 +494,34 @@ class BootstrapResult:
 
     @cached_property
     def average_test_local_case_explanations(self):
-        return self.get_aggregated_attribute("average_test_local_case_explanations")
+        return self.get_aggregated_attribute(
+            "average_test_local_case_explanations",
+            agg_func=self.aggregate_local_explanations,
+        )
 
     @cached_property
     def average_test_local_control_explanations(self):
-        return self.get_aggregated_attribute("average_test_local_control_explanations")
+        return self.get_aggregated_attribute(
+            "average_test_local_control_explanations",
+            agg_func=self.aggregate_local_explanations,
+        )
 
     @cached_property
     def average_holdout_local_case_explanations(self):
-        return self.get_aggregated_attribute("average_holdout_local_case_explanations")
+        return self.get_aggregated_attribute(
+            "average_holdout_local_case_explanations",
+            agg_func=self.aggregate_local_explanations,
+        )
 
     @cached_property
     def average_holdout_local_control_explanations(self):
         return self.get_aggregated_attribute(
-            "average_holdout_local_control_explanations"
+            "average_holdout_local_control_explanations",
+            agg_func=self.aggregate_local_explanations,
         )
 
-    def aggregate_feature_importances(self, means_list, stds_list):
-        """Aggregate feature importances across multiple EvaluationResults."""
+    def aggregate_global_explanations(self, means_list, stds_list):
+        """Aggregate global feature importances across multiple EvaluationResults."""
         concatenated_means = pd.concat(means_list, axis=1)
         concatenated_stds = pd.concat(stds_list, axis=1)
 
@@ -522,6 +536,36 @@ class BootstrapResult:
         overall_std = np.sqrt(overall_variance)
 
         return pd.concat([overall_mean, overall_std], axis=1, keys=["mean", "std"])
+
+    def aggregate_local_explanations(self, means_list, stds_list):
+        """
+        Aggregate local feature explanations across multiple EvaluationResults.
+        """
+        concatenated_means = pd.concat(means_list, axis=1)
+        concatenated_stds = pd.concat(stds_list, axis=1)
+
+        # Convert STDs to variances
+        concatenated_variances = concatenated_stds**2
+
+        # Group by column names to calculate the mean of means and mean of variances for each feature
+        overall_mean = concatenated_means.groupby(
+            by=concatenated_means.columns, axis=1
+        ).mean()
+        overall_variance = concatenated_variances.groupby(
+            by=concatenated_variances.columns, axis=1
+        ).mean()
+
+        # Convert variance back to STD
+        overall_std = np.sqrt(overall_variance)
+
+        # Using MultiIndex for columns
+        multi_columns = pd.MultiIndex.from_product(
+            [["mean", "std"], overall_mean.columns], names=["stat", "feature"]
+        )
+        aggregated = pd.concat([overall_mean, overall_std], axis=1)
+        aggregated.columns = multi_columns
+
+        return aggregated
 
     def calculate_average_accuracies(self):
         for res in self.iteration_results:
@@ -567,29 +611,25 @@ class BootstrapResult:
                 all_holdout_control_accuracies
             )
 
-    @cached_property
-    def test_labels(self):
-        return [res.test_labels for res in self.iteration_results]
+    def get_unique_samples(self, setType):
+        sampleDict = {}
+        for res in self.iteration_results:
+            for id in list(getattr(res, f"{setType}_dict").keys()):
+                if id not in sampleDict:
+                    sampleDict[id] = getattr(res, f"{setType}_dict")[id]
+        return sampleDict
 
     @cached_property
-    def test_ids(self):
-        return [res.test_ids for res in self.iteration_results]
+    def holdout_dict(self):
+        return self.get_unique_samples("holdout")
 
     @cached_property
-    def holdout_labels(self):
-        return [res.holdout_labels for res in self.iteration_results if res.holdout]
+    def test_dict(self):
+        return self.get_unique_samples("test")
 
     @cached_property
-    def holdout_ids(self):
-        return [res.holdout_ids for res in self.iteration_results if res.holdout]
-
-    @cached_property
-    def train_labels(self):
-        return [res.train_labels for res in self.iteration_results]
-
-    @cached_property
-    def train_ids(self):
-        return [res.train_ids for res in self.iteration_results]
+    def train_dict(self):
+        return self.get_unique_samples("train")
 
 
 @dataclass

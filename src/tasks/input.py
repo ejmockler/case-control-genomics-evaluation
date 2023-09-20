@@ -1,3 +1,4 @@
+from typing import Literal, Union
 from prefect import unmapped, task, flow
 from prefect.task_runners import ConcurrentTaskRunner
 from sklearn.preprocessing import MinMaxScaler
@@ -84,6 +85,30 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
         set(genotypeIDs) - resolvedGenotypeIDs
     )  # leftover columns are missing
     return genotypeDict, missingGenotypeIDs, resolvedGenotypeIDs
+
+
+@task
+def aggregateIntoGenes(
+    genotypeDataframe: pd.DataFrame,
+    config,
+):
+    genes = genotypeDataframe.index.get_level_values(
+        config["vcfLike"]["geneMultiIndexLevel"]
+    )
+    aggregatedGenotype = pd.DataFrame(
+        index=genes.unique(), columns=genotypeDataframe.columns
+    )
+
+    for gene in genes:
+        gene_rows = genotypeDataframe.iloc[genes == gene]
+        match config["vcfLike"]["aggregateGenesBy"]:
+            case "mean":  # similar to mean MAF (mean allele frequency)
+                aggregatedGenotype.loc[gene] = gene_rows.mean(axis=0)
+            case "sum":
+                aggregatedGenotype.loc[gene] = gene_rows.sum(axis=0)
+            case _:
+                raise NotImplementedError
+    return aggregatedGenotype
 
 
 @task(retries=1000)
@@ -435,12 +460,23 @@ def processInputFiles(config):
         if resolvedHoldoutCaseIDs
         else pd.DataFrame()
     )
-
     holdoutControlGenotypesDataframe = (
         createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF)
         if resolvedHoldoutControlIDs
         else pd.DataFrame()
     )
+
+    if config["vcfLike"]["aggregateGenesBy"] != None:
+        caseGenotypesDataframe = aggregateIntoGenes(caseGenotypesDataframe, config)
+        controlGenotypesDataframe = aggregateIntoGenes(
+            controlGenotypesDataframe, config
+        )
+        holdoutCaseGenotypesDataframe = aggregateIntoGenes(
+            holdoutCaseGenotypesDataframe, config
+        )
+        holdoutControlGenotypesDataframe = aggregateIntoGenes(
+            holdoutControlGenotypesDataframe, config
+        )
 
     caseGenotypes = Genotype(caseGenotypesDataframe, resolvedCaseIDs, "Case")
     controlGenotypes = Genotype(

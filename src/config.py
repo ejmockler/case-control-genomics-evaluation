@@ -1,12 +1,14 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/exampleVCFlike.xlsx",  # variant call table with annotations
-        "sheet": "Sheet1",  # sheet name if Excel spreadsheet
+        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
+        "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
             "position",
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
+        "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
+        "aggregateGenesBy": "mean",  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
@@ -19,9 +21,9 @@ config = {
     "tracking": {
         "name": "ALSoD genes, female individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-females-1MAF",
+        "project": "ALS-ALSoD-gene-females-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
-        "remote": False,  # if True, log to Neptune
+        # "remote": False,  # if True, log to Neptune
     },
     "clinicalTable": {
         "path": "../adhoc analysis/ACWM.xlsx",  # clinical data as Excel spreadsheet
@@ -74,8 +76,8 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 3,
-        "crossValIterations": 2,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 5,
+        "crossValIterations": 5,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],

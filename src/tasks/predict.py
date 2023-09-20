@@ -84,6 +84,7 @@ def getFeatureImportances(model, testData, holdoutData, featureLabels, config):
             model.predict_proba if hasattr(model, "predict_proba") else model.predict,
             masker,
             feature_names=["_".join(label) for label in featureLabels],
+            max_evals=2 * len(featureLabels) + 1,
         )
 
         # Get SHAP values
@@ -117,7 +118,7 @@ def optimizeHyperparameters(
         n_jobs=n_jobs,
         n_points=2,
         return_train_score=True,
-        n_iter=20,
+        n_iter=30,
         scoring=metricFunction,
     )
     optimizer.fit(samples, labels)
@@ -406,7 +407,7 @@ def classify(
 
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
-            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
@@ -414,7 +415,7 @@ def classify(
 
         if modelResults.holdout:
             holdoutPlotSubtitle = f"""
-                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} variants
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
                 Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
                 
                 Ethnically variable holdout
