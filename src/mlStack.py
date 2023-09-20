@@ -7,10 +7,8 @@ import matplotlib
 from tasks.data import (
     ClassificationResults,
     recoverPastRuns,
-    serializeBootstrapResults,
-    serializeResultsDataframe,
 )
-from tasks.visualize import trackModelVisualizations, trackProjectVisualizations
+from tasks.visualize import trackModelVisualizations
 
 matplotlib.use("agg")
 
@@ -136,14 +134,7 @@ def main(
         trackModelVisualizations(modelResult, config=config)
 
     # trackProjectVisualizations(
-    #     sampleResultsDataFrame,
-    #     genotypeData,
-    #     results,
-    #     modelStack,
-    #     tprFprAucByInstance,
-    #     holdoutTprFprAucByInstance,
-    #     holdoutLabelsProbabilitiesByModelName,
-    #     testLabelsProbabilitiesByModelName,
+    #     classificationResults,
     #     config=config,
     # )
 

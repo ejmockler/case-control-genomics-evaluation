@@ -23,7 +23,7 @@ config = {
         "entity": "ejmockler",
         "project": "ALS-ALSoD-gene-females-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
-        # "remote": False,  # if True, log to Neptune
+        "remote": False,  # if True, log to Neptune
     },
     "clinicalTable": {
         "path": "../adhoc analysis/ACWM.xlsx",  # clinical data as Excel spreadsheet
