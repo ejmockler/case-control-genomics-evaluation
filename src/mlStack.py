@@ -8,7 +8,7 @@ from tasks.data import (
     ClassificationResults,
     recoverPastRuns,
 )
-from tasks.visualize import trackModelVisualizations
+from tasks.visualize import trackModelVisualizations, trackProjectVisualizations
 
 matplotlib.use("agg")
 
@@ -133,10 +133,10 @@ def main(
             )
         trackModelVisualizations(modelResult, config=config)
 
-    # trackProjectVisualizations(
-    #     classificationResults,
-    #     config=config,
-    # )
+    trackProjectVisualizations(
+        classificationResults,
+        config=config,
+    )
 
     return (
         results,

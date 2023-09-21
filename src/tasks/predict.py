@@ -156,7 +156,7 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
         f"{runPath}/clinicalData.csv"
     )
     # hack to log metric as filename
-    with open(f"{runPath}/nVariants_{len(embedding['variantIndex'])}", "w") as file:
+    with open(f"{runPath}/nFeatures_{len(embedding['variantIndex'])}", "w") as file:
         pass
     runID = runPath
     return runID

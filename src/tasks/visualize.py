@@ -512,8 +512,16 @@ def trackBootstrapVisualizations(
 
 def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     sampleResultsDataFrame = modelResults.sample_results_dataframe
-    seenCases = sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1].index.isin(list(modelResults.test_dict.keys())).sum()
-    seenControls = sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0].index.isin(list(modelResults.test_dict.keys())).sum()
+    seenCases = (
+        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
+        .index.isin(list(modelResults.test_dict.keys()))
+        .sum()
+    )
+    seenControls = (
+        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
+        .index.isin(list(modelResults.test_dict.keys()))
+        .sum()
+    )
 
     bootstrapTrainCount = modelResults.iteration_results[0].train[0].vectors.shape[0]
     bootstrapTestCount = modelResults.iteration_results[0].test[0].vectors.shape[0]
@@ -614,8 +622,16 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             convergencePlot = None
 
     if modelResults.iteration_results[0].holdout:
-        seenHoldoutCases = sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1].index.isin(list(modelResults.holdout_dict.keys())).sum()
-        seenHoldoutControls = sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0].index.isin(list(modelResults.holdout_dict.keys())).sum()
+        seenHoldoutCases = (
+            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
+            .index.isin(list(modelResults.holdout_dict.keys()))
+            .sum()
+        )
+        seenHoldoutControls = (
+            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
+            .index.isin(list(modelResults.holdout_dict.keys()))
+            .sum()
+        )
         bootstrapHoldoutCount = seenHoldoutCases + seenHoldoutControls
 
         holdoutLabelsPredictions = {
@@ -644,7 +660,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
 
             Ethnically variable holdout
             {seenHoldoutCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy)} accuracy, {seenHoldoutControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_control_accuracy)} accuracy
-            {bootstrapHoldoutCount} ethnically-matched samples"""
+            {bootstrapHoldoutCount} ethnically-variable samples"""
 
         holdoutAccuracyHistogram = px.histogram(
             sampleResultsDataFrame.loc[list(modelResults.holdout_dict.keys())],
@@ -742,7 +758,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 bbox_inches="tight",
             )
 
-    if bootstrapHoldoutCount > 0:
+    if modelResults.iteration_results[0].holdout:
         holdoutAccuracyHistogram.write_html(
             f"projects/{config['tracking']['project']}/{modelResults.model_name}/plots/holdoutAccuracyPlot.html"
         )
@@ -782,317 +798,199 @@ def trackProjectVisualizations(
     sampleResultsDataFrame = pd.concat(
         [
             modelResults.sample_results_dataframe
-            for modelResults in classificationResults.model_results
+            for modelResults in classificationResults.modelResults
         ]
     )
-    # seenCases = len(
-    #     sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1].index.isin(
-    #         list(modelResults.test_dict.keys())
-    #     )
-    # )
-    # seenControls = len(
-    #     sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0].index.isin(
-    #         list(modelResults.test_dict.keys())
-    #     )
-    # )
+    seenCases = (
+        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
+        .index.isin(
+            [
+                sampleID
+                for modelResults in classificationResults.modelResults
+                for sampleID in list(modelResults.test_dict.keys())
+            ]
+        )
+        .sum()
+    )
+    seenControls = (
+        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
+        .index.isin(
+            [
+                sampleID
+                for modelResults in classificationResults.modelResults
+                for sampleID in list(modelResults.test_dict.keys())
+            ]
+        )
+        .sum()
+    )
 
-    # bootstrapTrainCount = modelResults.iteration_results[0].train[0].vectors.shape[0]
-    # bootstrapTestCount = modelResults.iteration_results[0].test[0].vectors.shape[0]
+    bootstrapTrainCount = (
+        classificationResults.modelResults[0]
+        .iteration_results[0]
+        .train[0]
+        .vectors.shape[0]
+    )
+    bootstrapTestCount = (
+        classificationResults.modelResults[0]
+        .iteration_results[0]
+        .test[0]
+        .vectors.shape[0]
+    )
 
-    # featureCount = modelResults.iteration_results[0].train[0].vectors.shape[1]
+    featureCount = (
+        classificationResults.modelResults[0]
+        .iteration_results[0]
+        .train[0]
+        .vectors.shape[1]
+    )
 
-    # labelsPredictions = {
-    #     modelResults.model_name: (
-    #         [
-    #             label
-    #             for iterationResult in modelResults.iteration_results
-    #             for label in iterationResult.sample_results_dataframe.loc[
-    #                 list(iterationResult.test_dict.keys())
-    #             ]["label"].tolist()
-    #         ],
-    #         [
-    #             prediction
-    #             for iterationResult in modelResults.iteration_results
-    #             for prediction in iterationResult.sample_results_dataframe.loc[
-    #                 list(iterationResult.test_dict.keys())
-    #             ]["prediction"].tolist()
-    #         ],
-    #     )
-    # }
+    labelsPredictions = {
+        modelResults.model_name: (
+            [
+                label
+                for iterationResult in modelResults.iteration_results
+                for label in iterationResult.sample_results_dataframe.loc[
+                    list(iterationResult.test_dict.keys())
+                ]["label"].tolist()
+            ],
+            [
+                prediction
+                for iterationResult in modelResults.iteration_results
+                for prediction in iterationResult.sample_results_dataframe.loc[
+                    list(iterationResult.test_dict.keys())
+                ]["prediction"].tolist()
+            ],
+        )
+        for modelResults in classificationResults.modelResults
+    }
 
-    # plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+    plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
 
-    # {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
-    # Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+    {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    # {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy
-    # {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
+    {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
+    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
+    aucPlot = plotAUC(
+        f"""
+            Receiver Operating Characteristic (ROC) Curve
+            {plotSubtitle}
+            """,
+        labelsPredictionsByInstance=labelsPredictions,
+        config=config,
+    )
 
-#     accuracyHistogram = px.histogram(
-#         sampleResultsDataFrame.loc[
-#             ~sampleResultsDataFrame.index.isin(
-#                 [*seenHoldoutCases, *seenHoldoutControls]
-#             )
-#         ],
-#         x="accuracy",
-#         color="label",
-#         pattern_shape="label",
-#         hover_data={
-#             "index": (
-#                 sampleResultsDataFrame.loc[
-#                     ~sampleResultsDataFrame.index.isin(
-#                         [*seenHoldoutCases, *seenHoldoutControls]
-#                     )
-#                 ].index
-#             )
-#         },
-#         color_discrete_map={0: "red", 1: "blue"},
-#         range_x=[0, 1],
-#         barmode="overlay",
-#         title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
-#     )
-#     probabilityHistogram = px.histogram(
-#         sampleResultsDataFrame.loc[
-#             ~sampleResultsDataFrame.index.isin(
-#                 [*seenHoldoutCases, *seenHoldoutControls]
-#             )
-#         ],
-#         x="meanProbability",
-#         color="label",
-#         pattern_shape="label",
-#         hover_data={
-#             "index": (
-#                 sampleResultsDataFrame.loc[
-#                     ~sampleResultsDataFrame.index.isin(
-#                         [*seenHoldoutCases, *seenHoldoutControls]
-#                     )
-#                 ].index
-#             )
-#         },
-#         color_discrete_map={0: "red", 1: "blue"},
-#         barmode="overlay",
-#         title=f"""Mean sample probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
-#     )
-#     aucPlot = plotAUC(
-#         f"""
-#             Receiver Operating Characteristic (ROC) Curve
-#             {plotSubtitle}
-#             """,
-#         tprFprAucByInstance=tprFprAucByInstance,
-#         config=config,
-#     )
-#     calibrationPlot = plotCalibration(
-#         f"""
-#             Calibration Curve
-#             {plotSubtitle}
-#             """,
-#         testLabelsProbabilitiesByModelName,
-#         config=config,
-#     )
-#     confusionMatrixInstanceList, averageConfusionMatrix = plotConfusionMatrix(
-#         f"""
-#             Confusion Matrix
-#             {plotSubtitle}
-#             """,
-#         testLabelsProbabilitiesByModelName,
-#         config=config,
-#     )
-#     if config["model"]["hyperparameterOptimization"]:
-#         try:
-#             convergencePlot = plotOptimizer(
-#                 f"""
-#                     Convergence Plot
-#                     {plotSubtitle}
-#                     """,
-#                 {
-#                     model.__class__.__name__: [
-#                         result
-#                         for j in range(config["sampling"]["bootstrapIterations"])
-#                         for foldOptimizer in results[i][j]["fittedOptimizer"]
-#                         for result in foldOptimizer.optimizer_results_
-#                     ]
-#                     for i, model in enumerate(modelStack)
-#                 },
-#             )
-#         except:
-#             print("Convergence plot data unavailable!", file=sys.stderr)
-#             convergencePlot = None
+    calibrationPlot = plotCalibration(
+        f"""
+            Calibration Curve
+            {plotSubtitle}
+            """,
+        labelsPredictions,
+        config=config,
+    )
 
-#     if bootstrapHoldoutCount > 0:
-#         holdoutPlotSubtitle = f"""
-#             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-#             {config["tracking"]["name"]}, {results[0]["embedding"]["samples"].shape[1]} variants
-#             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+    if classificationResults.modelResults[0].iteration_results[0].holdout:
+        seenHoldoutCases = (
+            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
+            .index.isin(
+                [
+                    sampleID
+                    for modelResults in classificationResults.modelResults
+                    for sampleID in list(modelResults.holdout_dict.keys())
+                ]
+            )
+            .sum()
+        )
+        seenHoldoutControls = (
+            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
+            .index.isin(
+                [
+                    sampleID
+                    for modelResults in classificationResults.modelResults
+                    for sampleID in list(modelResults.holdout_dict.keys())
+                ]
+            )
+            .sum()
+        )
+        bootstrapHoldoutCount = seenHoldoutCases + seenHoldoutControls
 
-#             Ethnically variable holdout
-#             {len(seenHoldoutCases)} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(holdoutCaseAccuracy)} accuracy, {len(seenHoldoutControls)} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(holdoutControlAccuracy)} accuracy
-#             {bootstrapHoldoutCount} ethnically-matched samples"""
+        holdoutLabelsPredictions = {
+            modelResults.model_name: (
+                [
+                    label
+                    for iterationResult in modelResults.iteration_results
+                    for label in iterationResult.sample_results_dataframe.loc[
+                        list(iterationResult.holdout_dict.keys())
+                    ]["label"].tolist()
+                ],
+                [
+                    prediction
+                    for iterationResult in modelResults.iteration_results
+                    for prediction in iterationResult.sample_results_dataframe.loc[
+                        list(iterationResult.holdout_dict.keys())
+                    ]["prediction"].tolist()
+                ],
+            )
+            for modelResults in classificationResults.modelResults
+        }
 
-#         holdoutAccuracyHistogram = px.histogram(
-#             sampleResultsDataFrame.loc[
-#                 sampleResultsDataFrame.index.isin(
-#                     [*seenHoldoutCases, *seenHoldoutControls]
-#                 )
-#             ],
-#             x="accuracy",
-#             color="label",
-#             pattern_shape="label",
-#             hover_data={
-#                 "index": (
-#                     sampleResultsDataFrame.loc[
-#                         sampleResultsDataFrame.index.isin(
-#                             [*seenHoldoutCases, *seenHoldoutControls]
-#                         )
-#                     ].index
-#                 )
-#             },
-#             color_discrete_map={0: "red", 1: "blue"},
-#             range_x=[0, 1],
-#             barmode="overlay",
-#             title=f"""Mean holdout accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
-#         )
-#         holdoutProbabilityHistogram = px.histogram(
-#             sampleResultsDataFrame.loc[
-#                 sampleResultsDataFrame.index.isin(
-#                     [*seenHoldoutCases, *seenHoldoutControls]
-#                 )
-#             ],
-#             x="meanProbability",
-#             color="label",
-#             pattern_shape="label",
-#             hover_data={
-#                 "index": (
-#                     sampleResultsDataFrame.loc[
-#                         sampleResultsDataFrame.index.isin(
-#                             [*seenHoldoutCases, *seenHoldoutControls]
-#                         )
-#                     ].index
-#                 )
-#             },
-#             color_discrete_map={0: "red", 1: "blue"},
-#             barmode="overlay",
-#             title=f"""Mean holdout probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
-#         )
-#         holdoutAucPlot = plotAUC(
-#             f"""
-#                 Receiver Operating Characteristic (ROC) Curve
-#                 {holdoutPlotSubtitle}
-#                 """,
-#             tprFprAucByInstance=holdoutTprFprAucByInstance,
-#             config=config,
-#         )
-#         holdoutCalibrationPlot = plotCalibration(
-#             f"""
-#                 Calibration Curve
-#                 {holdoutPlotSubtitle}
-#                 """,
-#             holdoutLabelsProbabilitiesByModelName,
-#             config=config,
-#         )
-#         (
-#             holdoutConfusionMatrixInstanceList,
-#             averageHoldoutConfusionMatrix,
-#         ) = plotConfusionMatrix(
-#             f"""
-#                 Confusion Matrix
-#                 {plotSubtitle}
-#                 """,
-#             holdoutLabelsProbabilitiesByModelName,
-#             config=config,
-#         )
+        holdoutPlotSubtitle = f"""
+            {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+            {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+            Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-#     accuracyHistogram.write_html(
-#         f"projects/{config['tracking']['project']}/accuracyPlot.html"
-#     )
-#     probabilityHistogram.write_html(
-#         f"projects/{config['tracking']['project']}/probabilityPlot.html"
-#     )
-#     aucPlot.savefig(
-#         f"projects/{config['tracking']['project']}/aucPlot.svg", bbox_inches="tight"
-#     )
-#     aucPlot.savefig(
-#         f"projects/{config['tracking']['project']}/aucPlot.png", bbox_inches="tight"
-#     )
+            Ethnically variable holdout
+            {seenHoldoutCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenHoldoutControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
+            {bootstrapHoldoutCount} ethnically-variable samples"""
 
-#     for name, confusionMatrix in zip(
-#         list(testLabelsProbabilitiesByModelName.keys()), confusionMatrixInstanceList
-#     ):
-#         confusionMatrixPath = (
-#             f"projects/{config['tracking']['project']}/modelSummary/{name}"
-#         )
-#         os.makedirs(confusionMatrixPath, exist_ok=True)
-#         confusionMatrix.savefig(
-#             f"{confusionMatrixPath}/confusionMatrix.svg",
-#             bbox_inches="tight",
-#         )
-#     averageConfusionMatrix.savefig(
-#         f"projects/{config['tracking']['project']}/averageConfusionMatrix.svg",
-#         bbox_inches="tight",
-#     )
-#     averageConfusionMatrix.savefig(
-#         f"projects/{config['tracking']['project']}/averageConfusionMatrix.png",
-#         bbox_inches="tight",
-#     )
+        holdoutAucPlot = plotAUC(
+            f"""
+                Receiver Operating Characteristic (ROC) Curve
+                {holdoutPlotSubtitle}
+                """,
+            labelsPredictionsByInstance=holdoutLabelsPredictions,
+            config=config,
+        )
+        holdoutCalibrationPlot = plotCalibration(
+            f"""
+                Calibration Curve
+                {holdoutPlotSubtitle}
+                """,
+            holdoutLabelsPredictions,
+            config=config,
+        )
 
-#     calibrationPlot.savefig(
-#         f"projects/{config['tracking']['project']}/calibrationPlot.svg",
-#         bbox_inches="tight",
-#     )
-#     calibrationPlot.savefig(
-#         f"projects/{config['tracking']['project']}/calibrationPlot.png",
-#         bbox_inches="tight",
-#     )
-#     if config["model"]["hyperparameterOptimization"]:
-#         if convergencePlot is not None:
-#             convergencePlot.savefig(
-#                 f"projects/{config['tracking']['project']}/convergencePlot.svg",
-#                 bbox_inches="tight",
-#             )
-#             convergencePlot.savefig(
-#                 f"projects/{config['tracking']['project']}/convergencePlot.png",
-#                 bbox_inches="tight",
-#             )
+    aucPlot.savefig(
+        f"projects/{config['tracking']['project']}/aucPlot.svg", bbox_inches="tight"
+    )
+    aucPlot.savefig(
+        f"projects/{config['tracking']['project']}/aucPlot.png", bbox_inches="tight"
+    )
 
-#     if bootstrapHoldoutCount > 0:
-#         holdoutAccuracyHistogram.write_html(
-#             f"projects/{config['tracking']['project']}/holdoutAccuracyPlot.html"
-#         )
-#         holdoutProbabilityHistogram.write_html(
-#             f"projects/{config['tracking']['project']}/holdoutProbabilityPlot.html"
-#         )
-#         holdoutAucPlot.savefig(
-#             f"projects/{config['tracking']['project']}/holdoutAucPlot.svg",
-#             bbox_inches="tight",
-#         )
-#         holdoutAucPlot.savefig(
-#             f"projects/{config['tracking']['project']}/holdoutAucPlot.png",
-#             bbox_inches="tight",
-#         )
-#         holdoutCalibrationPlot.savefig(
-#             f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.svg",
-#             bbox_inches="tight",
-#         )
-#         holdoutCalibrationPlot.savefig(
-#             f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.png",
-#             bbox_inches="tight",
-#         )
-#         for name, confusionMatrix in zip(
-#             list(testLabelsProbabilitiesByModelName.keys()),
-#             holdoutConfusionMatrixInstanceList,
-#         ):
-#             confusionMatrixPath = (
-#                 f"projects/{config['tracking']['project']}/modelSummary/holdout/{name}"
-#             )
-#             os.makedirs(confusionMatrixPath, exist_ok=True)
-#             confusionMatrix.savefig(
-#                 f"{confusionMatrixPath}/confusionMatrix.svg", bbox_inches="tight"
-#             )
-#         averageHoldoutConfusionMatrix.savefig(
-#             f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.svg",
-#             bbox_inches="tight",
-#         )
-#         averageHoldoutConfusionMatrix.savefig(
-#             f"projects/{config['tracking']['project']}/averageConfusionMatrixHoldout.png",
-#             bbox_inches="tight",
-#         )
+    calibrationPlot.savefig(
+        f"projects/{config['tracking']['project']}/calibrationPlot.svg",
+        bbox_inches="tight",
+    )
+    calibrationPlot.savefig(
+        f"projects/{config['tracking']['project']}/calibrationPlot.png",
+        bbox_inches="tight",
+    )
+
+    if classificationResults.modelResults[0].iteration_results[0].holdout:
+        holdoutAucPlot.savefig(
+            f"projects/{config['tracking']['project']}/holdoutAucPlot.svg",
+            bbox_inches="tight",
+        )
+        holdoutAucPlot.savefig(
+            f"projects/{config['tracking']['project']}/holdoutAucPlot.png",
+            bbox_inches="tight",
+        )
+        holdoutCalibrationPlot.savefig(
+            f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.svg",
+            bbox_inches="tight",
+        )
+        holdoutCalibrationPlot.savefig(
+            f"projects/{config['tracking']['project']}/holdoutCalibrationPlot.png",
+            bbox_inches="tight",
+        )

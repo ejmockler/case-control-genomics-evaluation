@@ -8,7 +8,7 @@ config = {
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
         "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
-        "aggregateGenesBy": "mean",  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
+        "aggregateGenesBy": None,  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
@@ -19,9 +19,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSoD genes, female individuals",  # name of the experiment
+        "name": "ALSoD variants, male individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-gene-females-1MAF",
+        "project": "ALS-ALSoD-males-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -36,7 +36,7 @@ config = {
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "pct_european>=0.85 & Sex=='Female'",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85 & Sex=='Male'",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
@@ -68,22 +68,22 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Sex`=='female'",
+            "`Superpopulation code`=='EUR' & `Sex`=='male'",
             # "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Female'",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Female'",
-            "`Superpopulation code`!='EUR' & `Sex`=='female'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Male'",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Male'",
+            "`Superpopulation code`!='EUR' & `Sex`=='male'",
         ],
     },
     "sampling": {
-        "bootstrapIterations": 5,
-        "crossValIterations": 5,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 15,
+        "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],
     },
     "model": {
         "hyperparameterOptimization": True,
-        "calculateShapelyExplanations": True,
+        "calculateShapelyExplanations": False,
     },
 }
