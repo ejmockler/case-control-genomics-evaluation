@@ -383,6 +383,18 @@ def processInputFiles(config):
                         if id not in config["sampling"]["sequesteredIDs"]
                     ],
                 )
+    # TODO complete alllele frequency filter
+    frequencyFilteredVCF = filteredVCF.loc[
+        filteredVCF.loc[caseIDs + controlIDs]
+        .gt(0)
+        .sum(axis=1)
+        .divide(len(filteredVCF.columns))
+        >= config["vcfLike"]["minAlleleFrequency"]
+    ]
+    print(
+        f"Filtered {len(filteredVCF) - len(frequencyFilteredVCF)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
+    )
+    print(f"Kept {len(frequencyFilteredVCF)} alleles")
 
     # cast genotypes as numeric, drop chromosome positions with missing values
     caseGenotypeFutures, controlGenotypeFutures = applyAlleleModel.map(

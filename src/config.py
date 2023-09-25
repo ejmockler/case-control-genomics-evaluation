@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -8,7 +8,7 @@ config = {
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
         "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
-        "aggregateGenesBy": None,  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
+        "aggregateGenesBy": "mean",  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
@@ -19,9 +19,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSoD variants, male individuals",  # name of the experiment
+        "name": "NUPs genes, male individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-males-1MAF",
+        "project": "ALS-ALSoD-gene-females-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
