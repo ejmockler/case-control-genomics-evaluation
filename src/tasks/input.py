@@ -1,4 +1,4 @@
-from typing import Literal, Union
+from typing import Iterable, Literal, Union
 from prefect import unmapped, task, flow
 from prefect.task_runners import ConcurrentTaskRunner
 from sklearn.preprocessing import MinMaxScaler
@@ -73,7 +73,7 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
                             a_min=0,
                         )
                     )
-                    if any(char.isdigit() for char in genotype)
+                    if str(genotype).isdigit() or (isinstance(genotype, Iterable) and any(char.isdigit() for char in genotype))
                     else np.nan
                     for genotype in values[:, j]
                 ]
@@ -128,6 +128,8 @@ def load(config):
             sep="\t",
             dtype=str,
             index_col=config["vcfLike"]["indexColumn"],
+            na_values=[".", "NA"],
+            keep_default_na=True,
         )
         if "xlsx" not in config["vcfLike"]["path"]
         else pd.read_excel(
@@ -136,20 +138,15 @@ def load(config):
                 config["vcfLike"]["sheet"] if config["vcfLike"]["sheet"] else None
             ),
             dtype=str,
-            na_values=["."],
-            keep_default_na=False,
+            na_values=[".", "NA"],
+            keep_default_na=True,
+            index_col=config["vcfLike"]["indexColumn"],
         )
-    )
-    # remove null chromosome positions
-    annotatedVCF[config["vcfLike"]["indexColumn"]] = (
-        annotatedVCF[config["vcfLike"]["indexColumn"]].astype(str).replace("", np.nan)
     )
     return (
         clinicalData,
         externalSamples,
-        annotatedVCF.dropna(subset=config["vcfLike"]["indexColumn"]).set_index(
-            config["vcfLike"]["indexColumn"]
-        ),
+        annotatedVCF
     )
 
 
@@ -383,18 +380,7 @@ def processInputFiles(config):
                         if id not in config["sampling"]["sequesteredIDs"]
                     ],
                 )
-    # TODO complete alllele frequency filter
-    frequencyFilteredVCF = filteredVCF.loc[
-        filteredVCF.loc[caseIDs + controlIDs]
-        .gt(0)
-        .sum(axis=1)
-        .divide(len(filteredVCF.columns))
-        >= config["vcfLike"]["minAlleleFrequency"]
-    ]
-    print(
-        f"Filtered {len(filteredVCF) - len(frequencyFilteredVCF)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
-    )
-    print(f"Kept {len(frequencyFilteredVCF)} alleles")
+
 
     # cast genotypes as numeric, drop chromosome positions with missing values
     caseGenotypeFutures, controlGenotypeFutures = applyAlleleModel.map(
@@ -462,20 +448,34 @@ def processInputFiles(config):
             elif "holdout" in alias:
                 print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
-    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF)
+     # TODO complete alllele frequency filter
+    resolvedIDs = np.hstack([list(resolvedCaseIDs), list(resolvedControlIDs)])
+    frequencyFilteredVCF = filteredVCF.loc[
+        (filteredVCF[resolvedIDs].dropna().astype(np.int8)
+        .gt(0)
+        .sum(axis=1)
+        .divide(len(resolvedIDs))
+        >= config["vcfLike"]["minAlleleFrequency"]).index
+    ]
+    print(
+        f"Filtered {len(filteredVCF) - len(frequencyFilteredVCF)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
+    )
+    print(f"Kept {len(frequencyFilteredVCF)} alleles")
+    
+    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredVCF.index]
     controlGenotypesDataframe = createGenotypeDataframe(
         controlGenotypeDict, filteredVCF
-    )
+    ).loc[frequencyFilteredVCF.index]
 
     holdoutCaseGenotypesDataframe = (
-        createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF)
+        createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF).loc[frequencyFilteredVCF.index]
         if resolvedHoldoutCaseIDs
-        else pd.DataFrame()
+        else pd.DataFrame(index=frequencyFilteredVCF.index)
     )
     holdoutControlGenotypesDataframe = (
-        createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF)
+        createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF).loc[frequencyFilteredVCF.index]
         if resolvedHoldoutControlIDs
-        else pd.DataFrame()
+        else pd.DataFrame(index=frequencyFilteredVCF.index)
     )
 
     if config["vcfLike"]["aggregateGenesBy"] != None:

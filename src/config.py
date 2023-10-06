@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/alsodGenotypes.csv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -19,9 +19,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUPs genes, male individuals",  # name of the experiment
+        "name": "ALSoD genes, male individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-gene-females-1MAF",
+        "project": "ALS-ALSoD-gene-males-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -63,8 +63,8 @@ config = {
         "idColumn": [
             "Sample name",
             # "id",
-            "ExternalSubjectId",
-            "ExternalSubjectId",
+            "ExternalSampleId",
+            "ExternalSampleId",
             "Sample name",
         ],  # sample ID header
         "filters": [
@@ -76,7 +76,7 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 15,
+        "bootstrapIterations": 30,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
