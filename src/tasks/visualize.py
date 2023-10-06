@@ -408,8 +408,8 @@ def trackBootstrapVisualizations(
         config=config,
     )
     if config["model"]["hyperparameterOptimization"] and not holdout:
-        optimizerPlotName = "convergencePlot"
-        optimizerPlot = plotOptimizer(
+        convergencePlotName = "convergencePlot"
+        convergencePlot = plotOptimizer(
             f"""
                 Hyperparameter convergence, mean squared error
                 {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
@@ -470,7 +470,7 @@ def trackBootstrapVisualizations(
         ].upload(avgConfusionMatrix)
         runTracker[f"plots/{calibrationName}"] = calibrationPlot
         if config["model"]["hyperparameterOptimization"] and not holdout:
-            runTracker[f"plots/{optimizerPlotName}"] = optimizerPlot
+            runTracker[f"plots/{convergencePlotName}"] = convergencePlot
 
         runTracker.stop()
 
@@ -500,11 +500,11 @@ def trackBootstrapVisualizations(
             f"{runPath}/plots/{calibrationName}.png", bbox_inches="tight"
         )
         if config["model"]["hyperparameterOptimization"] and not holdout:
-            optimizerPlot.savefig(
-                f"{runPath}/plots/{optimizerPlotName}.svg", bbox_inches="tight"
+            convergencePlot.savefig(
+                f"{runPath}/plots/{convergencePlotName}.svg", bbox_inches="tight"
             )
-            optimizerPlot.savefig(
-                f"{runPath}/plots/{optimizerPlotName}.png", bbox_inches="tight"
+            convergencePlot.savefig(
+                f"{runPath}/plots/{convergencePlotName}.png", bbox_inches="tight"
             )
 
     plt.close("all")
@@ -612,13 +612,12 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                         result
                         for foldResult in modelResults.iteration_results
                         for testFold in foldResult.test
-                        for optimizer in testFold.fitted_optimizer
-                        for result in optimizer.optimizer_results_
+                        for result in testFold.fitted_optimizer.optimizer_results_
                     ]
                 },
             )
-        except:
-            print("Convergence plot data unavailable!", file=sys.stderr)
+        except Exception as e:
+            print(f"Convergence plot data unavailable! {e}", file=sys.stderr)
             convergencePlot = None
 
     if modelResults.iteration_results[0].holdout:
@@ -791,18 +790,61 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         )
 
 
-def trackProjectVisualizations(
-    classificationResults: ClassificationResults,
-    config=config,
-):
+def weighted_mean(data, mean_col, count_col):
+    return (data[mean_col] * data[count_col]).sum() / data[count_col].sum()
+
+def pooled_std(data, std_col, count_col):
+    return ((data[std_col]**2 * (data[count_col] - 1)).sum() / (data[count_col].sum() - len(data)))**0.5
+
+
+def trackProjectVisualizations(classificationResults, config):
+    # Concatenate sample results data frames from all model results
     sampleResultsDataFrame = pd.concat(
         [
             modelResults.sample_results_dataframe
             for modelResults in classificationResults.modelResults
         ]
     )
+    
+    # Group by 'id'
+    grouped = sampleResultsDataFrame.groupby('id')
+
+    # Initialize list to store results for each group
+    pooled_results = []
+
+    # Iterate over groups and calculate summary stats for each group
+    for name, group in grouped:
+        probability_mean = weighted_mean(group, 'probability_mean', 'draw_count')
+        probability_std = pooled_std(group, 'probability_std', 'draw_count')
+        accuracy_mean = weighted_mean(group, 'accuracy_mean', 'draw_count')
+        accuracy_std = pooled_std(group, 'accuracy_std', 'draw_count')
+        draw_count_sum = group['draw_count'].sum()
+        first_label_instance = group['label'].iloc[0]
+        
+        # Redetermine the most frequent prediction
+        mode_prediction =  group['prediction_most_frequent'].mode()[0]
+
+        # Append results for this group to results list
+        pooled_results.append({
+            'id': name,
+            'probability_mean': probability_mean,
+            'probability_std': probability_std,
+            'accuracy_mean': accuracy_mean,
+            'accuracy_std': accuracy_std,
+            'draw_count_sum': draw_count_sum,
+            'first_label_instance': first_label_instance,
+            'mode_prediction': mode_prediction
+        })
+
+    # Convert results list to DataFrame
+    pooledSampleResults = pd.DataFrame(pooled_results).set_index('id')
+    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent'}, inplace=True)
+
+    output_path = f"projects/{config['tracking']['project']}/pooledSampleResults.csv"
+    pooledSampleResults.to_csv(output_path)
+
     seenCases = (
-        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
+        pooledSampleResults.loc[pooledSampleResults["label"] == 1]
         .index.isin(
             [
                 sampleID
@@ -813,7 +855,7 @@ def trackProjectVisualizations(
         .sum()
     )
     seenControls = (
-        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
+        pooledSampleResults.loc[pooledSampleResults["label"] == 0]
         .index.isin(
             [
                 sampleID
@@ -892,7 +934,7 @@ def trackProjectVisualizations(
 
     if classificationResults.modelResults[0].iteration_results[0].holdout:
         seenHoldoutCases = (
-            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
+            pooledSampleResults.loc[pooledSampleResults["label"] == 1]
             .index.isin(
                 [
                     sampleID
@@ -903,7 +945,7 @@ def trackProjectVisualizations(
             .sum()
         )
         seenHoldoutControls = (
-            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
+            pooledSampleResults.loc[pooledSampleResults["label"] == 0]
             .index.isin(
                 [
                     sampleID

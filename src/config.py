@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/alsodGenotypes.csv",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -8,20 +8,20 @@ config = {
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
         "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
-        "aggregateGenesBy": "mean",  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
+        "aggregateGenesBy": None,  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
-        "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency
+        "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency
         "minAlleleFrequency": 0.01,  # filter out variants with allele frequency less than this
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSoD genes, male individuals",  # name of the experiment
+        "name": "ALSoD genes, female individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-gene-males-1MAF",
+        "project": "ALS-ALSoD-gene-females-1MAF-test",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -36,7 +36,7 @@ config = {
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "pct_european>=0.85 & Sex=='Male'",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85 & Sex=='Female'",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
@@ -68,16 +68,16 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Sex`=='male'",
+            "`Superpopulation code`=='EUR' & `Sex`=='female'",
             # "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Male'",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Male'",
-            "`Superpopulation code`!='EUR' & `Sex`=='male'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Female'",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Female'",
+            "`Superpopulation code`!='EUR' & `Sex`=='female'",
         ],
     },
     "sampling": {
-        "bootstrapIterations": 30,
-        "crossValIterations": 10,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 2,
+        "crossValIterations": 3,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],

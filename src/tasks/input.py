@@ -127,7 +127,7 @@ def load(config):
             config["vcfLike"]["path"],
             sep="\t",
             dtype=str,
-            index_col=config["vcfLike"]["indexColumn"],
+           
             na_values=[".", "NA"],
             keep_default_na=True,
         )
@@ -140,9 +140,12 @@ def load(config):
             dtype=str,
             na_values=[".", "NA"],
             keep_default_na=True,
-            index_col=config["vcfLike"]["indexColumn"],
+            
         )
     )
+    
+    annotatedVCF = annotatedVCF.set_index(config["vcfLike"]["indexColumn"])
+    
     return (
         clinicalData,
         externalSamples,
@@ -449,33 +452,35 @@ def processInputFiles(config):
                 print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
      # TODO complete alllele frequency filter
-    resolvedIDs = np.hstack([list(resolvedCaseIDs), list(resolvedControlIDs)])
-    frequencyFilteredVCF = filteredVCF.loc[
-        (filteredVCF[resolvedIDs].dropna().astype(np.int8)
+    resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
+    allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF)
+    allGenotypes.to_csv("alsod_summedAlleles.csv")
+    frequencyFilteredGenotypes = allGenotypes.loc[
+        (allGenotypes.dropna().astype(np.int8)
         .gt(0)
         .sum(axis=1)
         .divide(len(resolvedIDs))
         >= config["vcfLike"]["minAlleleFrequency"]).index
     ]
     print(
-        f"Filtered {len(filteredVCF) - len(frequencyFilteredVCF)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
+        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
     )
-    print(f"Kept {len(frequencyFilteredVCF)} alleles")
+    print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
     
-    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredVCF.index]
+    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
     controlGenotypesDataframe = createGenotypeDataframe(
         controlGenotypeDict, filteredVCF
-    ).loc[frequencyFilteredVCF.index]
+    ).loc[frequencyFilteredGenotypes.index]
 
     holdoutCaseGenotypesDataframe = (
-        createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF).loc[frequencyFilteredVCF.index]
+        createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
         if resolvedHoldoutCaseIDs
-        else pd.DataFrame(index=frequencyFilteredVCF.index)
+        else pd.DataFrame(index=frequencyFilteredGenotypes.index)
     )
     holdoutControlGenotypesDataframe = (
-        createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF).loc[frequencyFilteredVCF.index]
+        createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
         if resolvedHoldoutControlIDs
-        else pd.DataFrame(index=frequencyFilteredVCF.index)
+        else pd.DataFrame(index=frequencyFilteredGenotypes.index)
     )
 
     if config["vcfLike"]["aggregateGenesBy"] != None:
