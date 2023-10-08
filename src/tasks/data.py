@@ -41,13 +41,16 @@ class GenotypeData:
         df_dict = {
             "case_genotypes": [tuple(row) for row in self.case.genotype.values],
             "control_genotypes": [tuple(row) for row in self.control.genotype.values],
-            "holdout_case_genotypes": [
-                tuple(row) for row in self.holdout_case.genotype.values
-            ],
-            "holdout_control_genotypes": [
-                tuple(row) for row in self.holdout_control.genotype.values
-            ],
         }
+        
+        if self.holdout_case.genotype.values:
+            df_dict.update({"holdout_case_genotypes": [
+                tuple(row) for row in self.holdout_case.genotype.values
+            ],})
+        if self.holdout_control.genotype.values:
+            df_dict.update({"holdout_control_genotypes": [
+                tuple(row) for row in self.holdout_control.genotype.values
+            ],})
 
         # prepare a dict to hold duplicates
         dup_dict = {}

@@ -14,6 +14,7 @@ config = {
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
         "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency
         "minAlleleFrequency": 0.01,  # filter out variants with allele frequency less than this
+        "maxVariants": 3000, # set max number of variants for control; set to None to disable
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals

@@ -140,7 +140,6 @@ def load(config):
             dtype=str,
             na_values=[".", "NA"],
             keep_default_na=True,
-            
         )
     )
     
@@ -454,7 +453,8 @@ def processInputFiles(config):
      # TODO complete alllele frequency filter
     resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
     allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF)
-    allGenotypes.to_csv("alsod_summedAlleles.csv")
+    
+     
     frequencyFilteredGenotypes = allGenotypes.loc[
         (allGenotypes.dropna().astype(np.int8)
         .gt(0)
@@ -462,10 +462,15 @@ def processInputFiles(config):
         .divide(len(resolvedIDs))
         >= config["vcfLike"]["minAlleleFrequency"]).index
     ]
-    print(
-        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
-    )
-    print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
+    
+    if config['vcfLike']['maxVariants'] and config['vcfLike']['maxVariants'] < len(frequencyFilteredGenotypes):
+        frequencyFilteredGenotypes = frequencyFilteredGenotypes.sample(n=config['vcfLike']['maxVariants'], axis=0)
+        print(f"Thresholded maximum of {config['vcfLike']['maxVariants']} alleles.")
+    else:
+        print(
+            f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
+        )
+        print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
     
     caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
     controlGenotypesDataframe = createGenotypeDataframe(
