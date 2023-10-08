@@ -138,6 +138,7 @@ env*
 *.tsv
 *.html
 *.pkl
+*.json
 sampleResults
 globalFeatureImportance
 shapExplanations*
