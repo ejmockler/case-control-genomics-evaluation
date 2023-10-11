@@ -251,10 +251,12 @@ def prepareDatasets(
             print(f"\n{len(holdoutExcessIDs)} are excess holdout:\n{holdoutExcessIDs}")
         print(f"\nVariant count: {len(allGenotypes.index)}")
 
-    # drop variants with missing values
-    allGenotypes = allGenotypes.dropna(
+    # drop variants with missing values & that are invariant
+    preCleanedVariantCounts = len(allGenotypes.index)
+    allGenotypes = allGenotypes.loc[allGenotypes.std(axis=1) > 0].dropna(
         how="any",
     )
+    print(f"Dropped {preCleanedVariantCounts - len(allGenotypes.index)} variants with missing values & that are invariant")
 
     samples = allGenotypes.loc[:, crossValGenotypeIDs]
     excessMajorSamples = allGenotypes.loc[:, excessIDs]
