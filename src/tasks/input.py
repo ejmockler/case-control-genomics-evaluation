@@ -253,9 +253,9 @@ def prepareDatasets(
 
     # drop variants with missing values & that are invariant
     preCleanedVariantCounts = len(allGenotypes.index)
-    allGenotypes = allGenotypes.loc[allGenotypes.std(axis=1) > 0].dropna(
-        how="any",
-    )
+    allGenotypes = allGenotypes.dropna(
+            how="any",
+        ).loc[allGenotypes[crossValGenotypeIDs].std(axis=1) > 0]
     print(f"Dropped {preCleanedVariantCounts - len(allGenotypes.index)} variants with missing values & that are invariant")
 
     samples = allGenotypes.loc[:, crossValGenotypeIDs]

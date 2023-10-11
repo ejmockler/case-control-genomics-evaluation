@@ -43,11 +43,11 @@ class GenotypeData:
             "control_genotypes": [tuple(row) for row in self.control.genotype.values],
         }
         
-        if self.holdout_case.genotype.values:
+        if self.holdout_case.genotype.empty:
             df_dict.update({"holdout_case_genotypes": [
                 tuple(row) for row in self.holdout_case.genotype.values
             ],})
-        if self.holdout_control.genotype.values:
+        if self.holdout_control.genotype.empty:
             df_dict.update({"holdout_control_genotypes": [
                 tuple(row) for row in self.holdout_control.genotype.values
             ],})

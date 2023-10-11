@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/alsodGenotypes.csv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -20,9 +20,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSoD genes, female individuals",  # name of the experiment
+        "name": "ALSoD, Caucasian female individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-variant-females-1MAF-test",
+        "project": "ALS-ALSoD-variant-females-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
