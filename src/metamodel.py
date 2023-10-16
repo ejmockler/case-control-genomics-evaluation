@@ -17,13 +17,12 @@ from mlStack import (
     bootstrap,
     remove_all_flows,
     main as runMLstack,
-    serializeBootstrapResults,
-    serializeResultsDataframe,
 )
 from metaconfig import metaconfig
 from config import config
 from models import stack as modelStack
 from tasks.input import processInputFiles
+from tasks.visualize import poolSampleResults
 
 
 def relativePerplexity(y_true, y_pred, y_true_baseline, y_pred_baseline, epsilon=1e-15):
@@ -71,16 +70,14 @@ def getBaselineFeatureResults(
     ]
     results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
 
-    baselineFeatureResults = {}
-    for i in range(len(modelStack)):
+    pooledBaselineFeatureResults = {}
+    baselineFeatureResultsByModel = {}
+    for i, model in enumerate(modelStack.keys()):
         modelResults = results[i]
-        baselineFeatureResults = serializeBootstrapResults(
-            modelResults, baselineFeatureResults
-        )
-    baselineFeatureResultsDataframe = serializeResultsDataframe(baselineFeatureResults)
-    baselineFeatureResultsDataframe.index.name = "id"
-
-    return baselineFeatureResultsDataframe, selectedFeature
+        baselineFeatureResultsByModel[model.__class__.__name__] = modelResults.sample_results_dataframe
+    pooledBaselineFeatureResults = poolSampleResults(pd.concat([df for df in baselineFeatureResultsByModel.values()]))
+        
+    return pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeature
 
 
 def perplexity(y_true, y_pred):
@@ -109,14 +106,15 @@ def findBaselineFeature(caseGenotypes, controlGenotypes):
 
 @task(retries=10)
 def measureIterations(
-    result,
+    results,
+    pooledResults,
     caseGenotypes,
     controlGenotypes,
     holdoutCaseGenotypes,
     holdoutControlGenotypes,
     clinicalData,
 ):
-    baselineFeatureResults, selectedFeature = getBaselineFeatureResults(
+    pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeature = getBaselineFeatureResults(
         caseGenotypes,
         controlGenotypes,
         holdoutCaseGenotypes,
@@ -124,44 +122,75 @@ def measureIterations(
         clinicalData,
         config,
     )
-    # serialize probability arrays from string
-    result["probability"] = result["probability"].apply(lambda x: np.array(eval(x)))
-    # take intersection of bootstrapped samples
-    result = result.loc[baselineFeatureResults.index.intersection(result.index)]
-    baselineFeatureResults = baselineFeatureResults.loc[result.index]
-    result["baselineProbability"] = baselineFeatureResults["probability"]
-
-    relativePerplexities = pd.DataFrame(index=result.index)
-    new_cols = result.apply(
+    resultsByModel = {}
+    for modelResult in results:
+        sampleResults = modelResult.sample_results_dataframe
+        # serialize probability arrays from string
+        modelResult["probability_mean"] = modelResult["probability_mean"].apply(lambda x: np.array(eval(x)))
+        # take intersection of bootstrapped samples
+        resultsByModel[modelResult.model_name] = modelResult.loc[baselineFeatureResultsByModel[modelResult.model_name].index.intersection(sampleResults.index)]
+        baselineFeatureResultsByModel[modelResult.model_name] = baselineFeatureResultsByModel[modelResult.model_name].loc[sampleResults.index]
+        modelResult["baseline_probability"] = baselineFeatureResultsByModel[modelResult.model_name]["probability_mean"]
+    
+    # same for pooled results
+    pooledResults = modelResult.loc[pooledBaselineFeatureResults.index.intersection(pooledResults.index)]
+    pooledBaselineFeatureResults = pooledBaselineFeatureResults.loc[pooledResults.index]
+    
+    pooledRelativePerplexities = pd.DataFrame(index=pooledResults.index)
+    new_cols = pooledResults.apply(
         lambda row: relativePerplexity(
-            [row["label"]] * len(row["probability"]),
-            row["probability"],
-            [row["label"]] * len(row["baselineProbability"]),
-            row["baselineProbability"],
+            [row["label"]] * len(row["probability_mean"]),
+            row["probability_mean"],
+            [row["label"]] * len(row["baseline_probability"]),
+            row["baseline_probability"],
         ),
         axis=1,
         result_type="expand",
     )
 
     (
-        relativePerplexities["all features"],
-        relativePerplexities[f"{selectedFeature}"],
-        relativePerplexities["relative"],
+        pooledRelativePerplexities["all features"],
+        pooledRelativePerplexities[f"{selectedFeature}"],
+        pooledRelativePerplexities["relative"],
     ) = (new_cols[0], new_cols[1], new_cols[2])
 
     # separate discordant & well-classified
-    discordantSamples = result.loc[
-        result["accuracy"] <= metaconfig["samples"]["discordantThreshold"],
+    pooledDiscordantSamples = pooledResults.loc[
+        pooledResults["accuracy_mean"] <= metaconfig["samples"]["discordantThreshold"],
     ]
-    accurateSamples = result.loc[
-        result["accuracy"] >= metaconfig["samples"]["accurateThreshold"],
+    pooledAccurateSamples = pooledResults.loc[
+        pooledResults["accuracy_mean"] >= metaconfig["samples"]["accurateThreshold"],
     ]
+    
+    relativePerplexitiesByModel = {}
+
+    for model_name, modelResult in resultsByModel.items():
+        relativePerplexitiesByModel[model_name] = pd.DataFrame(index=modelResult.index)
+        new_cols = modelResult.apply(
+            lambda row: relativePerplexity(
+                [row["label"]] * len(row["probability_mean"]),
+                row["probability_mean"],
+                [row["label"]] * len(row["baseline_probability"]),
+                row["baseline_probability"],
+            ),
+            axis=1,
+            result_type="expand",
+        )
+
+        (
+            relativePerplexitiesByModel[model_name]["all features"],
+            relativePerplexitiesByModel[model_name][f"{selectedFeature}"],
+            relativePerplexitiesByModel[model_name]["relative"],
+        ) = (new_cols[0], new_cols[1], new_cols[2])
+
 
     return (
-        relativePerplexities,
-        discordantSamples,
-        accurateSamples,
-        baselineFeatureResults,
+        pooledRelativePerplexities,
+        relativePerplexitiesByModel,
+        pooledDiscordantSamples,
+        pooledAccurateSamples,
+        pooledBaselineFeatureResults,
+        baselineFeatureResultsByModel
     )
 
 
@@ -170,105 +199,136 @@ def readSampleIDs(table, label):
     return sampleIDs.index.tolist()
 
 
-def sequesterOutlierSamples():
-    samples = {
-        "accurate": pd.read_csv(
-            f"projects/{config['tracking']['project']}/accurateSamples.csv",
-            index_col="id",
-        ),
-        "discordant": pd.read_csv(
-            f"projects/{config['tracking']['project']}/discordantSamples.csv",
-            index_col="id",
-        ),
-    }
+def sequesterOutlierSamples(sampleResultsByModel = None, pooledSampleResults = None):
+    if os.path.exists(f"projects/{config['tracking']['project']}/pooledAccurateSamples.csv") and os.path.exists(f"projects/{config['tracking']['project']}/pooledDiscordantSamples.csv"):
+        thresholdedSamplesByModel = {
+            "accurate": { 
+                { model.__class__.__name__: 
+                    pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/accurateSamples.csv", index_col="id")
+                } for model in modelStack.keys()
+            },
+           "discordant": {
+                { model.__class__.__name__: 
+                    pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/discordantSamples.csv", index_col="id"),
+                } for model in modelStack.keys() 
+           }
+        }
+        thresholdedPooledSamples = {
+            "accurate": pd.read_csv(
+                f"projects/{config['tracking']['project']}/pooledAccurateSamples.csv",
+                index_col="id",
+            ),
+            "discordant": pd.read_csv(
+                f"projects/{config['tracking']['project']}/pooledDiscordantSamples.csv",
+                index_col="id",
+            ),
+        }
+    else:
+        thresholdedSamplesByModel = {}
+        thresholdedSamplesByModel["accurate"] = {}
+        thresholdedSamplesByModel["discordant"] = {}
+        
+        for modelName, sampleResults in sampleResultsByModel.items():
+            thresholdedSamplesByModel["accurate"][modelName] = sampleResults.loc[sampleResults["probability_mean"] >= metaconfig["samples"]["accurateThreshold"]]
+            thresholdedSamplesByModel["discordant"][modelName] = sampleResults.loc[sampleResults["probability_mean"] <= metaconfig["samples"]["discordantThreshold"]]
+        
+        thresholdedPooledSamples = {
+            "accurate": pooledSampleResults.loc[pooledSampleResults["probability_mean"] >= metaconfig["samples"]["accurateThreshold"]],
+            "discordant": pooledSampleResults.loc[pooledSampleResults["probability_mean"] <= metaconfig["samples"]["discordantThreshold"]],
+        }
 
-    for sampleType, dataframe in samples.items():
-        for labelType, label in {"case": 1, "control": 0}.items():
+    for sampleType, dataframe in thresholdedPooledSamples.items():
+        for labelType, label in {config["clinicalTable"]["caseAlias"]: 1, config["clinicalTable"]["controlAlias"]: 0}.items():
             if metaconfig["samples"]["sequester"][sampleType][labelType]:
                 ids = readSampleIDs(dataframe, label=label)
                 config["sampling"]["sequesteredIDs"].extend(ids)
-
+                
+    for sampleType, modelSet in thresholdedSamplesByModel.items():
+        for modelName, dataframe in modelSet.items():
+            for labelType, label in {config["clinicalTable"]["caseAlias"]: 1, config["clinicalTable"]["controlAlias"]: 0}.items():
+                if metaconfig["samples"]["sequester"][sampleType][labelType]:
+                    ids = readSampleIDs(dataframe, label=label)
+                    config["sampling"]["sequesteredIDs"].extend(ids)
+                    
+    config["sampling"]["sequesteredIDs"] = list(set(config["sampling"]["sequesteredIDs"]))
+    return config
+                
 
 @flow()
 def main():
     newWellClassified = True
     countSuffix = 1
-
     baseProjectPath = config["tracking"]["project"]
+
     while newWellClassified:
-        gc.collect()
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
+        
         if countSuffix <= metaconfig["tracking"]["lastIteration"]:
-            sequesterOutlierSamples()
+            sampleResultsByModel = {
+                model.__class__.__name__: pd.read_csv(f"projects/{baseProjectPath}/{model.__class__.__name__}/sampleResults.csv", index_col="id") for model in modelStack.keys()
+            }
+            pooledSampleResults = pd.read_csv(f"projects/{baseProjectPath}/pooledSampleResults.csv", index_col="id")
+            
+            config = sequesterOutlierSamples(sampleResultsByModel, pooledSampleResults)
             countSuffix += 1
             continue
         else:
-            (
-                results,
-                genotypeData,
-                clinicalData,
-            ) = runMLstack(config)
+            results, genotypeData, clinicalData = runMLstack(config)
             config["sampling"]["lastIteration"] = 0
-        currentResults = pd.read_csv(
-            f"projects/{config['tracking']['project']}/sampleResults.csv",
-            index_col="id",
-        )
+        
+        pooledResults = poolSampleResults(pd.concat([modelResult.sample_result_dataframe for modelResult in results]))
+        
         (
-            samplePerplexities,
-            discordantSamples,
-            accurateSamples,
-            baselineFeatureResults,
+            pooledSamplePerplexities,
+            relativePerplexitiesByModel,
+            pooledDiscordantSamples,
+            pooledAccurateSamples,
+            pooledBaselineFeatureResults,
+            baselineFeatureResultsByModel
         ) = measureIterations(
-            currentResults,
+            results,
+            pooledResults,
             genotypeData.case.genotype,
             genotypeData.control.genotype,
             genotypeData.holdout_case.genotype,
             genotypeData.holdout_control.genotype,
             clinicalData,
         )
-
-        samplePerplexities["accuracy"] = currentResults.loc[
-            currentResults.index.intersection(samplePerplexities.index)
-        ]["accuracy"]
-        samplePerplexities["baselineAccuracy"] = baselineFeatureResults.loc[
-            baselineFeatureResults.index.intersection(samplePerplexities.index)
-        ]["accuracy"]
-        samplePerplexities["label"] = currentResults.loc[
-            currentResults.index.intersection(samplePerplexities.index)
-        ]["label"]
-
+        
         np.set_printoptions(threshold=np.inf)
-        samplePerplexities.to_csv(
-            f"projects/{config['tracking']['project']}/samplePerplexities.csv"
+        
+        pooledBaselineFeatureResults.to_csv(
+            f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults.csv"
         )
-        accurateSamples.to_csv(
-            f"projects/{config['tracking']['project']}/accurateSamples.csv"
+        
+        pooledSamplePerplexities.to_csv(
+            f"projects/{config['tracking']['project']}/pooledSamplePerplexities.csv"
         )
-        discordantSamples.to_csv(
-            f"projects/{config['tracking']['project']}/discordantSamples.csv"
+
+        pooledAccurateSamples.to_csv(
+            f"projects/{config['tracking']['project']}/pooledAccurateSamples.csv"
         )
-        baselineFeatureResults["probability"] = baselineFeatureResults[
-            "probability"
-        ].map(lambda x: np.array2string(np.array(x), separator=","))
-        baselineFeatureResults.to_csv(
-            f"projects/{config['tracking']['project']}/baselineFeatureSampleResults.csv"
+        
+        pooledDiscordantSamples.to_csv(
+            f"projects/{config['tracking']['project']}/pooledDiscordantSamples.csv"
         )
-        if (
-            len(
-                currentResults.loc[
-                    (currentResults["label"] == 1)
-                    & (
-                        currentResults["accuracy"]
-                        >= metaconfig["samples"]["accurateThreshold"]
-                    )
-                ]
+        
+        for modelName, modelResults in baselineFeatureResultsByModel.items():
+            modelResults.to_csv(
+                f"projects/{config['tracking']['project']}/{modelName}/baselineFeatureResults.csv"
             )
-            == 0
-        ):
-            newWellClassified = False
-            break
-        sequesterOutlierSamples()
+            
+        for modelName, modelResults in relativePerplexitiesByModel.items():
+            modelResults.to_csv(
+                f"projects/{config['tracking']['project']}/{modelName}/relativePerplexities.csv"
+            )
+            
+        for modelName, modelResults in 
+        
+        # Check for new well-classified samples. If not present, stop iterations.
+        newWellClassified = not pooledAccurateSamples.empty
         countSuffix += 1
+
 
 
 if __name__ == "__main__":

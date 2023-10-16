@@ -134,6 +134,7 @@ def plotAUC(
             lw=4,
             alpha=0.8,
         )
+        
         std_tpr = np.std(tprs, axis=0)
         tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
         tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
@@ -526,7 +527,8 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     bootstrapTrainCount = modelResults.iteration_results[0].train[0].vectors.shape[0]
     bootstrapTestCount = modelResults.iteration_results[0].test[0].vectors.shape[0]
 
-    featureCount = modelResults.iteration_results[0].train[0].vectors.shape[1]
+    featureCounts = [trainData.vectors.shape[1] for iteration_result in modelResults.iteration_results for trainData in iteration_result.train]
+    featureCount =  featureCounts[0] if np.min(featureCounts) == np.max(featureCounts) else f"{np.min(featureCounts)}-{np.max(featureCounts)}"
 
     labelsPredictions = {
         modelResults.model_name: (
@@ -543,6 +545,24 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 for prediction in iterationResult.sample_results_dataframe.loc[
                     list(iterationResult.test_dict.keys())
                 ]["prediction"].tolist()
+            ],
+        )
+    }
+    labelsProbabilities = {
+        modelResults.model_name: (
+            [
+                label
+                for iterationResult in modelResults.iteration_results
+                for label in iterationResult.sample_results_dataframe.loc[
+                    list(iterationResult.test_dict.keys())
+                ]["label"].tolist()
+            ],
+            [
+                probability
+                for iterationResult in modelResults.iteration_results
+                for probability in iterationResult.sample_results_dataframe.loc[
+                    list(iterationResult.test_dict.keys())
+                ]["probability_mean"].tolist()
             ],
         )
     }
@@ -581,7 +601,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
-        labelsPredictionsByInstance=labelsPredictions,
+        labelsPredictionsByInstance=labelsProbabilities,
         config=config,
     )
     calibrationPlot = plotCalibration(
@@ -651,6 +671,25 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 ],
             )
         }
+        
+        holdoutLabelsProbabilities = {
+            modelResults.model_name: (
+                [
+                    label
+                    for iterationResult in modelResults.iteration_results
+                    for label in iterationResult.sample_results_dataframe.loc[
+                        list(iterationResult.holdout_dict.keys())
+                    ]["label"].tolist()
+                ],
+                [
+                    probability
+                    for iterationResult in modelResults.iteration_results
+                    for probability in iterationResult.sample_results_dataframe.loc[
+                        list(iterationResult.holdout_dict.keys())
+                    ]["probability_mean"].tolist()
+                ],
+            )
+        }
 
         holdoutPlotSubtitle = f"""
             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
@@ -687,7 +726,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 Receiver Operating Characteristic (ROC) Curve
                 {holdoutPlotSubtitle}
                 """,
-            labelsPredictionsByInstance=holdoutLabelsPredictions,
+            labelsPredictionsByInstance=holdoutLabelsProbabilities,
             config=config,
         )
         holdoutCalibrationPlot = plotCalibration(
@@ -796,18 +835,9 @@ def weighted_mean(data, mean_col, count_col):
 def pooled_std(data, std_col, count_col):
     return ((data[std_col]**2 * (data[count_col] - 1)).sum() / (data[count_col].sum() - len(data)))**0.5
 
-
-def trackProjectVisualizations(classificationResults, config):
-    # Concatenate sample results data frames from all model results
-    sampleResultsDataFrame = pd.concat(
-        [
-            modelResults.sample_results_dataframe
-            for modelResults in classificationResults.modelResults
-        ]
-    )
-    
+def poolSampleResults(concatenatedResults):
     # Group by 'id'
-    grouped = sampleResultsDataFrame.groupby('id')
+    grouped = concatenatedResults.groupby('id')
 
     # Initialize list to store results for each group
     pooled_results = []
@@ -839,6 +869,19 @@ def trackProjectVisualizations(classificationResults, config):
     # Convert results list to DataFrame
     pooledSampleResults = pd.DataFrame(pooled_results).set_index('id')
     pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent'}, inplace=True)
+    
+    return pooledSampleResults
+
+def trackProjectVisualizations(classificationResults, config):
+    # Concatenate sample results data frames from all model results
+    concatenatedSampleResults = pd.concat(
+        [
+            modelResults.sample_results_dataframe
+            for modelResults in classificationResults.modelResults
+        ]
+    )
+    
+    pooledSampleResults = pooledSampleResults(concatenatedSampleResults)
 
     output_path = f"projects/{config['tracking']['project']}/pooledSampleResults.csv"
     pooledSampleResults.to_csv(output_path)
@@ -905,6 +948,26 @@ def trackProjectVisualizations(classificationResults, config):
         )
         for modelResults in classificationResults.modelResults
     }
+    
+    labelsProbabilities = {
+        modelResults.model_name: (
+             [
+                label
+                for iterationResult in modelResults.iteration_results
+                for label in iterationResult.sample_results_dataframe.loc[
+                    list(iterationResult.test_dict.keys())
+                ]["label"].tolist()
+            ],
+             [
+                probability
+                for iterationResult in modelResults.iteration_results
+                for probability in iterationResult.sample_results_dataframe.loc[
+                    list(iterationResult.test_dict.keys())
+                ]["probability_mean"].tolist()
+            ],
+        )
+        for modelResults in classificationResults.modelResults
+    }
 
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
 
@@ -919,7 +982,7 @@ def trackProjectVisualizations(classificationResults, config):
             Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
-        labelsPredictionsByInstance=labelsPredictions,
+        labelsPredictionsByInstance=labelsProbabilities,
         config=config,
     )
 
@@ -976,6 +1039,26 @@ def trackProjectVisualizations(classificationResults, config):
             )
             for modelResults in classificationResults.modelResults
         }
+        
+        holdoutLabelsProbabilities = {
+            modelResults.model_name: (
+                [
+                    label
+                    for iterationResult in modelResults.iteration_results
+                    for label in iterationResult.sample_results_dataframe.loc[
+                        list(iterationResult.holdout_dict.keys())
+                    ]["label"].tolist()
+                ],
+                [
+                    probability
+                    for iterationResult in modelResults.iteration_results
+                    for probability in iterationResult.sample_results_dataframe.loc[
+                        list(iterationResult.holdout_dict.keys())
+                    ]["probability_mean"].tolist()
+                ],
+            )
+            for modelResults in classificationResults.modelResults
+        }
 
         holdoutPlotSubtitle = f"""
             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
@@ -991,7 +1074,7 @@ def trackProjectVisualizations(classificationResults, config):
                 Receiver Operating Characteristic (ROC) Curve
                 {holdoutPlotSubtitle}
                 """,
-            labelsPredictionsByInstance=holdoutLabelsPredictions,
+            labelsPredictionsByInstance=holdoutLabelsProbabilities,
             config=config,
         )
         holdoutCalibrationPlot = plotCalibration(

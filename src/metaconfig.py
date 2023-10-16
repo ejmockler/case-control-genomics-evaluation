@@ -1,7 +1,7 @@
 metaconfig = {
     "samples": {
-        "discordantThreshold": 0.15,
-        "accurateThreshold": 0.85,
+        "discordantThreshold": 0.01,
+        "accurateThreshold": 0.99,
         "sequester": {
             "discordant": {
                 "case": False,
