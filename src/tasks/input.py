@@ -401,9 +401,10 @@ def processInputFiles(config):
         resolvedControlIDs,
     ) = controlGenotypeFutures.result()
 
-    resolvedHoldoutCaseIDs, missingHoldoutCaseIDs = [], []
-    resolvedHoldoutControlIDs, missingHoldoutControlIDs = [], []
     if len(holdoutCaseIDs) > 0:
+        
+        resolvedHoldoutCaseIDs, missingHoldoutCaseIDs = [], []
+        resolvedHoldoutControlIDs, missingHoldoutControlIDs = [], []
         (
             holdoutCaseGenotypeFutures,
             holdoutControlGenotypeFutures,
@@ -426,6 +427,8 @@ def processInputFiles(config):
     else:
         holdoutCaseGenotypeDict = {}
         holdoutControlGenotypeDict = {}
+        resolvedHoldoutCaseIDs, missingHoldoutCaseIDs = None, None
+        resolvedHoldoutControlIDs, missingHoldoutControlIDs = None, None
 
     for alias, (IDs, genotypeDict) in {
         "caseAlias": (missingCaseIDs, caseGenotypeDict),
@@ -433,6 +436,7 @@ def processInputFiles(config):
         "holdout cases": (missingHoldoutCaseIDs, holdoutCaseGenotypeDict),
         "holdout controls": (missingHoldoutControlIDs, holdoutControlGenotypeDict),
     }.items():
+        if len(genotypeDict) == 0: continue
         sequesteredIDs = set(config["sampling"]["sequesteredIDs"]).intersection(
             set(genotypeDict.keys())
         )
@@ -455,7 +459,6 @@ def processInputFiles(config):
      # TODO complete alllele frequency filter
     resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
     allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF)
-    
      
     frequencyFilteredGenotypes = allGenotypes.loc[
         (allGenotypes.dropna().astype(np.int8)
