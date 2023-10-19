@@ -261,7 +261,7 @@ def prepareDatasets(
     samples = allGenotypes.loc[:, crossValGenotypeIDs]
     excessMajorSamples = allGenotypes.loc[:, excessIDs]
 
-    variantIndex = list(samples.index)
+    variantIndex = samples.index
     scaler = MinMaxScaler()
     # TODO dataclass
     embedding = {

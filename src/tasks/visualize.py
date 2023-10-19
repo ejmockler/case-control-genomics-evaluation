@@ -529,7 +529,11 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
 
     featureCounts = [trainData.vectors.shape[1] for iteration_result in modelResults.iteration_results for trainData in iteration_result.train]
     featureCount =  featureCounts[0] if np.min(featureCounts) == np.max(featureCounts) else f"{np.min(featureCounts)}-{np.max(featureCounts)}"
+    
+    geneCounts = [trainData.geneCount for iteration_result in modelResults.iteration_results for trainData in iteration_result.train]
+    geneCount = geneCounts[0] if np.min(geneCounts) == np.max(geneCounts) else f"{np.min(geneCounts)}-{np.max(geneCounts)}"
 
+    
     labelsPredictions = {
         modelResults.model_name: (
             [
@@ -569,7 +573,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
 
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
     
-    {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+    {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
     {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy
@@ -693,7 +697,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
 
         holdoutPlotSubtitle = f"""
             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-            {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+            {config["tracking"]["name"]}, {featureCount} {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
             Ethnically variable holdout
@@ -881,7 +885,7 @@ def trackProjectVisualizations(classificationResults, config):
         ]
     )
     
-    pooledSampleResults = pooledSampleResults(concatenatedSampleResults)
+    pooledSampleResults = poolSampleResults(concatenatedSampleResults)
 
     output_path = f"projects/{config['tracking']['project']}/pooledSampleResults.csv"
     pooledSampleResults.to_csv(output_path)
@@ -928,6 +932,12 @@ def trackProjectVisualizations(classificationResults, config):
         .train[0]
         .vectors.shape[1]
     )
+    
+    featureCounts = [trainData.vectors.shape[1] for modelResults in classificationResults.modelResults for iteration_result in modelResults.iteration_results for trainData in iteration_result.train]
+    featureCount =  featureCounts[0] if np.min(featureCounts) == np.max(featureCounts) else f"{np.min(featureCounts)}-{np.max(featureCounts)}"
+    
+    geneCounts = [trainData.geneCount for modelResults in classificationResults.modelResults for iteration_result in modelResults.iteration_results for trainData in iteration_result.train]
+    geneCount = geneCounts[0] if np.min(geneCounts) == np.max(geneCounts) else f"{np.min(geneCounts)}-{np.max(geneCounts)}"
 
     labelsPredictions = {
         modelResults.model_name: (
@@ -971,7 +981,7 @@ def trackProjectVisualizations(classificationResults, config):
 
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
 
-    {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+    {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
     {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
@@ -1062,7 +1072,7 @@ def trackProjectVisualizations(classificationResults, config):
 
         holdoutPlotSubtitle = f"""
             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-            {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+            {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
             Ethnically variable holdout

@@ -59,6 +59,7 @@ def main(
     config=config,
     genotypeData=None,
     clinicalData=None,
+    trackVisualizations=True,
 ):
     if genotypeData is None:
         (
@@ -131,9 +132,9 @@ def main(
             modelResult.average_holdout_local_control_explanations.to_csv(
                 f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutControlLocalFeatures.csv"
             )
-        trackModelVisualizations(modelResult, config=config)
+        if trackVisualizations: trackModelVisualizations(modelResult, config=config)
 
-    trackProjectVisualizations(
+    if trackVisualizations: trackProjectVisualizations(
         classificationResults,
         config=config,
     )

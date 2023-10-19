@@ -284,6 +284,7 @@ def evaluate(
             testData.ids,
             testData.labels,
             testData.vectors,
+            testData.geneCount,
             probabilities,
             modelValues,
             shapValues,
@@ -296,6 +297,7 @@ def evaluate(
             holdoutData.ids,
             holdoutData.labels,
             holdoutData.vectors,
+            holdoutData.geneCount,
             holdoutProbabilities,
             modelValues,
             holdoutShapValues,
@@ -366,6 +368,7 @@ def classify(
         ids=embedding["holdoutSampleIndex"],
         labels=embedding["holdoutLabels"],
         vectors=embedding["holdoutSamples"],
+        geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
     )
 
     evaluate_args = [
@@ -375,18 +378,20 @@ def classify(
                 ids=embedding["sampleIndex"][trainIndices],
                 labels=embedding["labels"][trainIndices],
                 vectors=embedding["samples"][trainIndices],
+                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
             ),
             SampleData(
                 set="test",
                 ids=embedding["sampleIndex"][testIndices],
                 labels=embedding["labels"][testIndices],
                 vectors=embedding["samples"][testIndices],
+                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
             ),
             holdoutData,
             model,
             hyperParameterSpace,
             innerCvIterator,
-            embedding["variantIndex"],
+            list(embedding["variantIndex"]),
             config,
         )
         for trainIndices, testIndices in crossValIndices
@@ -407,7 +412,7 @@ def classify(
 
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
-            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]))) +' genes)')}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
@@ -415,7 +420,7 @@ def classify(
 
         if modelResults.holdout:
             holdoutPlotSubtitle = f"""
-                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants"}
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]))) +' genes)')}
                 Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
                 
                 Ethnically variable holdout

@@ -1,11 +1,13 @@
+# TODO add frequency column to feature explanations
+
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/alsodGenotypes.csv",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
             "position",
-            "Gene",
+            "Gene",  # ensure gene column trails others to index separately in plot titles
         ],  # header that indexes variants (set as list with multiple columns)
         "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
         "aggregateGenesBy": None,  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
@@ -20,9 +22,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSoD, Caucasian female individuals",  # name of the experiment
+        "name": "NUPs, Caucasian female individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSoD-variant-females-1MAF",
+        "project": "ALS-NUPs-variant-females-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },

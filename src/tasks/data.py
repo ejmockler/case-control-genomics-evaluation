@@ -124,6 +124,7 @@ class SampleData:
     ids: list[str]
     labels: list[str]
     vectors: np.ndarray
+    geneCount: int
 
 
 @dataclass
