@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/NUPsGenotypes.csv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -20,9 +20,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUPs, Caucasian male individuals",  # name of the experiment
+        "name": "NUPs, Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPs-variant-males-1MAF",
+        "project": "ALS-NUPs-variant-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -37,7 +37,7 @@ config = {
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "pct_european>=0.85 & Sex=='Male'",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
@@ -69,11 +69,11 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Sex`=='male'",
+            "`Superpopulation code`=='EUR'",
             # "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Male'",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Male'",
-            "`Superpopulation code`!='EUR' & `Sex`=='male'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
+            "`Superpopulation code`!='EUR'",
         ],
     },
     "sampling": {

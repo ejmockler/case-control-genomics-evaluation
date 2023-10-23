@@ -697,7 +697,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
 
         holdoutPlotSubtitle = f"""
             {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
-            {config["tracking"]["name"]}, {featureCount} {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
+            {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
             Ethnically variable holdout

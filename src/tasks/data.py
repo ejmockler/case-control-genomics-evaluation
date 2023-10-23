@@ -540,9 +540,9 @@ class BootstrapResult:
             
             # Additional calculations specifically for feature_importances
             if column_prefix == "feature_importances":
+                median_val = concatenated_means[column_prefix].median(axis=1)
                 min_val = concatenated_means[column_prefix].min(axis=1)
                 max_val = concatenated_means[column_prefix].max(axis=1)
-                median_val = concatenated_means[column_prefix].median(axis=1)
                 return mean, std, min_val, max_val, median_val
             else:
                 return mean, std
