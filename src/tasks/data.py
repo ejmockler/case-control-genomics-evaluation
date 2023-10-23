@@ -21,6 +21,8 @@ class Genotype:
     genotype: pd.DataFrame
     ids: list
     name: str
+    
+    
 
 
 @dataclass
@@ -35,50 +37,47 @@ class GenotypeData:
 
     def __post_init__(self):
         self._check_duplicates()
+        
+    @staticmethod
+    def get_allele_frequencies(genotypeDataframe):
+        return genotypeDataframe.gt(0).sum(axis=1).divide(len(genotypeDataframe.columns))
 
     def _check_duplicates(self):
-        # prepare a dict to hold hashable representations of each dataframe
+        # Prepare a dict to hold column labels of each dataframe
         df_dict = {
-            "case_genotypes": [tuple(row) for row in self.case.genotype.values],
-            "control_genotypes": [tuple(row) for row in self.control.genotype.values],
+            "case_genotypes": list(self.case.genotype.columns),
+            "control_genotypes": list(self.control.genotype.columns),
         }
-        
+
         if not self.holdout_case.genotype.empty:
-            df_dict.update({"holdout_case_genotypes": [
-                tuple(row) for row in self.holdout_case.genotype.values
-            ],})
+            df_dict["holdout_case_genotypes"] = list(self.holdout_case.genotype.columns)
         else:
-            df_dict.update({"holdout_case_genotypes": []})
+            df_dict["holdout_case_genotypes"] = []
 
-        if not  self.holdout_control.genotype.empty:
-            df_dict.update({"holdout_control_genotypes": [
-                tuple(row) for row in self.holdout_control.genotype.values
-            ],})
+        if not self.holdout_control.genotype.empty:
+            df_dict["holdout_control_genotypes"] = list(self.holdout_control.genotype.columns)
         else:
-            df_dict.update({"holdout_control_genotypes": []})
+            df_dict["holdout_control_genotypes"] = []
 
-        
-        # prepare a dict to hold duplicates
+        # Prepare a dict to hold duplicates
         dup_dict = {}
 
-        # check each list against all others for duplicates
-        for df_name, genotypes in df_dict.items():
-            other_genotypes = [
-                geno
-                for name, genos in df_dict.items()
+        # Check each column list against all others for duplicates
+        for df_name, columns in df_dict.items():
+            other_columns = [
+                col
+                for name, cols in df_dict.items()
                 if name != df_name
-                for geno in genos
+                for col in cols
             ]
-            duplicates = set(genotypes) & set(other_genotypes)
+            duplicates = set(columns) & set(other_columns)
             if duplicates:
-                dup_dict[df_name] = list(
-                    duplicates
-                )  # Convert set back to list to show duplicates
+                dup_dict[df_name] = list(duplicates)  # Store duplicates in a list
 
-        # if any duplicates found, raise an assertion error with details
+        # If any duplicates are found, raise an assertion error with details
         if dup_dict:
             raise AssertionError(
-                f"Duplicate genotypes exist in the following groups: {dup_dict}"
+                f"Duplicate column labels exist in the following groups: {dup_dict}"
             )
 
     def filter_allele_frequencies(self, min_allele_frequency):
@@ -120,7 +119,7 @@ class GenotypeData:
 class SampleData:
     """Initializes storage for sample data. Vectors are samples x features."""
 
-    set: str
+    set: str  # 'test', 'train' or 'holdout'
     ids: list[str]
     labels: list[str]
     vectors: np.ndarray
@@ -148,7 +147,7 @@ class FoldResult(SampleData):
     """Initializes storage for sample results."""
 
     probabilities: np.ndarray  # each element is a 2-element sublist of binary probabilities
-    global_feature_explanations: Optional[pd.DataFrame] = None
+    global_feature_explanations: pd.DataFrame = pd.DataFrame()
     shap_explanation: Optional[object] = None
     shap_explainer: Optional[Explainer] = None
     shap_masker: Optional[Masker] = None
@@ -158,6 +157,17 @@ class FoldResult(SampleData):
         self.calculate_AUC()
         self.calculate_positive_ratios()
         self.calculate_accuracy()
+    
+    def append_allele_frequencies(self, genotypeData: GenotypeData):
+        if isinstance(self.global_feature_explanations, pd.DataFrame) and not self.global_feature_explanations.empty:
+            targetCaseData = genotypeData.case.genotype if self.set == 'test' else genotypeData.holdout_case.genotype
+            targetControlData = genotypeData.control.genotype if self.set == 'test' else genotypeData.holdout_control.genotype
+            self.global_feature_explanations[f'{self.set}_case_maf'] = self.global_feature_explanations.index.map(
+                genotypeData.get_allele_frequencies(
+                    targetCaseData[self.ids[np.where(self.labels==1)]]).to_dict())
+            self.global_feature_explanations[f'{self.set}_control_maf'] = self.global_feature_explanations.index.map(
+                genotypeData.get_allele_frequencies(
+                    targetControlData[self.ids[np.where(self.labels==0)]]).to_dict())
 
     @cached_property
     def local_case_explanations(self):
@@ -255,8 +265,18 @@ class EvaluationResult:
             concatenated = pd.concat(
                 [fold.global_feature_explanations for fold in self.test]
             )
+            if "holdout_case_maf" not in concatenated.columns:
+                concatenated["holdout_case_maf"] = 0
+            if "holdout_control_maf" not in concatenated.columns:
+                concatenated["holdout_control_maf"] = 0
             return concatenated.groupby("feature_name").agg(
-                ["mean", "std"],
+                {
+                    "feature_importances": ["mean", "std"],
+                    "test_case_maf": ["mean", "std"],
+                    "test_control_maf": ["mean", "std"],
+                    "holdout_case_maf": ["mean", "std"],
+                    "holdout_control_maf": ["mean", "std"]
+                },
             )
 
     @cached_property
@@ -332,6 +352,7 @@ class EvaluationResult:
 
     @cached_property
     def sample_results_dataframe(self):
+        np.set_printoptions(threshold=np.inf)
         # Extract probabilities and ids from test and holdout folds
         all_probabilities = [
             probability[1]  # Assuming probability exists for each binary class
@@ -355,6 +376,7 @@ class EvaluationResult:
         df = pd.DataFrame(
             {
                 "probability": all_probabilities,
+                "probabilities": all_probabilities,
                 "prediction": np.around(all_probabilities).astype(int),
                 "label": all_labels,
                 "id": all_ids,
@@ -367,6 +389,7 @@ class EvaluationResult:
         # Group by ID and compute aggregated values
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
+            "probabilities": [("list", list)],
             "accuracy": [("mean", "mean"), ("std", "std")],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
@@ -417,6 +440,7 @@ class BootstrapResult:
 
     @cached_property
     def sample_results_dataframe(self):
+        np.set_printoptions(threshold=np.inf)
         all_probabilities = []
         all_labels = []
         all_ids = []
@@ -446,6 +470,7 @@ class BootstrapResult:
         df = pd.DataFrame(
             {
                 "probability": all_probabilities,
+                "probabilities": all_probabilities,
                 "prediction": np.around(all_probabilities).astype(int),
                 "label": all_labels,
                 "id": all_ids,
@@ -458,6 +483,7 @@ class BootstrapResult:
         # Group by ID and compute aggregated values
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
+            "probabilities": [("list", list)],
             "accuracy": [("mean", "mean"), ("std", "std")],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
@@ -480,6 +506,7 @@ class BootstrapResult:
         if getattr(self.iteration_results[0], attribute_name) is None:
             return None
 
+        # Extract means and stds for the specified attribute
         means_list = [
             getattr(res, attribute_name).xs("mean", axis=1, level=level)
             for res in self.iteration_results
@@ -490,11 +517,55 @@ class BootstrapResult:
             for res in self.iteration_results
             if getattr(res, attribute_name) is not None
         ]
-
+        
         if agg_func is None:
-            return self.aggregate_global_explanations(means_list, stds_list)
+            return self.aggregate_global_explanations(
+                means_list, stds_list)
         else:
             return agg_func(means_list, stds_list)
+
+    def aggregate_global_explanations(self, means_list, stds_list):
+        """Aggregate global feature importances and MAFs across multiple EvaluationResults."""
+        
+        def calculate_overall_mean(data, column):
+            return data[column].mean(axis=1)
+        
+        def calculate_overall_std(data, column):
+            variances = (data[column]**2).mean(axis=1)
+            return np.sqrt(variances)
+        
+        def aggregate_data(column_prefix):
+            mean = calculate_overall_mean(concatenated_means, column_prefix)
+            std = calculate_overall_std(concatenated_variances, column_prefix)
+            
+            # Additional calculations specifically for feature_importances
+            if column_prefix == "feature_importances":
+                min_val = concatenated_means[column_prefix].min(axis=1)
+                max_val = concatenated_means[column_prefix].max(axis=1)
+                median_val = concatenated_means[column_prefix].median(axis=1)
+                return mean, std, min_val, max_val, median_val
+            else:
+                return mean, std
+
+        concatenated_means = pd.concat(means_list, axis=1)
+        concatenated_variances = pd.concat(stds_list, axis=1)**2
+        
+        columns = ["feature_importances", "test_case_maf", "test_control_maf", "holdout_case_maf", "holdout_control_maf"]
+        results = []
+        keys = []
+        
+        for column in columns:
+            aggregated_values = aggregate_data(column)
+            results.extend(aggregated_values)
+            
+            if column == "feature_importances":
+                keys.extend([f"mean_{column}", f"std_{column}", f"min_{column}", f"max_{column}", f"median_{column}"])
+            else:
+                keys.extend([f"mean_{column}", f"std_{column}"])
+                
+        result = pd.concat(results, axis=1, keys=keys)
+        return result
+
 
     @cached_property
     def average_global_feature_explanations(self):
@@ -529,23 +600,6 @@ class BootstrapResult:
             "average_holdout_local_control_explanations",
             agg_func=self.aggregate_local_explanations,
         )
-
-    def aggregate_global_explanations(self, means_list, stds_list):
-        """Aggregate global feature importances across multiple EvaluationResults."""
-        concatenated_means = pd.concat(means_list, axis=1)
-        concatenated_stds = pd.concat(stds_list, axis=1)
-
-        # Convert STDs to variances
-        concatenated_variances = concatenated_stds**2
-
-        # Calculate mean of means and mean of variances
-        overall_mean = concatenated_means.mean(axis=1)
-        overall_variance = concatenated_variances.mean(axis=1)
-
-        # Convert variance back to STD
-        overall_std = np.sqrt(overall_variance)
-
-        return pd.concat([overall_mean, overall_std], axis=1, keys=["mean", "std"])
 
     def aggregate_local_explanations(self, means_list, stds_list):
         """

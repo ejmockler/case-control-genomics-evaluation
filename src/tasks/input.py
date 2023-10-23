@@ -5,13 +5,14 @@ from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
+from config import config
 
 from multiprocess import Pool, Manager, managers
 
 from tasks.data import Genotype, GenotypeData
 
 
-@task(retries=1000)
+@task()
 def filterTable(table, filterString):
     if not filterString:
         return table
@@ -20,7 +21,7 @@ def filterTable(table, filterString):
     return filteredTable
 
 
-@task(retries=1000)
+@task()
 def applyAlleleModel(values, columns, genotypeIDs, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
@@ -50,7 +51,7 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
                 ):
                     matched = any(idValue in delimitedColumn for idValue in delimitedID)
             if matched:
-                if column in config["sampling"]["sequesteredIDs"]:
+                if column in config["sampling"]["sequesteredIDs"] or id in config["sampling"]["sequesteredIDs"]:
                     break
                 # implement allele model
                 genotypeDict[f"{column}"] = [
@@ -111,7 +112,7 @@ def aggregateIntoGenes(
     return aggregatedGenotype
 
 
-@task(retries=1000)
+@task()
 def load(config):
     clinicalData = pd.read_excel(
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
@@ -176,13 +177,14 @@ def balanceCaseControlDatasets(caseGenotypes, controlGenotypes):
     return minorIDs, balancedMajorIDs, excessMajorIDs
 
 
-@task(retries=1000)
+@task()
 def prepareDatasets(
     caseGenotypes,
     controlGenotypes,
     holdoutCaseGenotypes,
     holdoutControlGenotypes,
     verbose=True,
+    config=config
 ):
     minorIDs, balancedMajorIDs, excessMajorIDs = balanceCaseControlDatasets(
         caseGenotypes, controlGenotypes
@@ -271,8 +273,8 @@ def prepareDatasets(
             samples
         ).transpose(),  # samples are now rows (samples, variants)
         "excessMajorIndex": np.array(excessIDs),
-        "excessMajorLabels": [1 if id in caseIDs else 0 for id in excessIDs],
-        "excessMajorSamples": scaler.fit_transform(excessMajorSamples).transpose(),
+        "excessMajorLabels": [1 if id in caseIDs else 0 for id in (excessIDs)],
+        "excessMajorSamples": scaler.fit_transform(excessMajorSamples if not excessMajorSamples.empty else [[]]).transpose(),
         "variantIndex": variantIndex,
     }
     if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:

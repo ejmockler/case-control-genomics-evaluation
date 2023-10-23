@@ -576,7 +576,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy
+    {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
     accuracyHistogram = px.histogram(
@@ -849,6 +849,7 @@ def poolSampleResults(concatenatedResults):
     # Iterate over groups and calculate summary stats for each group
     for name, group in grouped:
         probability_mean = weighted_mean(group, 'probability_mean', 'draw_count')
+        all_probabilities = np.concatenate(group['probabilities_list'].values).tolist()
         probability_std = pooled_std(group, 'probability_std', 'draw_count')
         accuracy_mean = weighted_mean(group, 'accuracy_mean', 'draw_count')
         accuracy_std = pooled_std(group, 'accuracy_std', 'draw_count')
@@ -862,6 +863,7 @@ def poolSampleResults(concatenatedResults):
         pooled_results.append({
             'id': name,
             'probability_mean': probability_mean,
+            'probabilities_list': all_probabilities,
             'probability_std': probability_std,
             'accuracy_mean': accuracy_mean,
             'accuracy_std': accuracy_std,
@@ -888,6 +890,7 @@ def trackProjectVisualizations(classificationResults, config):
     pooledSampleResults = poolSampleResults(concatenatedSampleResults)
 
     output_path = f"projects/{config['tracking']['project']}/pooledSampleResults.csv"
+    np.set_printoptions(threshold=np.inf)
     pooledSampleResults.to_csv(output_path)
 
     seenCases = (

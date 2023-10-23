@@ -310,22 +310,26 @@ def classify(
     runNumber,
     model,
     hyperParameterSpace,
-    caseGenotypes,
-    controlGenotypes,
-    holdoutCaseGenotypes,
-    holdoutControlGenotypes,
+    genotypeData,
     clinicalData,
     innerCvIterator,
     outerCvIterator,
     config,
     track=True,
 ):
+    
+    caseGenotypes = genotypeData.case.genotype
+    controlGenotypes = genotypeData.control.genotype
+    holdoutCaseGenotypes = genotypeData.holdout_case.genotype
+    holdoutControlGenotypes = genotypeData.holdout_control.genotype
+    
     embedding = prepareDatasets(
         caseGenotypes,
         controlGenotypes,
         holdoutCaseGenotypes,
         holdoutControlGenotypes,
         verbose=(True if runNumber == 0 else False),
+        config=config
     )
 
     clinicalIDs = list()
@@ -402,6 +406,8 @@ def classify(
     for args in evaluate_args:
         # inner cross-validation is hyperparameter optimization
         testResult, holdoutResult = evaluate(*args)
+        testResult.append_allele_frequencies(genotypeData)
+        holdoutResult.append_allele_frequencies(genotypeData)
         modelResults.train.append(args[0])
         modelResults.test.append(testResult)
         modelResults.holdout.append(holdoutResult)
@@ -450,10 +456,7 @@ def classify(
 
 @flow()
 def bootstrap(
-    caseGenotypes,
-    controlGenotypes,
-    holdoutCaseGenotypes,
-    holdoutControlGenotypes,
+    genotypeData,
     clinicalData,
     model,
     hyperParameterSpace,
@@ -464,7 +467,7 @@ def bootstrap(
 ):
     gc.collect()
     bootstrap = BootstrapResult(model.__class__.__name__)
-
+    
     # parallelize with workflow engine in cluster environment
     for runNumber in range(
         config["sampling"]["lastIteration"],
@@ -476,10 +479,7 @@ def bootstrap(
                 runNumber,
                 model,
                 hyperParameterSpace,
-                caseGenotypes,
-                controlGenotypes,
-                holdoutCaseGenotypes,
-                holdoutControlGenotypes,
+                genotypeData,
                 clinicalData,
                 innerCvIterator,
                 outerCvIterator,

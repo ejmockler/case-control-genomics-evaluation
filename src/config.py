@@ -1,13 +1,11 @@
-# TODO add frequency column to feature explanations
-
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_ALSoD_NYGC_ALS_and_1000_genomes_EUR_2021-12-15.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
             "position",
-            "Gene",  # ensure gene column trails others to index separately in plot titles
+            "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
         "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
         "aggregateGenesBy": None,  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
@@ -22,9 +20,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUPs, Caucasian female individuals",  # name of the experiment
+        "name": "NUPs, Caucasian male individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPs-variant-females-1MAF",
+        "project": "ALS-NUPs-variant-males-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -39,7 +37,7 @@ config = {
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "pct_european>=0.85 & Sex=='Female'",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85 & Sex=='Male'",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
@@ -71,11 +69,11 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "`Superpopulation code`=='EUR' & `Sex`=='female'",
+            "`Superpopulation code`=='EUR' & `Sex`=='male'",
             # "`testLabel`==1",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Female'",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Female'",
-            "`Superpopulation code`!='EUR' & `Sex`=='female'",
+            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85 & `Sex`=='Male'",
+            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85 & `Sex`=='Male'",
+            "`Superpopulation code`!='EUR' & `Sex`=='male'",
         ],
     },
     "sampling": {

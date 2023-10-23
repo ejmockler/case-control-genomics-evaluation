@@ -3,6 +3,7 @@ import os
 import neptune
 import ray
 import matplotlib
+import numpy as np
 
 from tasks.data import (
     ClassificationResults,
@@ -61,7 +62,7 @@ def main(
     clinicalData=None,
     trackVisualizations=True,
 ):
-    if genotypeData is None:
+    if (genotypeData is None and clinicalData is None) or len(config['sampling']['sequesteredIDs']) > 0:
         (
             genotypeData,
             clinicalData,
@@ -73,10 +74,7 @@ def main(
 
     bootstrap_args = [
         (
-            genotypeData.case.genotype,
-            genotypeData.control.genotype,
-            genotypeData.holdout_case.genotype,
-            genotypeData.holdout_control.genotype,
+            genotypeData,
             clinicalData,
             model,
             hyperParameterSpace,
@@ -101,7 +99,8 @@ def main(
 
     if config["model"]["calculateShapelyExplanations"]:
         pass
-
+    
+    np.set_printoptions(threshold=np.inf)
     for i in range(len(modelStack)):
         modelResult = classificationResults.modelResults[i]
         modelResult.calculate_average_accuracies()
@@ -140,7 +139,7 @@ def main(
     )
 
     return (
-        results,
+        classificationResults,
         genotypeData,
         clinicalData,
     )
