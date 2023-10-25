@@ -22,8 +22,6 @@ class Genotype:
     ids: list
     name: str
     
-    
-
 
 @dataclass
 class GenotypeData:

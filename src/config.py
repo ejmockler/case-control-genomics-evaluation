@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/NUPsGenotypes.csv",  # variant call table with annotations
+        "path": "../adhoc analysis/alsodGenotypes.csv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -20,9 +20,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUPs, Caucasian individuals",  # name of the experiment
+        "name": "ALSOD, Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPs-variant-1MAF",
+        "project": "ALS-ALSOD-variant-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },

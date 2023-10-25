@@ -259,7 +259,7 @@ def main(config):
         pooledBaselineFeatureResults.to_csv(
             f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults.csv"
         )
-        pooledSamplePerplexities.to_csv(
+        pd.concat([pooledSamplePerplexities, pooledResults[['label', 'accuracy_mean', 'accuracy_std', 'draw_count']]], axis=1).to_csv(
             f"projects/{config['tracking']['project']}/pooledSamplePerplexities.csv"
         )
         pooledAccurateSamples.to_csv(
@@ -269,12 +269,16 @@ def main(config):
             f"projects/{config['tracking']['project']}/pooledDiscordantSamples.csv"
         )
         
+        sampleResultsByModel = {
+                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults.csv", index_col="id") for model in modelStack.keys()
+            }
+        
         # Store results for each model
         for modelName in relativePerplexitiesByModel.keys():
             baselineFeatureResultsByModel[modelName].to_csv(
                 f"projects/{config['tracking']['project']}/{modelName}/baselineFeatureResults.csv"
             )
-            relativePerplexitiesByModel[modelName].to_csv(
+            pd.concat([relativePerplexitiesByModel[modelName], sampleResultsByModel[modelName][['label', 'accuracy_mean', 'accuracy_std', 'draw_count']]], axis=1).to_csv(
                 f"projects/{config['tracking']['project']}/{modelName}/relativePerplexities.csv"
             )
             accurateSamplesByModel[modelName].to_csv(
@@ -286,9 +290,7 @@ def main(config):
             
         # Check for new well-classified samples. If not present, stop iterations.
         newWellClassified = not pooledAccurateSamples.empty
-        sampleResultsByModel = {
-                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults.csv", index_col="id") for model in modelStack.keys()
-            }
+        
         config = sequesterOutlierSamples(sampleResultsByModel, pooledResults)
         countSuffix += 1
 

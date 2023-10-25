@@ -418,7 +418,7 @@ def classify(
 
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
-            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]))) +' genes)')}
+            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
@@ -426,7 +426,7 @@ def classify(
 
         if modelResults.holdout:
             holdoutPlotSubtitle = f"""
-                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]))) +' genes)')}
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
                 Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
                 
                 Ethnically variable holdout
