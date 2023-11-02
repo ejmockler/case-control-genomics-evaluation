@@ -44,7 +44,7 @@ def getBaselineFeatureResults(
     clinicalData,
     config,
 ):
-    selectedFeature = findBaselineFeature(genotypeData.case.genotype, genotypeData.control.genotype)
+    selectedFeature = findBaselineFeature(genotypeData.case.genotype, genotypeData.control.genotype, genotypeData.holdout_case.genotype, genotypeData.holdout_control.genotype)
     outerCvIterator = StratifiedKFold(
         n_splits=config["sampling"]["crossValIterations"], shuffle=False
     )
@@ -89,24 +89,42 @@ def perplexity(y_true, y_pred):
     return np.power(2, crossEntropy)
 
 
-def findBaselineFeature(caseGenotypes, controlGenotypes):
-    # calculate the mean of each feature for cases and controls
+def findBaselineFeature(caseGenotypes, controlGenotypes, holdoutCaseGenotypes, holdoutControlGenotypes):
+    # Drop variant rows where any element is NaN in each DataFrame
+    caseGenotypes = caseGenotypes.dropna()
+    controlGenotypes = controlGenotypes.dropna()
+    holdoutCaseGenotypes = holdoutCaseGenotypes.dropna()
+    holdoutControlGenotypes = holdoutControlGenotypes.dropna()
+    
+    # Ensure that features (rows) are consistent across all DataFrames after dropping NaNs
+    common_features = caseGenotypes.index.intersection(controlGenotypes.index)
+    common_features = common_features.intersection(holdoutCaseGenotypes.index)
+    common_features = common_features.intersection(holdoutControlGenotypes.index)
+    
+    # Select only the rows corresponding to the common features in each DataFrame
+    caseGenotypes = caseGenotypes.loc[common_features]
+    controlGenotypes = controlGenotypes.loc[common_features]
+    holdoutCaseGenotypes = holdoutCaseGenotypes.loc[common_features]
+    holdoutControlGenotypes = holdoutControlGenotypes.loc[common_features]
+    
+    # Calculate the mean of each feature for cases and controls
     mean_cases = caseGenotypes.mean(axis=1)
     mean_controls = controlGenotypes.mean(axis=1)
 
-    # calculate the absolute difference in means for each feature
+    # Calculate the absolute difference in means for each feature
     diff_means = abs(mean_cases - mean_controls)
 
-    # get the feature with the largest difference in means
+    # Get the feature with the largest difference in means
     selected_feature = diff_means.idxmax()
 
     print("Selected feature for baseline perplexity: ", selected_feature)
     return selected_feature
 
 
+
 @task(retries=10)
 def measureIterations(
-    classificationResults,
+    sampleResultsByModel,
     pooledResults,
     genotypeData,
     clinicalData,
@@ -161,7 +179,7 @@ def measureIterations(
     for model in modelStack:
         modelName = model.__class__.__name__
         baselineFeatureResult = baselineFeatureResultsByModel[modelName]
-        completeFeatureResult = list(filter(lambda result: result.model_name == modelName, classificationResults.modelResults))[0].sample_results_dataframe
+        completeFeatureResult = sampleResultsByModel[modelName]
         relativePerplexitiesByModel[modelName], discordantSamplesByModel[modelName], accurateSamplesByModel[modelName] = processResults(completeFeatureResult, baselineFeatureResult)
 
     return (
@@ -226,16 +244,25 @@ def main(config):
             sampleResultsByModel = {
                 model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults.csv", index_col="id") for model in modelStack.keys()
             }
-            pooledSampleResults = pd.read_csv(f"projects/{config['tracking']['project']}/pooledSampleResults.csv", index_col="id")
+            for dataframe in sampleResultsByModel.values():
+                dataframe['probabilities_list'] = dataframe['probabilities_list'].apply(lambda x: np.array(eval(x))) # convert string representation of array to numpy array
+            pooledResults = pd.read_csv(f"projects/{config['tracking']['project']}/pooledSampleResults.csv", index_col="id")
             
-            config = sequesterOutlierSamples(sampleResultsByModel, pooledSampleResults)
-            countSuffix += 1
-            continue
+            if os.path.exists(f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults.csv"):
+                config = sequesterOutlierSamples(sampleResultsByModel, pooledResults)
+                countSuffix += 1
+                continue
+            elif genotypeData is None and clinicalData is None:
+                (
+                    genotypeData,
+                    clinicalData,
+                ) = processInputFiles(config)
         else:
             classificationResults, genotypeData, clinicalData = runMLstack(config, genotypeData, clinicalData)
+            sampleResultsByModel = {modelResult.model_name: modelResult.sample_results_dataframe for modelResult in classificationResults.modelResults}
             config["sampling"]["lastIteration"] = 0
         
-        pooledResults = poolSampleResults(pd.concat([modelResult.sample_results_dataframe for modelResult in classificationResults.modelResults]))
+            pooledResults = poolSampleResults(pd.concat([modelResult.sample_results_dataframe for modelResult in classificationResults.modelResults]))
         
         (
             pooledSamplePerplexities,
@@ -247,7 +274,7 @@ def main(config):
             pooledBaselineFeatureResults,
             baselineFeatureResultsByModel
         ) = measureIterations(
-            classificationResults,
+            sampleResultsByModel,
             pooledResults,
             genotypeData,
             clinicalData,

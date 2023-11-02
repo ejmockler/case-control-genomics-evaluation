@@ -8,21 +8,21 @@ config = {
             "Gene",
         ],  # header that indexes variants (set as list with multiple columns)
         "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
-        "aggregateGenesBy": None,  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
+        "aggregateGenesBy": "mean",  # aggregate variants within genes by mean, sum, or meanFrequency. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
-        "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency
-        "minAlleleFrequency": 0.01,  # filter out variants with allele frequency less than this
+        "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency
+        "minAlleleFrequency": 0.00,  # filter out variants with allele frequency less than this
         "maxVariants": None, # set max number of variants for control; set to None to disable
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSOD, Caucasian individuals",  # name of the experiment
+        "name": "ALSOD genes, Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-ALSOD-variant-1MAF",
+        "project": "ALS-logisticRegression-NUPs-gene-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
