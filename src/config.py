@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/alsodGenotypes.csv",  # variant call table with annotations
+        "path": "../adhoc analysis/nupsGenotypes.csv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -14,13 +14,14 @@ config = {
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
         "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency
         "minAlleleFrequency": 0.00,  # filter out variants with allele frequency less than this
+        "maxAlleleFrequency": 0.05,  # filter out variants with allele frequency greater than this
         "maxVariants": None, # set max number of variants for control; set to None to disable
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "ALSOD genes, Caucasian individuals",  # name of the experiment
+        "name": "NUPs genes, Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
         "project": "ALS-logisticRegression-NUPs-gene-1MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune

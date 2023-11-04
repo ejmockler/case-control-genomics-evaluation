@@ -61,7 +61,7 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
                                 int(allele)
                                 for allele in genotype.replace("'", "").split("/")
                             ]
-                        )  # split by allele delimiter
+                        )# split by allele delimiter
                         if not config["vcfLike"]["binarize"]
                         else np.clip(
                             np.sum(
@@ -458,26 +458,30 @@ def processInputFiles(config):
             elif "holdout" in alias:
                 print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
-     # TODO complete alllele frequency filter
     resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
-    allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF)
+    allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF).dropna().astype(np.int8)
      
+    # Calculate the allele frequencies
+    allele_frequencies = (
+        allGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
+    )
+
+    # Filter the genotypes based on frequency criteria
     frequencyFilteredGenotypes = allGenotypes.loc[
-        (allGenotypes.dropna().astype(np.int8)
-        .gt(0)
-        .sum(axis=1)
-        .divide(len(resolvedIDs))
-        >= config["vcfLike"]["minAlleleFrequency"]).index
+        allele_frequencies.between(
+            config["vcfLike"]["minAlleleFrequency"],
+            config["vcfLike"]["maxAlleleFrequency"]
+        )
     ]
+
+    print(
+        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])} or above {'{:.3%}'.format(config['vcfLike']['maxAlleleFrequency'])}"
+    )
+    print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
     
     if config['vcfLike']['maxVariants'] and config['vcfLike']['maxVariants'] < len(frequencyFilteredGenotypes):
         frequencyFilteredGenotypes = frequencyFilteredGenotypes.sample(n=config['vcfLike']['maxVariants'], axis=0)
         print(f"Thresholded maximum of {config['vcfLike']['maxVariants']} alleles.")
-    else:
-        print(
-            f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])}"
-        )
-        print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
     
     caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
     controlGenotypesDataframe = createGenotypeDataframe(
