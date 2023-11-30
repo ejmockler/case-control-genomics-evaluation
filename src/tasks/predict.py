@@ -29,7 +29,7 @@ import gc
 import faulthandler
 
 
-def getFeatureImportances(model, testData, holdoutData, featureLabels, config):
+def getFeatureImportances(model, testData, holdoutData, excessData, featureLabels, config):
     """Get feature importances from fitted model and create SHAP explainer"""
     if model.__class__.__name__ == "MultinomialNB":
         modelCoefficientDF = pd.DataFrame()
@@ -71,6 +71,7 @@ def getFeatureImportances(model, testData, holdoutData, featureLabels, config):
 
     shapValues = None
     holdoutShapValues = None
+    excessShapValues = None
     shapExplainer = None
     masker = None
 
@@ -89,12 +90,17 @@ def getFeatureImportances(model, testData, holdoutData, featureLabels, config):
 
         # Get SHAP values
         shapValues = shapExplainer(testData.vectors)
+        
+        # Same for excess data
+        if len(excessData.vectors) > 0:
+            excessShapValues = shapExplainer(excessData.vectors)
 
         # Same for holdout data
         if len(holdoutData.vectors) > 0:
             holdoutShapValues = shapExplainer(holdoutData.vectors)
-
-    return modelCoefficientDF, shapValues, holdoutShapValues, shapExplainer, masker
+            
+        
+    return modelCoefficientDF, shapValues, excessShapValues, holdoutShapValues, shapExplainer, masker
 
 
 def get_probabilities(model, samples):
@@ -195,25 +201,19 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
                 index=evaluationResult.holdout[k].ids,
                 name="labels",
             ).to_csv(f"{runPath}/holdoutLabels/{k+1}.csv")
-
+     
     if evaluationResult.average_global_feature_explanations is not None:
         evaluationResult.average_global_feature_explanations.to_csv(
             f"{runPath}/averageGlobalExplanations.csv"
         )
 
     if config["model"]["calculateShapelyExplanations"]:
-        evaluationResult.average_test_local_case_explanations.to_csv(
-            f"{runPath}/averageLocalCaseExplanations.csv"
-        )
-        evaluationResult.average_test_local_control_explanations.to_csv(
-            f"{runPath}/averageLocalControlExplanations.csv"
+        evaluationResult.average_test_local_explanations.to_csv(
+            f"{runPath}/averageLocalExplanations.csv"
         )
         if evaluationResult.holdout:
-            evaluationResult.average_holdout_local_case_explanations.to_csv(
-                f"{runPath}/averageHoldoutLocalCaseExplanations.csv"
-            )
-            evaluationResult.average_holdout_local_control_explanations.to_csv(
-                f"{runPath}/averageHoldoutLocalControlExplanations.csv"
+            evaluationResult.average_holdout_local_explanations.to_csv(
+                f"{runPath}/averageHoldoutLocalExplanations.csv"
             )
 
     with open(
@@ -226,7 +226,12 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
         "w",
     ) as file:
         pass
-    with open(f"{runPath}/meanAUC_{evaluationResult.average_test_auc}", "w") as file:
+    with open(f"{runPath}/meanTestAUC_{evaluationResult.average_test_auc}", "w") as file:
+        pass
+    with open(
+        f"{runPath}/testMeanAccuracy_{evaluationResult.average_test_accuracy}",
+        "w",
+    ) as file:
         pass
     if evaluationResult.holdout:
         with open(
@@ -238,6 +243,22 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
             "w",
         ) as file:
             pass
+        with open(
+            f"{runPath}/holdoutMeanAccuracy_{evaluationResult.average_holdout_accuracy}",
+            "w",
+        ) as file:
+            pass
+    if evaluationResult.excess:
+        with open(
+            f"{runPath}/{evaluationResult.excess[0].set}Count_{np.mean([len(foldResult.labels) for foldResult in evaluationResult.excess])}",
+            "w",
+        ) as file:
+            pass
+        with open(
+            f"{runPath}/{evaluationResult.excess[0].set}MeanAccuracy_{evaluationResult.average_excess_accuracy}",
+            "w",
+        ) as file:
+            pass
 
     gc.collect()
 
@@ -245,6 +266,7 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
 def evaluate(
     trainData: SampleData,
     testData: SampleData,
+    excessData: SampleData,
     holdoutData: SampleData,
     model,
     hyperParameterSpace,
@@ -268,15 +290,17 @@ def evaluate(
     model.fit(trainData.vectors, trainData.labels)
 
     probabilities = get_probabilities(model, testData.vectors)
+    excessProbabilities = get_probabilities(model, excessData.vectors)
     holdoutProbabilities = get_probabilities(model, holdoutData.vectors)
 
     (
         modelValues,
         shapValues,
+        excessShapValues,
         holdoutShapValues,
         shapExplainer,
         shapMasker,
-    ) = getFeatureImportances(model, testData, holdoutData, variantIndex, config)
+    ) = getFeatureImportances(model, testData, holdoutData, excessData, variantIndex, config)
 
     return (
         FoldResult(
@@ -302,6 +326,16 @@ def evaluate(
             modelValues,
             holdoutShapValues,
         ),
+        FoldResult(
+            excessData.set,
+            excessData.ids,
+            excessData.labels,
+            excessData.vectors,
+            excessData.geneCount,
+            excessProbabilities,
+            modelValues,
+            excessShapValues
+        )
     )
 
 
@@ -317,7 +351,6 @@ def classify(
     config,
     track=True,
 ):
-    
     caseGenotypes = genotypeData.case.genotype
     controlGenotypes = genotypeData.control.genotype
     holdoutCaseGenotypes = genotypeData.holdout_case.genotype
@@ -355,7 +388,6 @@ def classify(
         print(
             f"{len(embedding['holdoutSamples']) - holdoutCaseCount} holdout controls\n"
         )
-
     print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
 
     if track:
@@ -391,6 +423,13 @@ def classify(
                 vectors=embedding["samples"][testIndices],
                 geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
             ),
+            SampleData(
+                set=embedding["excessMajorSetName"],
+                ids=embedding["excessMajorIndex"],
+                labels=embedding["excessMajorLabels"],
+                vectors=embedding["excessMajorSamples"],
+                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                ),
             holdoutData,
             model,
             hyperParameterSpace,
@@ -405,12 +444,13 @@ def classify(
     # run sequentially since models are not concurrency-safe
     for args in evaluate_args:
         # inner cross-validation is hyperparameter optimization
-        testResult, holdoutResult = evaluate(*args)
+        testResult, holdoutResult, excessResult = evaluate(*args)
         testResult.append_allele_frequencies(genotypeData)
         holdoutResult.append_allele_frequencies(genotypeData)
         modelResults.train.append(args[0])
         modelResults.test.append(testResult)
         modelResults.holdout.append(holdoutResult)
+        modelResults.excess.append(excessResult)
         gc.collect()
 
     if track:
@@ -442,6 +482,20 @@ def classify(
                 config=config,
             )
             gc.collect()
+        if modelResults.excess:
+            excessPlotSubtitle = f"""
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
+                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+
+                {len(embedding['excessMajorLabels'])} {modelResults.excess[0].set} samples @ {'{:.1%}'.format(modelResults.average_excess_accuracy)} accuracy"""
+            trackBootstrapVisualizations(
+                runID,
+                excessPlotSubtitle,
+                model.__class__.__name__,
+                modelResults,
+                excess=True,
+                config=config,
+            )
 
         trackBootstrapVisualizations(
             runID,

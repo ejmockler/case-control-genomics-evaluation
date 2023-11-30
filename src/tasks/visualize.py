@@ -350,21 +350,23 @@ def trackBootstrapVisualizations(
     modelName: str,
     modelResults: EvaluationResult,
     holdout=False,
+    excess=False,
+    auc=False,
     config=config,
 ):
-    aucName = "aucPlot" if not holdout else "aucPlotHoldout"
+    aucName = "aucPlotHoldout" if holdout else "aucPlot"
     probabilities = [
         fold.probabilities
-        for fold in (modelResults.test if not holdout else modelResults.holdout)
+        for fold in (modelResults.holdout if holdout else modelResults.excess if excess else modelResults.test)
     ]
 
     labels = [
         fold.labels
-        for fold in (modelResults.test if not holdout else modelResults.holdout)
+        for fold in (modelResults.holdout if holdout else modelResults.excess if excess else modelResults.test)
     ]
     ids = [
         fold.ids
-        for fold in (modelResults.test if not holdout else modelResults.holdout)
+        for fold in (modelResults.holdout if holdout else modelResults.excess if excess else modelResults.test)
     ]
 
     labelsProbabilitiesByFold = {
@@ -379,16 +381,27 @@ def trackBootstrapVisualizations(
         for k in range(config["sampling"]["crossValIterations"])
     }
 
-    aucPlot = plotAUC(
-        f"""
-            Receiver Operating Characteristic (ROC) Curve
-            {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
-            {plotSubtitle}
-            """,
-        labelsProbabilitiesByFold,
-        config=config,
-    )
-    confusionMatrixName = "confusionMatrix" if not holdout else "confusionMatrixHoldout"
+    if not excess:
+        aucPlot = plotAUC(
+            f"""
+                Receiver Operating Characteristic (ROC) Curve
+                {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
+                {plotSubtitle}
+                """,
+            labelsProbabilitiesByFold,
+            config=config,
+        )
+        calibrationName = "calibrationPlotHoldout" if holdout else "calibrationPlotExcess" if excess else "calibrationPlot"
+        calibrationPlot = plotCalibration(
+            f"""
+                Calibration Curve
+                {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
+                {plotSubtitle}
+                """,
+            labelsProbabilitiesByFold,
+            config=config,
+        )
+    confusionMatrixName = "confusionMatrixHoldout" if holdout else "confusionMatrixExcess" if excess else "confusionMatrix"
     confusionMatrixList, avgConfusionMatrix = plotConfusionMatrix(
         f"""
             Confusion Matrix
@@ -396,16 +409,6 @@ def trackBootstrapVisualizations(
             {plotSubtitle}
             """,
         labelsPredictionsByFold,
-        config=config,
-    )
-    calibrationName = "calibrationPlot" if not holdout else "calibrationPlotHoldout"
-    calibrationPlot = plotCalibration(
-        f"""
-            Calibration Curve
-            {modelName} with {config['sampling']['crossValIterations']}-fold cross-validation
-            {plotSubtitle}
-            """,
-        labelsProbabilitiesByFold,
         config=config,
     )
     if config["model"]["hyperparameterOptimization"] and not holdout:
@@ -463,7 +466,7 @@ def trackBootstrapVisualizations(
             api_token=config["tracking"]["token"],
             capture_stdout=False,
         )
-        runTracker[f"plots/{aucName}"] = aucPlot
+        if not excess: runTracker[f"plots/{aucName}"] = aucPlot
         for i, confusionMatrix in enumerate(confusionMatrixList):
             runTracker[f"{confusionMatrixName}/{i+1}"].upload(confusionMatrix)
         runTracker[
@@ -478,8 +481,15 @@ def trackBootstrapVisualizations(
     else:  # store plots locally
         runPath = runID
         os.makedirs(f"{runPath}/plots", exist_ok=True)
-        aucPlot.savefig(f"{runPath}/plots/{aucName}.svg", bbox_inches="tight")
-        aucPlot.savefig(f"{runPath}/plots/{aucName}.png", bbox_inches="tight")
+        if not excess:
+            aucPlot.savefig(f"{runPath}/plots/{aucName}.svg", bbox_inches="tight")
+            aucPlot.savefig(f"{runPath}/plots/{aucName}.png", bbox_inches="tight")
+            calibrationPlot.savefig(
+            f"{runPath}/plots/{calibrationName}.svg", bbox_inches="tight"
+            )
+            calibrationPlot.savefig(
+                f"{runPath}/plots/{calibrationName}.png", bbox_inches="tight"
+            )
         confusionMatrixPath = f"{runPath}/plots/{confusionMatrixName}"
         os.makedirs(confusionMatrixPath, exist_ok=True)
         for i, confusionMatrix in enumerate(confusionMatrixList):
@@ -494,13 +504,8 @@ def trackBootstrapVisualizations(
             f"{runPath}/plots/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.png",
             bbox_inches="tight",
         )
-        calibrationPlot.savefig(
-            f"{runPath}/plots/{calibrationName}.svg", bbox_inches="tight"
-        )
-        calibrationPlot.savefig(
-            f"{runPath}/plots/{calibrationName}.png", bbox_inches="tight"
-        )
-        if config["model"]["hyperparameterOptimization"] and not holdout:
+        
+        if config["model"]["hyperparameterOptimization"] and not holdout and not excess:
             convergencePlot.savefig(
                 f"{runPath}/plots/{convergencePlotName}.svg", bbox_inches="tight"
             )
@@ -855,6 +860,7 @@ def poolSampleResults(concatenatedResults):
         accuracy_std = pooled_std(group, 'accuracy_std', 'draw_count')
         draw_count_sum = group['draw_count'].sum()
         first_label_instance = group['label'].iloc[0]
+        first_set_instance = group['set'].iloc[0]
         
         # Redetermine the most frequent prediction
         mode_prediction =  group['prediction_most_frequent'].mode()[0]
@@ -869,12 +875,13 @@ def poolSampleResults(concatenatedResults):
             'accuracy_std': accuracy_std,
             'draw_count_sum': draw_count_sum,
             'first_label_instance': first_label_instance,
+            'first_set_instance': first_set_instance,
             'mode_prediction': mode_prediction
         })
 
     # Convert results list to DataFrame
     pooledSampleResults = pd.DataFrame(pooled_results).set_index('id')
-    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent'}, inplace=True)
+    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent', 'first_set_instance': 'set'}, inplace=True)
     
     return pooledSampleResults
 

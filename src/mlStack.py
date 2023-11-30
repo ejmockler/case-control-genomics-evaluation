@@ -115,21 +115,13 @@ def main(
             modelResult.average_global_feature_explanations.to_csv(
                 f"projects/{config['tracking']['project']}/{modelResult.model_name}/globalFeatures.csv"
             )
-        if modelResult.average_test_local_case_explanations is not None:
-            modelResult.average_test_local_case_explanations.to_csv(
-                f"projects/{config['tracking']['project']}/{modelResult.model_name}/testCaseLocalFeatures.csv"
+        if modelResult.average_test_local_explanations is not None:
+            modelResult.average_test_local_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/testLocalFeatures.csv"
             )
-        if modelResult.average_test_local_control_explanations is not None:
-            modelResult.average_test_local_control_explanations.to_csv(
-                f"projects/{config['tracking']['project']}/{modelResult.model_name}/testControlLocalFeatures.csv"
-            )
-        if modelResult.average_holdout_local_case_explanations is not None:
-            modelResult.average_holdout_local_case_explanations.to_csv(
-                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutCaseLocalFeatures.csv"
-            )
-        if modelResult.average_holdout_local_control_explanations is not None:
-            modelResult.average_holdout_local_control_explanations.to_csv(
-                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutControlLocalFeatures.csv"
+        if modelResult.average_holdout_local_explanations is not None:
+            modelResult.average_holdout_local_explanations.to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutLocalFeatures.csv"
             )
         if trackVisualizations: trackModelVisualizations(modelResult, config=config)
 

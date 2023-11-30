@@ -152,7 +152,7 @@ class FoldResult(SampleData):
     fitted_optimizer: Optional[object] = None
 
     def __post_init__(self):
-        self.calculate_AUC()
+        if "excess" not in self.set: self.calculate_AUC()
         self.calculate_positive_ratios()
         self.calculate_accuracy()
     
@@ -168,24 +168,14 @@ class FoldResult(SampleData):
                     targetControlData[self.ids[np.where(self.labels==0)]]).to_dict())
 
     @cached_property
-    def local_case_explanations(self):
-        localCaseExplanationsDataframe = pd.DataFrame(
+    def local_explanations(self):
+        localExplanationsDataframe = pd.DataFrame(
             data=self.shap_explanation.values[:, :, 1],
             index=self.ids,
             columns=self.shap_explanation.feature_names,
         )
         localCaseExplanationsDataframe.index.name = "sample_id"
-        return localCaseExplanationsDataframe
-
-    @cached_property
-    def local_control_explanations(self):
-        localControlExplanationsDataframe = pd.DataFrame(
-            data=self.shap_explanation.values[:, :, 1],
-            index=self.ids,
-            columns=self.shap_explanation.feature_names,
-        )
-        localControlExplanationsDataframe.index.name = "sample_id"
-        return localControlExplanationsDataframe
+        return localExplanationsDataframe
 
     def calculate_AUC(self):
         self.auc = roc_auc_score(self.labels, self.probabilities[:, 1])
@@ -232,6 +222,7 @@ class EvaluationResult:
     train: list[SampleData] = field(default_factory=list)
     test: list[FoldResult] = field(default_factory=list)
     holdout: list[FoldResult] = field(default_factory=list)
+    excess: list[FoldResult] = field(default_factory=list)
 
     def average(self):
         self.calculate_average_AUC()
@@ -259,9 +250,10 @@ class EvaluationResult:
 
     @cached_property
     def average_global_feature_explanations(self):
+        concatenated = pd.DataFrame()
         if all(fold.global_feature_explanations is not None for fold in self.test):
             concatenated = pd.concat(
-                [fold.global_feature_explanations for fold in self.test]
+                [fold.global_feature_explanations for fold in self.test] + [concatenated]
             )
             if "holdout_case_maf" not in concatenated.columns:
                 concatenated["holdout_case_maf"] = 0
@@ -273,45 +265,26 @@ class EvaluationResult:
                     "test_case_maf": ["mean", "std"],
                     "test_control_maf": ["mean", "std"],
                     "holdout_case_maf": ["mean", "std"],
-                    "holdout_control_maf": ["mean", "std"]
+                    "holdout_control_maf": ["mean", "std"],
                 },
             )
 
     @cached_property
-    def average_test_local_case_explanations(self):
+    def average_test_local_explanations(self):
         all_test_explanations = []
         for fold in self.test:
             if fold.shap_explanation is not None:
-                all_test_explanations.append(fold.local_case_explanations)
+                all_test_explanations.append(fold.local_explanations)
         if all_test_explanations:
             return self.aggregate_explanations(all_test_explanations)
 
     @cached_property
-    def average_holdout_local_case_explanations(self):
+    def average_holdout_local_explanations(self):
         if self.holdout:
             all_holdout_explanations = []
             for fold in self.holdout:
                 if fold.shap_explanation is not None:
-                    all_holdout_explanations.append(fold.local_case_explanations)
-            if all_holdout_explanations:
-                return self.aggregate_explanations(all_holdout_explanations)
-
-    @cached_property
-    def average_test_local_control_explanations(self):
-        all_test_explanations = []
-        for fold in self.test:
-            if fold.shap_explanation is not None:
-                all_test_explanations.append(fold.local_control_explanations)
-        if all_test_explanations:
-            return self.aggregate_explanations(all_test_explanations)
-
-    @cached_property
-    def average_holdout_local_control_explanations(self):
-        if self.holdout:
-            all_holdout_explanations = []
-            for fold in self.holdout:
-                if fold.shap_explanation is not None:
-                    all_holdout_explanations.append(fold.local_control_explanations)
+                    all_holdout_explanations.append(fold.local_explanations)
             if all_holdout_explanations:
                 return self.aggregate_explanations(all_holdout_explanations)
 
@@ -322,6 +295,11 @@ class EvaluationResult:
         if self.holdout:
             self.average_holdout_accuracy = np.mean(
                 [fold.accuracy for fold in self.holdout]
+            )
+            
+        if self.excess:
+            self.average_excess_accuracy = np.mean(
+                [fold.accuracy for fold in self.excess]
             )
 
         if self.test:
@@ -345,6 +323,8 @@ class EvaluationResult:
             all_accuracies.extend([fold.accuracy for fold in self.test])
         if self.holdout:
             all_accuracies.extend([fold.accuracy for fold in self.holdout])
+        if self.excess:
+            all_accuracies.extend([fold.accuracy for fold in self.excess])
         if all_accuracies:
             self.overall_average_accuracy = np.mean(all_accuracies)
 
@@ -369,6 +349,18 @@ class EvaluationResult:
             for fold in self.test + (self.holdout if self.holdout else [])
             for id in fold.ids
         ]
+        
+        holdout_ids = [
+            id
+            for fold in self.holdout if self.holdout
+            for id in fold.ids
+        ]
+        
+        excess_ids = [
+            id
+            for fold in self.excess if self.excess
+            for id in fold.ids
+        ]
 
         # Create DataFrame
         df = pd.DataFrame(
@@ -378,6 +370,8 @@ class EvaluationResult:
                 "prediction": np.around(all_probabilities).astype(int),
                 "label": all_labels,
                 "id": all_ids,
+                "set": ['holdout' if id in holdout_ids else "excess" if id in excess_ids else "" for id in all_ids],
+                
             }
         )
 
@@ -392,6 +386,7 @@ class EvaluationResult:
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
             "id": [("draw_count", "size")],  # Count occurrences of each id
+            "set": [("first", "first")],
         }
         sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
@@ -447,23 +442,26 @@ class BootstrapResult:
         for eval_result in self.iteration_results:
             test_folds = eval_result.test
             holdout_folds = eval_result.holdout if eval_result.holdout else []
+            excess_folds = eval_result.excess if eval_result.excess else []
 
             all_probabilities.extend(
                 [
                     probability[1]  # Assuming probability exists for each binary class
-                    for fold in test_folds + holdout_folds
+                    for fold in test_folds + holdout_folds + excess_folds
                     for probability in fold.probabilities
                 ]
             )
 
             all_labels.extend(
-                [label for fold in test_folds + holdout_folds for label in fold.labels]
+                [label for fold in test_folds + holdout_folds + excess_folds for label in fold.labels]
             )
 
             all_ids.extend(
-                [id for fold in test_folds + holdout_folds for id in fold.ids]
+                [id for fold in test_folds + holdout_folds + excess_folds for id in fold.ids]
             )
-
+            
+            holdout_ids = [id for fold in holdout_folds for id in fold.ids]
+                        
         # Create DataFrame
         df = pd.DataFrame(
             {
@@ -472,6 +470,7 @@ class BootstrapResult:
                 "prediction": np.around(all_probabilities).astype(int),
                 "label": all_labels,
                 "id": all_ids,
+                "set": ['holdout' if id in holdout_ids else "" for id in all_ids]
             }
         )
 
@@ -486,6 +485,7 @@ class BootstrapResult:
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
             "id": [("draw_count", "size")],  # Count occurrences of each id
+            "set": [("first", "first")],
         }
         sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
@@ -572,30 +572,16 @@ class BootstrapResult:
         )
 
     @cached_property
-    def average_test_local_case_explanations(self):
+    def average_test_local_explanations(self):
         return self.get_aggregated_attribute(
-            "average_test_local_case_explanations",
+            "average_test_local_explanations",
             agg_func=self.aggregate_local_explanations,
         )
 
     @cached_property
-    def average_test_local_control_explanations(self):
+    def average_holdout_local_explanations(self):
         return self.get_aggregated_attribute(
-            "average_test_local_control_explanations",
-            agg_func=self.aggregate_local_explanations,
-        )
-
-    @cached_property
-    def average_holdout_local_case_explanations(self):
-        return self.get_aggregated_attribute(
-            "average_holdout_local_case_explanations",
-            agg_func=self.aggregate_local_explanations,
-        )
-
-    @cached_property
-    def average_holdout_local_control_explanations(self):
-        return self.get_aggregated_attribute(
-            "average_holdout_local_control_explanations",
+            "average_holdout_local_explanations",
             agg_func=self.aggregate_local_explanations,
         )
 

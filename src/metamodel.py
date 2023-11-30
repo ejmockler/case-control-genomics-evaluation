@@ -324,7 +324,6 @@ def main(config):
 
 
 if __name__ == "__main__":
-    # TODO replace notebook code with src imports
     ray.shutdown()
     main(config)
     clearHistory = True

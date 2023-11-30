@@ -26,12 +26,14 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
     resolvedGenotypeIDs = set()
+    # iterate clinical sample IDs
     for id in tqdm(genotypeIDs, unit="id"):
         if id in config["sampling"]["sequesteredIDs"]:
             continue
+        # iterate genotype samples
         for j, column in enumerate(columns):
             matched = False
-            if column == id:
+            if (column in id or id in column) and (len(column) > 3 and len(id) > 3):
                 matched = True
             else:
                 # check for compound sample IDs
@@ -53,31 +55,33 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
             if matched:
                 if column in config["sampling"]["sequesteredIDs"] or id in config["sampling"]["sequesteredIDs"]:
                     break
-                # implement allele model
-                genotypeDict[f"{column}"] = [
-                    (
-                        np.sum(
-                            [
-                                int(allele)
-                                for allele in genotype.replace("'", "").split("/")
-                            ]
-                        )# split by allele delimiter
-                        if not config["vcfLike"]["binarize"]
-                        else np.clip(
-                            np.sum(
-                                [
-                                    int(allele)
-                                    for allele in genotype.replace("'", "").split("/")
-                                ]
-                            ),
-                            a_max=1,
-                            a_min=0,
-                        )
-                    )
-                    if str(genotype).isdigit() or (isinstance(genotype, Iterable) and any(char.isdigit() for char in genotype))
-                    else np.nan
-                    for genotype in values[:, j]
-                ]
+                processed_genotypes = []
+                for genotype in values[:, j]:
+                    alleles = genotype.replace("'", "").split("/") if isinstance(genotype, str) else []
+
+                    if config["vcfLike"]["binarize"]:
+                        # Binarize logic
+                        result = np.clip(np.sum([int(allele) for allele in alleles]), a_min=0, a_max=1)
+
+                    elif config["vcfLike"]["zygosity"]:
+                        # Zygosity logic
+                        if all(allele == "0" for allele in alleles):
+                            result = 0
+                        elif all(allele != "0" for allele in alleles):
+                            result = 2
+                        else:
+                            result = 1
+
+                    else:
+                        # Default case (sum of alleles)
+                        if str(genotype).isdigit() or (isinstance(genotype, Iterable) and any(char.isdigit() for char in genotype)):
+                            result = np.sum([int(allele) for allele in alleles])
+                        else:
+                            result = np.nan
+
+                    processed_genotypes.append(result)
+
+                genotypeDict[f"{column}"] = processed_genotypes
                 columns = np.delete(columns, j)
                 values = np.delete(values, j, axis=1)
                 resolvedGenotypeIDs.update({id})
@@ -88,7 +92,6 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
     return genotypeDict, missingGenotypeIDs, resolvedGenotypeIDs
 
 
-@task
 def aggregateIntoGenes(
     genotypeDataframe: pd.DataFrame,
     config,
@@ -207,6 +210,7 @@ def prepareDatasets(
         axis=1,
     )
     caseIDs = caseGenotypes.columns
+    controlIDs = controlGenotypes.columns
 
     excessIDs, crossValGenotypeIDs = [], []
     holdoutExcessIDs, holdoutTestIDs = [], []
@@ -275,6 +279,7 @@ def prepareDatasets(
         "excessMajorIndex": np.array(excessIDs),
         "excessMajorLabels": [1 if id in caseIDs else 0 for id in (excessIDs)],
         "excessMajorSamples": scaler.fit_transform(excessMajorSamples if not excessMajorSamples.empty else [[]]).transpose(),
+        "excessMajorSetName": "excess case" if all([id in caseIDs for id in excessIDs]) else "excess control" if all([id in controlIDs for id in controlIDs]) else "mixed excess",
         "variantIndex": variantIndex,
     }
     if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:
@@ -475,7 +480,7 @@ def processInputFiles(config):
     ]
 
     print(
-        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])} or above {'{:.3%}'.format(config['vcfLike']['maxAlleleFrequency'])}"
+        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency above {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])} or below {'{:.3%}'.format(config['vcfLike']['maxAlleleFrequency'])}"
     )
     print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
     
