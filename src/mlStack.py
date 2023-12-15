@@ -89,7 +89,11 @@ def main(
     # for args in bootstrap_args:
     #     results.append(bootstrap(*args))
 
-    results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+    results = None
+    try:
+        results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+    except:
+        print("Error during bootstrap, out of samples?")
     classificationResults = ClassificationResults(modelResults=results)
 
     # TODO recover existing runs into results dataclass

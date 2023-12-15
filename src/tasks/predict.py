@@ -364,6 +364,7 @@ def classify(
         verbose=(True if runNumber == 0 else False),
         config=config
     )
+    if embedding is None: raise Exception("No samples found in embedding.")
 
     clinicalIDs = list()
 
@@ -482,20 +483,20 @@ def classify(
                 config=config,
             )
             gc.collect()
-        if modelResults.excess:
-            excessPlotSubtitle = f"""
-                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
-                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+        # if modelResults.excess:
+        #     excessPlotSubtitle = f"""
+        #         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
+        #         Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-                {len(embedding['excessMajorLabels'])} {modelResults.excess[0].set} samples @ {'{:.1%}'.format(modelResults.average_excess_accuracy)} accuracy"""
-            trackBootstrapVisualizations(
-                runID,
-                excessPlotSubtitle,
-                model.__class__.__name__,
-                modelResults,
-                excess=True,
-                config=config,
-            )
+        #         {len(embedding['excessMajorLabels'])} {modelResults.excess[0].set} samples @ {'{:.1%}'.format(modelResults.average_excess_accuracy)} accuracy"""
+        #     trackBootstrapVisualizations(
+        #         runID,
+        #         excessPlotSubtitle,
+        #         model.__class__.__name__,
+        #         modelResults,
+        #         excess=True,
+        #         config=config,
+        #     )
 
         trackBootstrapVisualizations(
             runID,
@@ -527,20 +528,24 @@ def bootstrap(
         config["sampling"]["lastIteration"],
         config["sampling"]["bootstrapIterations"],
     ):
-        # update results for every bootstrap iteration
-        bootstrap.iteration_results.append(
-            classify(
-                runNumber,
-                model,
-                hyperParameterSpace,
-                genotypeData,
-                clinicalData,
-                innerCvIterator,
-                outerCvIterator,
-                config,
-                track,
+        try:
+            # update results for every bootstrap iteration
+            bootstrap.iteration_results.append(
+                classify(
+                    runNumber,
+                    model,
+                    hyperParameterSpace,
+                    genotypeData,
+                    clinicalData,
+                    innerCvIterator,
+                    outerCvIterator,
+                    config,
+                    track,
+                )
             )
-        )
+        except Exception as e:
+            print("Error in bootstrap iteration " + str(runNumber) + f"{e}")
+            return None
         gc.collect()
 
     return bootstrap

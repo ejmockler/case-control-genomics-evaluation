@@ -22,10 +22,11 @@ def filterTable(table, filterString):
 
 
 @task()
-def applyAlleleModel(values, columns, genotypeIDs, config):
+def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
     resolvedGenotypeIDs = set()
+    seenSampleIDs = set()
     # iterate clinical sample IDs
     for id in tqdm(genotypeIDs, unit="id"):
         if id in config["sampling"]["sequesteredIDs"]:
@@ -33,7 +34,8 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
         # iterate genotype samples
         for j, column in enumerate(columns):
             matched = False
-            if (column in id or id in column) and (len(column) > 3 and len(id) > 3):
+            if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in genotypeSampleIDmap or genotypeSampleIDmap[id] not in seenSampleIDs):
+                if id in genotypeSampleIDmap: seenSampleIDs.update(genotypeSampleIDmap[id])  # prevent duplicate genotypes from clinical data
                 matched = True
             else:
                 # check for compound sample IDs
@@ -68,6 +70,8 @@ def applyAlleleModel(values, columns, genotypeIDs, config):
                         if all(allele == "0" for allele in alleles):
                             result = 0
                         elif all(allele != "0" for allele in alleles):
+                            result = 2
+                        elif any(int(allele) > 1 for allele in alleles):
                             result = 2
                         else:
                             result = 1
@@ -119,7 +123,7 @@ def aggregateIntoGenes(
 def load(config):
     clinicalData = pd.read_excel(
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
-    ).drop_duplicates(subset=config["clinicalTable"]["subjectIdColumn"])
+    )
     externalSamples = [
         pd.read_csv(path, sep="\t", index_col=idColumn)
         for path, idColumn in zip(
@@ -216,6 +220,7 @@ def prepareDatasets(
     holdoutExcessIDs, holdoutTestIDs = [], []
     trainIDs = balancedMajorIDs + minorIDs
     holdoutIDs = holdoutBalancedMajorIDs + holdoutMinorIDs
+    
     for label in tqdm(allGenotypes.columns, desc="Matching IDs", unit="ID"):
         for setType in ["holdout", "crossval"]:
             if (
@@ -285,23 +290,26 @@ def prepareDatasets(
     if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:
         holdoutSamples = allGenotypes.loc[:, holdoutTestIDs]
         excessHoldoutSamples = allGenotypes.loc[:, holdoutExcessIDs]
-        embedding = {
-            **embedding,
-            **{
-                "holdoutSampleIndex": np.array(holdoutTestIDs),
-                "holdoutLabels": np.array(
-                    [1 if id in holdoutCaseIDs else 0 for id in holdoutTestIDs]
-                ),
-                "holdoutSamples": scaler.fit_transform(holdoutSamples).transpose(),
-                "excessHoldoutMajorIndex": np.array(holdoutExcessIDs),
-                "excessHoldoutMajorLabels": [
-                    1 if id in holdoutCaseIDs else 0 for id in holdoutExcessIDs
-                ],
-                "excessHoldoutMajorSamples": scaler.fit_transform(
-                    excessHoldoutSamples
-                ).transpose(),
-            },
-        }
+        try:
+            embedding = {
+                **embedding,
+                **{
+                    "holdoutSampleIndex": np.array(holdoutTestIDs),
+                    "holdoutLabels": np.array(
+                        [1 if id in holdoutCaseIDs else 0 for id in holdoutTestIDs]
+                    ),
+                    "holdoutSamples": scaler.fit_transform(holdoutSamples).transpose(),
+                    "excessHoldoutMajorIndex": np.array(holdoutExcessIDs),
+                    "excessHoldoutMajorLabels": [
+                        1 if id in holdoutCaseIDs else 0 for id in holdoutExcessIDs
+                    ],
+                    "excessHoldoutMajorSamples": scaler.fit_transform(
+                        excessHoldoutSamples
+                    ).transpose(),
+                },
+            }
+        except ValueError as e:
+            print(e)
     return embedding
 
 
@@ -346,6 +354,7 @@ def processInputFiles(config):
         )
     ]
 
+    genotypeSampleIDmap = {id: filteredClinicalData.loc[id, config["clinicalTable"]["subjectIdColumn"]] for id in filteredClinicalData.index.tolist()}
     caseIDs = caseIDsMask[caseIDsMask].index.to_numpy()
     controlIDs = controlIDsMask[controlIDsMask].index.to_numpy()
 
@@ -398,6 +407,7 @@ def processInputFiles(config):
         unmapped(filteredVCF.to_numpy()),
         unmapped(filteredVCF.columns.to_numpy()),
         genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
+        genotypeSampleIDmap=unmapped(genotypeSampleIDmap),
         config=unmapped(config),
     )
 
@@ -419,6 +429,7 @@ def processInputFiles(config):
             unmapped(filteredVCF.to_numpy()),
             unmapped(filteredVCF.columns.to_numpy()),
             genotypeIDs=[IDs for IDs in (holdoutCaseIDs, holdoutControlIDs)],
+            genotypeSampleIDmap=unmapped(genotypeSampleIDmap),
             config=unmapped(config),
         )
         (

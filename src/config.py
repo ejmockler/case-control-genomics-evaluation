@@ -11,9 +11,9 @@ config = {
         "aggregateGenesBy": None,  # aggregate variants by mean or sum across genes, or bin variants by zygosity if input genotypes are VCF-like. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
-        "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
+        "compoundSampleMetaIdStartIndex": 2,  # index of clinical ID in compound sample ID
         "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency,
-        "zygosity": True,  # bin variants by zygosity (homozygous, heterozygous, or both)
+        "zygosity": False,  # bin variants by zygosity (homozygous, heterozygous, or both)
         "minAlleleFrequency": 0.005,  # filter out variants with allele frequency less than this
         "maxAlleleFrequency": 1.00,  # filter out variants with allele frequency greater than this
         "maxVariants": None, # set max number of variants for control; set to None to disable
@@ -22,9 +22,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUPs variants, well-classified cases, Caucasian individuals",  # name of the experiment
+        "name": "NUPs variants, Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-wellClassifiedLR-NUPs-zygosity-0.005MAF",
+        "project": "ALS-NUPs-variant-0.005MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -36,14 +36,13 @@ config = {
         "controlLabels": [
             "Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
-        "caseLabels": [],  # "ALS Spectrum MND"
+        "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
-        "filters": "`Sample Tissue Source`=='Blood' & pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
+        "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
         "path": [
-            "../adhoc analysis/wellPredictedEuroCasesIDs.csv",
             "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
             # "../adhoc analysis/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
             "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
@@ -51,7 +50,6 @@ config = {
             "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
         ],  # external sample table
         "label": [
-            "case",
             "control",
             # "case",
             "case",
@@ -60,14 +58,12 @@ config = {
         ],  # case | control
         "setType": [
             "crossval",
-            "crossval",
             # "crossval",
             "holdout",
             "holdout",
             "holdout",
         ],
         "idColumn": [
-            "id",
             "Sample name",
             # "id",
             "ExternalSampleId",
@@ -75,7 +71,6 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
-            "",
             "`Superpopulation code`=='EUR'",
             # "`testLabel`==1",
             "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",

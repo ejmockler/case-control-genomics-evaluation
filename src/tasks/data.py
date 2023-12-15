@@ -493,9 +493,9 @@ class BootstrapResult:
         sampleResultsDataframe.columns = [
             "_".join(col) for col in sampleResultsDataframe.columns
         ]
-        # Rename 'label_first' back to 'label' and 'id_draw_count' to 'draw_count'
+        
         sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label", "id_draw_count": "draw_count"}
+            columns={"label_first": "label", "id_draw_count": "draw_count", "set_first": "set"}
         )
 
         return sampleResultsDataframe

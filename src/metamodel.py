@@ -68,7 +68,11 @@ def getBaselineFeatureResults(
         )
         for model, hyperParameterSpace in list(modelStack.items())
     ]
-    results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+    try:
+        results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
+    except:
+        print("Error in parallel execution of baseline feature results")
+        raise
 
     pooledBaselineFeatureResults = {}
     baselineFeatureResultsByModel = {}
