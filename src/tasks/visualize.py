@@ -896,7 +896,7 @@ def trackProjectVisualizations(classificationResults, config):
     
     pooledSampleResults = poolSampleResults(concatenatedSampleResults)
 
-    output_path = f"projects/{config['tracking']['project']}/pooledSampleResults.csv"
+    output_path = f"projects/{config['tracking']['project']}/pooledSampleResults_{config['tracking']['project']}.csv"
     np.set_printoptions(threshold=np.inf)
     pooledSampleResults.to_csv(output_path)
 

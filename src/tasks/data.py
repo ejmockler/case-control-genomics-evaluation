@@ -158,14 +158,29 @@ class FoldResult(SampleData):
     
     def append_allele_frequencies(self, genotypeData: GenotypeData):
         if isinstance(self.global_feature_explanations, pd.DataFrame) and not self.global_feature_explanations.empty:
+            # Determine target data based on 'self.set'
             targetCaseData = genotypeData.case.genotype if self.set == 'test' else genotypeData.holdout_case.genotype
             targetControlData = genotypeData.control.genotype if self.set == 'test' else genotypeData.holdout_control.genotype
+
+            # Append MAF (Minor Allele Frequencies)
             self.global_feature_explanations[f'{self.set}_case_maf'] = self.global_feature_explanations.index.map(
                 genotypeData.get_allele_frequencies(
-                    targetCaseData[self.ids[np.where(self.labels==1)]]).to_dict())
+                    targetCaseData[self.ids[np.where(self.labels == 1)]]).to_dict())
             self.global_feature_explanations[f'{self.set}_control_maf'] = self.global_feature_explanations.index.map(
                 genotypeData.get_allele_frequencies(
-                    targetControlData[self.ids[np.where(self.labels==0)]]).to_dict())
+                    targetControlData[self.ids[np.where(self.labels == 0)]]).to_dict())
+
+            # Check for zygosity configuration and calculate RAF (Rare Allele Frequencies)
+            if config['vcfLike']['zygosity']:
+                # Assuming zygosity is coded as 0, 1, 2 (homozygous reference, heterozygous, homozygous and/or rare variant)
+                # Calculate frequency of homozygous variant (zygosity == 2)
+                case_raf = (targetCaseData[self.ids[np.where(self.labels == 1)]] == 2).mean(axis=1)
+                control_raf = (targetControlData[self.ids[np.where(self.labels == 0)]] == 2).mean(axis=1)
+
+                # Append RAF to the global feature explanations DataFrame
+                self.global_feature_explanations[f'{self.set}_case_raf'] = case_raf
+                self.global_feature_explanations[f'{self.set}_control_raf'] = control_raf
+
 
     @cached_property
     def local_explanations(self):
@@ -259,14 +274,17 @@ class EvaluationResult:
                 concatenated["holdout_case_maf"] = 0
             if "holdout_control_maf" not in concatenated.columns:
                 concatenated["holdout_control_maf"] = 0
-            return concatenated.groupby("feature_name").agg(
-                {
+            aggDict = {
                     "feature_importances": ["mean", "std"],
                     "test_case_maf": ["mean", "std"],
                     "test_control_maf": ["mean", "std"],
                     "holdout_case_maf": ["mean", "std"],
                     "holdout_control_maf": ["mean", "std"],
-                },
+                }
+            if config['vcfLike']['zygosity']:
+                aggDict.update({"test_case_raf": ["mean", "std"], "test_control_raf": ["mean", "std"], "holdout_case_raf": ["mean", "std"], "holdout_control_raf": ["mean", "std"]})
+            return concatenated.groupby("feature_name").agg(
+                aggDict
             )
 
     @cached_property
@@ -548,21 +566,42 @@ class BootstrapResult:
         concatenated_means = pd.concat(means_list, axis=1)
         concatenated_variances = pd.concat(stds_list, axis=1)**2
         
-        columns = ["feature_importances", "test_case_maf", "test_control_maf", "holdout_case_maf", "holdout_control_maf"]
+        # Initial columns list
+        columns = [
+            "feature_importances", 
+            "test_case_maf", 
+            "test_control_maf", 
+            "holdout_case_maf", 
+            "holdout_control_maf"
+        ]
+
+        # Add RAF columns if they are present
+        raf_columns = [
+            "test_case_raf", 
+            "test_control_raf", 
+            "holdout_case_raf", 
+            "holdout_control_raf"
+        ]
+        for raf_col in raf_columns:
+            if raf_col in concatenated_means.columns or raf_col in concatenated_variances.columns:
+                columns.append(raf_col)
+
+        # Aggregating data
         results = []
         keys = []
-        
+
         for column in columns:
             aggregated_values = aggregate_data(column)
             results.extend(aggregated_values)
-            
+
             if column == "feature_importances":
                 keys.extend([f"mean_{column}", f"std_{column}", f"min_{column}", f"max_{column}", f"median_{column}"])
             else:
                 keys.extend([f"mean_{column}", f"std_{column}"])
-                
+
         result = pd.concat(results, axis=1, keys=keys)
         return result
+
 
 
     @cached_property

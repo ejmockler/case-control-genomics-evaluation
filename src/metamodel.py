@@ -246,13 +246,13 @@ def main(config):
         
         if countSuffix <= metaconfig["tracking"]["lastIteration"]:
             sampleResultsByModel = {
-                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults.csv", index_col="id") for model in modelStack.keys()
+                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults_{model.__class__.__name__}_{config['tracking']['project']}.csv", index_col="id") for model in modelStack.keys()
             }
             for dataframe in sampleResultsByModel.values():
                 dataframe['probabilities_list'] = dataframe['probabilities_list'].apply(lambda x: np.array(eval(x))) # convert string representation of array to numpy array
-            pooledResults = pd.read_csv(f"projects/{config['tracking']['project']}/pooledSampleResults.csv", index_col="id")
+            pooledResults = pd.read_csv(f"projects/{config['tracking']['project']}/pooledSampleResults_{config['tracking']['project']}.csv", index_col="id")
             
-            if os.path.exists(f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults.csv"):
+            if os.path.exists(f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults_{config['tracking']['project']}.csv"):
                 config = sequesterOutlierSamples(sampleResultsByModel, pooledResults)
                 countSuffix += 1
                 continue
@@ -288,35 +288,35 @@ def main(config):
         
         # Store pooled results
         pooledBaselineFeatureResults.to_csv(
-            f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults.csv"
+            f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults_{config['tracking']['project']}.csv"
         )
         pd.concat([pooledSamplePerplexities, pooledResults[['label', 'accuracy_mean', 'accuracy_std', 'draw_count']]], axis=1).to_csv(
-            f"projects/{config['tracking']['project']}/pooledSamplePerplexities.csv"
+            f"projects/{config['tracking']['project']}/pooledSamplePerplexities_{config['tracking']['project']}.csv"
         )
         pooledAccurateSamples.to_csv(
-            f"projects/{config['tracking']['project']}/pooledAccurateSamples.csv"
+            f"projects/{config['tracking']['project']}/pooledAccurateSamples_{config['tracking']['project']}.csv"
         )
         pooledDiscordantSamples.to_csv(
-            f"projects/{config['tracking']['project']}/pooledDiscordantSamples.csv"
+            f"projects/{config['tracking']['project']}/pooledDiscordantSamples_{config['tracking']['project']}.csv"
         )
         
         sampleResultsByModel = {
-                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults.csv", index_col="id") for model in modelStack.keys()
+                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults_{model.__class__.__name__}_{config['tracking']['project']}.csv", index_col="id") for model in modelStack.keys()
             }
         
         # Store results for each model
         for modelName in relativePerplexitiesByModel.keys():
             baselineFeatureResultsByModel[modelName].to_csv(
-                f"projects/{config['tracking']['project']}/{modelName}/baselineFeatureResults.csv"
+                f"projects/{config['tracking']['project']}/{modelName}/baselineFeatureResults_{modelName}_{config['tracking']['project']}.csv"
             )
             pd.concat([relativePerplexitiesByModel[modelName], sampleResultsByModel[modelName][['label', 'accuracy_mean', 'accuracy_std', 'draw_count']]], axis=1).to_csv(
-                f"projects/{config['tracking']['project']}/{modelName}/relativePerplexities.csv"
+                f"projects/{config['tracking']['project']}/{modelName}/relativePerplexities_{modelName}_{config['tracking']['project']}.csv"
             )
             accurateSamplesByModel[modelName].to_csv(
-                f"projects/{config['tracking']['project']}/{modelName}/accurateSamples.csv"
+                f"projects/{config['tracking']['project']}/{modelName}/accurateSamples_{modelName}_{config['tracking']['project']}.csv"
             )
             discordantSamplesByModel[modelName].to_csv(
-                f"projects/{config['tracking']['project']}/{modelName}/discordantSamples.csv"
+                f"projects/{config['tracking']['project']}/{modelName}/discordantSamples_{modelName}_{config['tracking']['project']}.csv"
             )
             
         # Check for new well-classified samples. If not present, stop iterations.

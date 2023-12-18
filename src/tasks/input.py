@@ -34,8 +34,14 @@ def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
         # iterate genotype samples
         for j, column in enumerate(columns):
             matched = False
-            if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in genotypeSampleIDmap or genotypeSampleIDmap[id] not in seenSampleIDs):
+            subIDs = column.split(config["vcfLike"]["compoundSampleIdDelimiter"])
+            if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in genotypeSampleIDmap or genotypeSampleIDmap[id] not in seenSampleIDs or any([subID in genotypeSampleIDmap.values() for subID in subIDs])):
                 if id in genotypeSampleIDmap: seenSampleIDs.update(genotypeSampleIDmap[id])  # prevent duplicate genotypes from clinical data
+                else:
+                    for subID in subIDs:  # handle case where only external subject ID is available
+                        if subID in genotypeSampleIDmap.values():
+                            seenSampleIDs.update(subID)
+                            break
                 matched = True
             else:
                 # check for compound sample IDs
@@ -60,28 +66,26 @@ def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
                 processed_genotypes = []
                 for genotype in values[:, j]:
                     alleles = genotype.replace("'", "").split("/") if isinstance(genotype, str) else []
-
-                    if config["vcfLike"]["binarize"]:
-                        # Binarize logic
-                        result = np.clip(np.sum([int(allele) for allele in alleles]), a_min=0, a_max=1)
-
-                    elif config["vcfLike"]["zygosity"]:
-                        # Zygosity logic
-                        if all(allele == "0" for allele in alleles):
-                            result = 0
-                        elif all(allele != "0" for allele in alleles):
-                            result = 2
-                        elif any(int(allele) > 1 for allele in alleles):
-                            result = 2
+                    if all([allele.isdigit() for allele in alleles]):
+                        if config["vcfLike"]["binarize"]:
+                            # Binarize logic
+                            result = np.clip(np.sum([int(allele) for allele in alleles]), a_min=0, a_max=1)
+                        elif config["vcfLike"]["zygosity"]:
+                            # Zygosity logic
+                            if all(allele == "0" for allele in alleles):
+                                result = 0
+                            elif all(allele != "0" for allele in alleles):
+                                result = 2
+                            # elif any(int(allele) > 1 for allele in alleles):
+                            #     result = 2
+                            else:
+                                result = 1
                         else:
-                            result = 1
-
+                            # Default case (sum of alleles)
+                            if all([allele.isdigit() for allele in alleles]):
+                                result = np.sum([int(allele) for allele in alleles])
                     else:
-                        # Default case (sum of alleles)
-                        if str(genotype).isdigit() or (isinstance(genotype, Iterable) and any(char.isdigit() for char in genotype)):
-                            result = np.sum([int(allele) for allele in alleles])
-                        else:
-                            result = np.nan
+                        result = np.nan
 
                     processed_genotypes.append(result)
 
@@ -476,7 +480,15 @@ def processInputFiles(config):
 
     resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
     allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF).dropna().astype(np.int8)
-     
+    
+    if isinstance(allGenotypes.index, pd.MultiIndex):
+        # Manually check for nulls in each level of the MultiIndex
+        non_null_indices = ~allGenotypes.index.to_frame().isnull().any(axis=1)
+        allGenotypes = allGenotypes[non_null_indices]
+    else:
+        # For a standard index, retain rows with non-null indices
+        allGenotypes = allGenotypes[allGenotypes.index.notnull()]
+        
     # Calculate the allele frequencies
     allele_frequencies = (
         allGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
