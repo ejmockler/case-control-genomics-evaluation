@@ -76,8 +76,8 @@ def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
                                 result = 0
                             elif all(allele != "0" for allele in alleles):
                                 result = 2
-                            # elif any(int(allele) > 1 for allele in alleles):
-                            #     result = 2
+                            elif any(int(allele) > 1 for allele in alleles):
+                                result = 2
                             else:
                                 result = 1
                         else:
@@ -164,18 +164,30 @@ def load(config):
     )
 
 
-def balanceCaseControlDatasets(caseGenotypes, controlGenotypes):
+def balanceCaseControlDatasets(caseGenotypes, controlGenotypes, sample_frequencies, doBalance=True):
     caseIDs = caseGenotypes.columns
     controlIDs = controlGenotypes.columns
+    
+    # If balance is False, return all IDs without balancing
+    if not doBalance:
+        return caseIDs, controlIDs, [], sample_frequencies
+    
     # store number of cases & controls
     caseControlCounts = [len(caseIDs), len(controlIDs)]
     # determine which has more samples
     labeledIDs = [caseIDs, controlIDs]
     majorIDs = labeledIDs[np.argmax(caseControlCounts)]
     minorIDs = labeledIDs[np.argmin(caseControlCounts)]
-    # downsample larger group to match smaller group
+    
+    # Calculate weights inversely proportional to frequency
+    weights = np.array([1.0 / (sample_frequencies[id] + 1) for id in majorIDs])
+    
+    # Normalize the weights so that they sum to 1 (required for probability distribution)
+    weights /= weights.sum()
+    
+    # Downsample larger group to match smaller group
     majorIndex = np.random.choice(
-        np.arange(len(majorIDs)), min(caseControlCounts), replace=False
+        np.arange(len(majorIDs)), min(caseControlCounts), replace=False, p=weights
     )
 
     excessMajorIDs, balancedMajorIDs = [], []
@@ -185,7 +197,10 @@ def balanceCaseControlDatasets(caseGenotypes, controlGenotypes):
         else:
             excessMajorIDs.append(id)
 
-    return minorIDs, balancedMajorIDs, excessMajorIDs
+    for id in balancedMajorIDs + list(minorIDs):
+        sample_frequencies[id] += 1
+
+    return minorIDs, balancedMajorIDs, excessMajorIDs, sample_frequencies
 
 
 @task()
@@ -194,20 +209,23 @@ def prepareDatasets(
     controlGenotypes,
     holdoutCaseGenotypes,
     holdoutControlGenotypes,
+    sampleFrequencies,
     verbose=True,
     config=config
 ):
-    minorIDs, balancedMajorIDs, excessMajorIDs = balanceCaseControlDatasets(
-        caseGenotypes, controlGenotypes
+    minorIDs, balancedMajorIDs, excessMajorIDs, sampleFrequencies = balanceCaseControlDatasets(
+        caseGenotypes, controlGenotypes, sampleFrequencies
     )
 
+    # Don't balance holdout samples to evaluate real-world specificity
     (
         holdoutMinorIDs,
         holdoutBalancedMajorIDs,
         holdoutExcessMajorIDs,
-    ) = balanceCaseControlDatasets(holdoutCaseGenotypes, holdoutControlGenotypes)
+        sampleFrequencies
+    ) = balanceCaseControlDatasets(holdoutCaseGenotypes, holdoutControlGenotypes, sampleFrequencies, doBalance=False)
     holdoutCaseIDs = holdoutCaseGenotypes.columns
-
+  
     allGenotypes = pd.concat(
         [
             caseGenotypes,
@@ -222,8 +240,8 @@ def prepareDatasets(
 
     excessIDs, crossValGenotypeIDs = [], []
     holdoutExcessIDs, holdoutTestIDs = [], []
-    trainIDs = balancedMajorIDs + minorIDs
-    holdoutIDs = holdoutBalancedMajorIDs + holdoutMinorIDs
+    trainIDs = np.hstack([balancedMajorIDs, minorIDs])
+    holdoutIDs = np.hstack([holdoutBalancedMajorIDs, holdoutMinorIDs])
     
     for label in tqdm(allGenotypes.columns, desc="Matching IDs", unit="ID"):
         for setType in ["holdout", "crossval"]:
@@ -287,7 +305,7 @@ def prepareDatasets(
         ).transpose(),  # samples are now rows (samples, variants)
         "excessMajorIndex": np.array(excessIDs),
         "excessMajorLabels": [1 if id in caseIDs else 0 for id in (excessIDs)],
-        "excessMajorSamples": scaler.fit_transform(excessMajorSamples if not excessMajorSamples.empty else [[]]).transpose(),
+        "excessMajorSamples": scaler.fit_transform(excessMajorSamples).transpose() if not excessMajorSamples.empty else np.array([]),
         "excessMajorSetName": "excess case" if all([id in caseIDs for id in excessIDs]) else "excess control" if all([id in controlIDs for id in controlIDs]) else "mixed excess",
         "variantIndex": variantIndex,
     }
@@ -309,12 +327,13 @@ def prepareDatasets(
                     ],
                     "excessHoldoutMajorSamples": scaler.fit_transform(
                         excessHoldoutSamples
-                    ).transpose(),
+                        ).transpose() if not excessHoldoutSamples.empty else np.array([]),
                 },
             }
         except ValueError as e:
             print(e)
-    return embedding
+            raise e
+    return sampleFrequencies, embedding
 
 
 def createGenotypeDataframe(genotype_dict, filteredVCF):

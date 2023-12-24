@@ -348,6 +348,7 @@ def classify(
     clinicalData,
     innerCvIterator,
     outerCvIterator,
+    sample_frequencies,
     config,
     track=True,
 ):
@@ -356,11 +357,12 @@ def classify(
     holdoutCaseGenotypes = genotypeData.holdout_case.genotype
     holdoutControlGenotypes = genotypeData.holdout_control.genotype
     
-    embedding = prepareDatasets(
+    sample_frequencies, embedding = prepareDatasets(
         caseGenotypes,
         controlGenotypes,
         holdoutCaseGenotypes,
         holdoutControlGenotypes,
+        sample_frequencies,
         verbose=(True if runNumber == 0 else False),
         config=config
     )
@@ -506,7 +508,7 @@ def classify(
             config=config,
         )
 
-    return modelResults
+    return sample_frequencies, modelResults
 
 
 @flow()
@@ -522,6 +524,7 @@ def bootstrap(
 ):
     gc.collect()
     bootstrap = BootstrapResult(model.__class__.__name__)
+    sampleFrequencies = {id: 0 for id in genotypeData.case.genotype.columns.tolist() + genotypeData.control.genotype.columns.tolist() + genotypeData.holdout_case.genotype.columns.tolist() + genotypeData.holdout_control.genotype.columns.tolist()}
     
     # parallelize with workflow engine in cluster environment
     for runNumber in range(
@@ -530,8 +533,7 @@ def bootstrap(
     ):
         try:
             # update results for every bootstrap iteration
-            bootstrap.iteration_results.append(
-                classify(
+            sampleFrequencies, iterationResults = classify(
                     runNumber,
                     model,
                     hyperParameterSpace,
@@ -539,10 +541,14 @@ def bootstrap(
                     clinicalData,
                     innerCvIterator,
                     outerCvIterator,
+                    sampleFrequencies,
                     config,
                     track,
                 )
+            bootstrap.iteration_results.append(
+                iterationResults
             )
+            pass
         except Exception as e:
             print("Error in bootstrap iteration " + str(runNumber) + f"{e}")
             return None

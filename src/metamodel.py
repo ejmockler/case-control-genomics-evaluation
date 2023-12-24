@@ -8,6 +8,7 @@ from prefect import flow, task
 from prefect_ray.task_runners import RayTaskRunner
 import numpy as np
 from numpy import array, float32  # to eval strings as arrays
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis 
 
 from sklearn.metrics import log_loss
 
@@ -44,16 +45,16 @@ def getBaselineFeatureResults(
     clinicalData,
     config,
 ):
-    selectedFeature = findBaselineFeature(genotypeData.case.genotype, genotypeData.control.genotype, genotypeData.holdout_case.genotype, genotypeData.holdout_control.genotype)
+    selectedFeatures = findBaselineFeatures(genotypeData.case.genotype, genotypeData.control.genotype, genotypeData.holdout_case.genotype, genotypeData.holdout_control.genotype)
     outerCvIterator = StratifiedKFold(
         n_splits=config["sampling"]["crossValIterations"], shuffle=False
     )
     innerCvIterator = outerCvIterator
     
-    genotypeData.case.genotype = genotypeData.case.genotype.loc[[selectedFeature]]
-    genotypeData.control.genotype = genotypeData.control.genotype.loc[[selectedFeature]]
-    genotypeData.holdout_case.genotype = genotypeData.holdout_case.genotype.loc[[selectedFeature]]
-    genotypeData.holdout_control.genotype = genotypeData.holdout_control.genotype.loc[[selectedFeature]]
+    genotypeData.case.genotype = genotypeData.case.genotype.loc[selectedFeatures]
+    genotypeData.control.genotype = genotypeData.control.genotype.loc[selectedFeatures]
+    genotypeData.holdout_case.genotype = genotypeData.holdout_case.genotype.loc[selectedFeatures]
+    genotypeData.holdout_control.genotype = genotypeData.holdout_control.genotype.loc[selectedFeatures]
 
     bootstrap_args = [
         (
@@ -81,7 +82,7 @@ def getBaselineFeatureResults(
         baselineFeatureResultsByModel[model.__class__.__name__] = modelResults.sample_results_dataframe
     pooledBaselineFeatureResults = poolSampleResults(pd.concat([df for df in baselineFeatureResultsByModel.values()]))
         
-    return pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeature
+    return pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeatures
 
 
 def perplexity(y_true, y_pred):
@@ -93,7 +94,7 @@ def perplexity(y_true, y_pred):
     return np.power(2, crossEntropy)
 
 
-def findBaselineFeature(caseGenotypes, controlGenotypes, holdoutCaseGenotypes, holdoutControlGenotypes):
+def findBaselineFeatures(caseGenotypes, controlGenotypes, holdoutCaseGenotypes, holdoutControlGenotypes):
     # Drop variant rows where any element is NaN in each DataFrame
     caseGenotypes = caseGenotypes.dropna()
     controlGenotypes = controlGenotypes.dropna()
@@ -110,19 +111,23 @@ def findBaselineFeature(caseGenotypes, controlGenotypes, holdoutCaseGenotypes, h
     controlGenotypes = controlGenotypes.loc[common_features]
     holdoutCaseGenotypes = holdoutCaseGenotypes.loc[common_features]
     holdoutControlGenotypes = holdoutControlGenotypes.loc[common_features]
+
+    # Combine case and control genotypes into a single dataset with labels
+    allGenotypes = pd.concat([caseGenotypes, controlGenotypes], axis=1)
+    labels = ["case"]*caseGenotypes.shape[1] + ["control"]*controlGenotypes.shape[1]  # Labels for LDA
     
-    # Calculate the mean of each feature for cases and controls
-    mean_cases = caseGenotypes.mean(axis=1)
-    mean_controls = controlGenotypes.mean(axis=1)
+    # Apply LDA
+    lda = LinearDiscriminantAnalysis(n_components=1)  # Assuming binary classification
+    lda.fit(allGenotypes.T, labels)  # Transpose to have features as columns
 
-    # Calculate the absolute difference in means for each feature
-    diff_means = abs(mean_cases - mean_controls)
+    # Identify the most important features
+    # LDA doesn't explicitly rank features, but you can look at the absolute coefficients
+    coefficients = pd.Series(lda.coef_[0], index=allGenotypes.index)
+    important_features = coefficients.abs().sort_values(ascending=False)
 
-    # Get the feature with the largest difference in means
-    selected_feature = diff_means.idxmax()
-
-    print("Selected feature for baseline perplexity: ", selected_feature)
-    return selected_feature
+    print("Most important features for distinguishing between cases and controls:")
+    print(important_features.head())  # Print or return the top 5% features
+    return important_features.iloc[:int(np.ceil(0.05 * len(important_features)))].index.tolist()
 
 
 
@@ -133,7 +138,7 @@ def measureIterations(
     genotypeData,
     clinicalData,
 ):
-    pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeature = getBaselineFeatureResults(
+    pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeatures = getBaselineFeatureResults(
         deepcopy(genotypeData),  # reduce dataframe attributes to baseline feature
         clinicalData,
         config,
@@ -162,7 +167,7 @@ def measureIterations(
             result_type="expand",
         )
 
-        relativePerplexities["all features"], relativePerplexities[f"{selectedFeature}"], relativePerplexities["relative"] = (new_cols[0], new_cols[1], new_cols[2])
+        relativePerplexities["all features"], relativePerplexities[f"{' | '.join([str(feature) for feature in selectedFeatures])}"], relativePerplexities["relative"] = (new_cols[0], new_cols[1], new_cols[2])
         
         discordantSamples = processedResults.loc[
             processedResults["accuracy_mean"] <= metaconfig["samples"]["discordantThreshold"],

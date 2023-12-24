@@ -860,7 +860,7 @@ def poolSampleResults(concatenatedResults):
         accuracy_std = pooled_std(group, 'accuracy_std', 'draw_count')
         draw_count_sum = group['draw_count'].sum()
         first_label_instance = group['label'].iloc[0]
-        first_set_instance = group['set'].iloc[0]
+        first_set_instance = group['holdout'].iloc[0]
         
         # Redetermine the most frequent prediction
         mode_prediction =  group['prediction_most_frequent'].mode()[0]
@@ -881,7 +881,7 @@ def poolSampleResults(concatenatedResults):
 
     # Convert results list to DataFrame
     pooledSampleResults = pd.DataFrame(pooled_results).set_index('id')
-    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent', 'first_set_instance': 'set'}, inplace=True)
+    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent', 'first_set_instance': 'holdout'}, inplace=True)
     
     return pooledSampleResults
 

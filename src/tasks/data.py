@@ -189,7 +189,7 @@ class FoldResult(SampleData):
             index=self.ids,
             columns=self.shap_explanation.feature_names,
         )
-        localCaseExplanationsDataframe.index.name = "sample_id"
+        localExplanationsDataframe.index.name = "sample_id"
         return localExplanationsDataframe
 
     def calculate_AUC(self):
@@ -388,7 +388,7 @@ class EvaluationResult:
                 "prediction": np.around(all_probabilities).astype(int),
                 "label": all_labels,
                 "id": all_ids,
-                "set": ['holdout' if id in holdout_ids else "excess" if id in excess_ids else "" for id in all_ids],
+                "holdout": [1 if id in holdout_ids else 0 for id in all_ids],
                 
             }
         )
@@ -404,7 +404,7 @@ class EvaluationResult:
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
             "id": [("draw_count", "size")],  # Count occurrences of each id
-            "set": [("first", "first")],
+            "holdout": [("first", "first")],
         }
         sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
@@ -416,9 +416,9 @@ class EvaluationResult:
 
         # Rename 'label_first' back to 'label'
         sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label", "id_draw_count": "draw_count"}
+            columns={"label_first": "label", "id_draw_count": "draw_count", "holdout_first": "holdout"}
         )
-        return sampleResultsDataframe
+        return sampleResultsDataframe.sort_index()
 
     @staticmethod
     def get_unique_samples(foldResults: Iterable[FoldResult]):
@@ -488,7 +488,7 @@ class BootstrapResult:
                 "prediction": np.around(all_probabilities).astype(int),
                 "label": all_labels,
                 "id": all_ids,
-                "set": ['holdout' if id in holdout_ids else "" for id in all_ids]
+                "holdout": [1 if id in holdout_ids else 0 for id in all_ids]
             }
         )
 
@@ -503,7 +503,7 @@ class BootstrapResult:
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
             "id": [("draw_count", "size")],  # Count occurrences of each id
-            "set": [("first", "first")],
+            "holdout": [("first", "first")],
         }
         sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
@@ -513,10 +513,10 @@ class BootstrapResult:
         ]
         
         sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label", "id_draw_count": "draw_count", "set_first": "set"}
+            columns={"label_first": "label", "id_draw_count": "draw_count", "holdout_first": "holdout"}
         )
 
-        return sampleResultsDataframe
+        return sampleResultsDataframe.sort_index()
 
     def get_aggregated_attribute(self, attribute_name, agg_func=None, level=0):
         if getattr(self.iteration_results[0], attribute_name) is None:
@@ -601,7 +601,6 @@ class BootstrapResult:
 
         result = pd.concat(results, axis=1, keys=keys)
         return result
-
 
 
     @cached_property
@@ -770,52 +769,6 @@ def serializeBootstrapResults(modelResult, sampleResults):
                 sampleResults[sampleID][1], modelResult["samples"][sampleID]
             )
     return sampleResults
-
-
-def serializeResultsDataframe(sampleResults):
-    for modelName in sampleResults:
-        for sampleID in sampleResults[modelName]:
-            # add accuracy
-            sampleResults[modelName][sampleID].append(
-                np.mean(
-                    np.mean(
-                        [
-                            (
-                                np.around(probability[1])
-                                if len(probability.shape) > 0
-                                else np.around(probability)
-                            )
-                            == sampleResults[sampleID][0]  # label index
-                            for probability in np.hstack(
-                                np.array(sampleResults[sampleID][1])
-                            )  # probability index
-                        ]
-                    ),
-                )
-            )
-
-    sampleResultsDataFrame = pd.DataFrame(
-        [
-            [sampleID, modelName, *sampleResults[modelName][sampleID]]
-            for sampleID in sampleResults[modelName]
-            for modelName in sampleResults
-        ],
-        columns=["id", "model", "label", "probability", "accuracy"],
-    )
-    sampleResultsDataFrame["meanProbability"] = sampleResultsDataFrame[
-        "probability"
-    ].map(
-        lambda x: np.mean(
-            np.array(x)[:, 1]
-            if np.array(x).ndim > 1 and np.array(x).shape[1] > 1
-            else np.mean(np.array(x))
-        )
-    )
-    sampleResultsDataFrame = sampleResultsDataFrame.set_index(
-        ["id", "model"], drop=False
-    )
-    np.set_printoptions(threshold=np.inf)
-    return sampleResultsDataFrame
 
 
 def processSampleResult(fold, k, sampleID, current, results):
