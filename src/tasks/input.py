@@ -29,8 +29,8 @@ def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
     seenSampleIDs = set()
     # iterate clinical sample IDs
     for id in tqdm(genotypeIDs, unit="id"):
-        if id in config["sampling"]["sequesteredIDs"]:
-            continue
+        # if id in config["sampling"]["sequesteredIDs"]:
+        #     continue
         # iterate genotype samples
         for j, column in enumerate(columns):
             matched = False
@@ -61,8 +61,8 @@ def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
                 ):
                     matched = any(idValue in delimitedColumn for idValue in delimitedID)
             if matched:
-                if column in config["sampling"]["sequesteredIDs"] or id in config["sampling"]["sequesteredIDs"]:
-                    break
+                # if column in config["sampling"]["sequesteredIDs"] or id in config["sampling"]["sequesteredIDs"]:
+                #     break
                 processed_genotypes = []
                 for genotype in values[:, j]:
                     alleles = genotype.replace("'", "").split("/") if isinstance(genotype, str) else []
@@ -391,7 +391,7 @@ def processInputFiles(config):
                     [
                         id
                         for id in filteredExternalSamples[i].index.to_numpy()
-                        if id not in config["sampling"]["sequesteredIDs"]
+                        # if id not in config["sampling"]["sequesteredIDs"]
                     ],
                 )
             elif label == config["clinicalTable"]["controlAlias"]:
@@ -400,7 +400,7 @@ def processInputFiles(config):
                     [
                         id
                         for id in filteredExternalSamples[i].index.to_numpy()
-                        if id not in config["sampling"]["sequesteredIDs"]
+                        # if id not in config["sampling"]["sequesteredIDs"]
                     ],
                 )
 
@@ -411,7 +411,7 @@ def processInputFiles(config):
                     [
                         id
                         for id in filteredExternalSamples[i].index.to_numpy()
-                        if id not in config["sampling"]["sequesteredIDs"]
+                        # if id not in config["sampling"]["sequesteredIDs"]
                     ],
                 )
             elif label == config["clinicalTable"]["controlAlias"]:
@@ -420,7 +420,7 @@ def processInputFiles(config):
                     [
                         id
                         for id in filteredExternalSamples[i].index.to_numpy()
-                        if id not in config["sampling"]["sequesteredIDs"]
+                        # if id not in config["sampling"]["sequesteredIDs"]
                     ],
                 )
 
@@ -478,10 +478,10 @@ def processInputFiles(config):
         "holdout controls": (missingHoldoutControlIDs, holdoutControlGenotypeDict),
     }.items():
         if len(genotypeDict) == 0: continue
-        sequesteredIDs = set(config["sampling"]["sequesteredIDs"]).intersection(
-            set(genotypeDict.keys())
-        )
-        IDs = set(IDs) - sequesteredIDs
+        # sequesteredIDs = set(config["sampling"]["sequesteredIDs"]).intersection(
+        #     set(genotypeDict.keys())
+        # )
+        # IDs = set(IDs) - sequesteredIDs
         if len(IDs) > 0:
             if "holdout" not in alias:
                 print(
@@ -489,13 +489,13 @@ def processInputFiles(config):
                 )
             elif "holdout" in alias:
                 print(f"\nmissing {len(IDs)} {alias} IDs:\n {IDs}")
-        if len(sequesteredIDs) > 0:
-            if "holdout" not in alias:
-                print(
-                    f"\nsequestered {len(sequesteredIDs)} {config['clinicalTable'][alias]} IDs:\n {sequesteredIDs}"
-                )
-            elif "holdout" in alias:
-                print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
+        # if len(sequesteredIDs) > 0:
+        #     if "holdout" not in alias:
+        #         print(
+        #             f"\nsequestered {len(sequesteredIDs)} {config['clinicalTable'][alias]} IDs:\n {sequesteredIDs}"
+        #         )
+        #     elif "holdout" in alias:
+        #         print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
     resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
     allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF).dropna().astype(np.int8)

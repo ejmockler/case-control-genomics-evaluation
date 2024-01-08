@@ -345,80 +345,59 @@ class EvaluationResult:
             all_accuracies.extend([fold.accuracy for fold in self.excess])
         if all_accuracies:
             self.overall_average_accuracy = np.mean(all_accuracies)
-
-    @cached_property
-    def sample_results_dataframe(self):
+            
+    def aggregate_sample_results(self, folds):
         np.set_printoptions(threshold=np.inf)
-        # Extract probabilities and ids from test and holdout folds
-        all_probabilities = [
-            probability[1]  # Assuming probability exists for each binary class
-            for fold in self.test + (self.holdout if self.holdout else [])
-            for probability in fold.probabilities
-        ]
+        all_probabilities = []
+        all_labels = []
+        all_ids = []
 
-        all_labels = [
-            label
-            for fold in self.test + (self.holdout if self.holdout else [])
-            for label in fold.labels
-        ]
+        for fold in folds:
+            all_probabilities.extend([probability[1] for probability in fold.probabilities])
+            all_labels.extend(fold.labels)
+            all_ids.extend(fold.ids)
 
-        all_ids = [
-            id
-            for fold in self.test + (self.holdout if self.holdout else [])
-            for id in fold.ids
-        ]
-        
-        holdout_ids = [
-            id
-            for fold in self.holdout if self.holdout
-            for id in fold.ids
-        ]
-        
-        excess_ids = [
-            id
-            for fold in self.excess if self.excess
-            for id in fold.ids
-        ]
+        df = pd.DataFrame({
+            "probability": all_probabilities,
+            "probabilities": all_probabilities,
+            "prediction": np.around(all_probabilities).astype(int),
+            "label": all_labels,
+            "id": all_ids
+        })
 
-        # Create DataFrame
-        df = pd.DataFrame(
-            {
-                "probability": all_probabilities,
-                "probabilities": all_probabilities,
-                "prediction": np.around(all_probabilities).astype(int),
-                "label": all_labels,
-                "id": all_ids,
-                "holdout": [1 if id in holdout_ids else 0 for id in all_ids],
-                
-            }
-        )
-
-        # Calculate correctness of each classification
         df["accuracy"] = (df["prediction"] == df["label"]).astype(int)
 
-        # Group by ID and compute aggregated values
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
             "probabilities": [("list", list)],
-            "accuracy": [("mean", "mean"), ("std", "std")],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],  # Get the first label for each id
+            "accuracy": [("mean", "mean"), ("std", "std")],
             "id": [("draw_count", "size")],  # Count occurrences of each id
-            "holdout": [("first", "first")],
         }
-        sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
-        # Flatten MultiIndex columns for easier referencing
+        sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
         sampleResultsDataframe.columns = [
-            f"{col[0]}_{col[1]}" if col[1] not in ["first", "most_frequent"] else col[0]
-            for col in sampleResultsDataframe.columns
+            "_".join(col).strip() for col in sampleResultsDataframe.columns.values
         ]
 
-        # Rename 'label_first' back to 'label'
         sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label", "id_draw_count": "draw_count", "holdout_first": "holdout"}
+            columns={"label_first": "label", "id_draw_count": "draw_count"}
         )
+
         return sampleResultsDataframe.sort_index()
+
+    @cached_property
+    def test_results_dataframe(self):
+        return self.aggregate_sample_results(self.test)
+    
+    @cached_property
+    def holdout_results_dataframe(self):
+        return self.aggregate_sample_results(self.holdout)
+    
+    @cached_property
+    def excess_results_dataframe(self):
+        return self.aggregate_sample_results(self.excess)
 
     @staticmethod
     def get_unique_samples(foldResults: Iterable[FoldResult]):
@@ -449,74 +428,66 @@ class BootstrapResult:
     model_name: str
     iteration_results: list[EvaluationResult] = field(default_factory=list)
 
-    @cached_property
-    def sample_results_dataframe(self):
-        np.set_printoptions(threshold=np.inf)
+    def aggregate_sample_results(self, fold_type):
         all_probabilities = []
         all_labels = []
         all_ids = []
 
-        # Iterate over each EvaluationResult in iteration_results
         for eval_result in self.iteration_results:
-            test_folds = eval_result.test
-            holdout_folds = eval_result.holdout if eval_result.holdout else []
-            excess_folds = eval_result.excess if eval_result.excess else []
+            folds = getattr(eval_result, fold_type, [])
 
-            all_probabilities.extend(
-                [
-                    probability[1]  # Assuming probability exists for each binary class
-                    for fold in test_folds + holdout_folds + excess_folds
-                    for probability in fold.probabilities
-                ]
-            )
+            for fold in folds:
+                all_probabilities.extend([probability[1] for probability in fold.probabilities])
+                all_labels.extend(fold.labels)
+                all_ids.extend(fold.ids)
 
-            all_labels.extend(
-                [label for fold in test_folds + holdout_folds + excess_folds for label in fold.labels]
-            )
+        df = pd.DataFrame({
+            "probability": all_probabilities,
+            "probabilities": all_probabilities,
+            "prediction": np.around(all_probabilities).astype(int),
+            "label": all_labels,
+            "id": all_ids
+        })
 
-            all_ids.extend(
-                [id for fold in test_folds + holdout_folds + excess_folds for id in fold.ids]
-            )
-            
-            holdout_ids = [id for fold in holdout_folds for id in fold.ids]
-                        
-        # Create DataFrame
-        df = pd.DataFrame(
-            {
-                "probability": all_probabilities,
-                "probabilities": all_probabilities,
-                "prediction": np.around(all_probabilities).astype(int),
-                "label": all_labels,
-                "id": all_ids,
-                "holdout": [1 if id in holdout_ids else 0 for id in all_ids]
-            }
-        )
-
-        # Calculate correctness of each classification
         df["accuracy"] = (df["prediction"] == df["label"]).astype(int)
 
-        # Group by ID and compute aggregated values
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
             "probabilities": [("list", list)],
-            "accuracy": [("mean", "mean"), ("std", "std")],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
-            "label": [("first", "first")],  # Get the first label for each id
-            "id": [("draw_count", "size")],  # Count occurrences of each id
-            "holdout": [("first", "first")],
+            "label": [("first", "first")],
+            "accuracy": [("mean", "mean"), ("std", "std")],
+            "id": [("draw_count", "size")],
         }
-        sampleResultsDataframe = df.groupby("id").agg(aggregation_dict)
 
-        # Flatten MultiIndex columns for easier referencing
-        sampleResultsDataframe.columns = [
-            "_".join(col) for col in sampleResultsDataframe.columns
-        ]
-        
-        sampleResultsDataframe = sampleResultsDataframe.rename(
-            columns={"label_first": "label", "id_draw_count": "draw_count", "holdout_first": "holdout"}
+        sampleResultsDataFrame = df.groupby("id").agg(aggregation_dict).rename(
+            columns={
+                "label_first": "label",
+                "id_draw_count": "draw_count"
+            }
         )
+        
+        sampleResultsDataFrame.columns = [
+            "_".join(col).strip() for col in sampleResultsDataFrame.columns.values
+        ]
 
-        return sampleResultsDataframe.sort_index()
+        sampleResultsDataFrame = sampleResultsDataFrame.rename(
+            columns={"label_first": "label", "id_draw_count": "draw_count"}
+        )
+        
+        return sampleResultsDataFrame.sort_index()
+
+    @cached_property
+    def test_results_dataframe(self):
+        return self.aggregate_sample_results('test')
+
+    @cached_property
+    def holdout_results_dataframe(self):
+        return self.aggregate_sample_results('holdout')
+
+    @cached_property
+    def excess_results_dataframe(self):
+        return self.aggregate_sample_results('excess')
 
     def get_aggregated_attribute(self, attribute_name, agg_func=None, level=0):
         if getattr(self.iteration_results[0], attribute_name) is None:

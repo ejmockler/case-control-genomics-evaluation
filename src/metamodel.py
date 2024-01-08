@@ -79,7 +79,7 @@ def getBaselineFeatureResults(
     baselineFeatureResultsByModel = {}
     for i, model in enumerate(modelStack.keys()):
         modelResults = results[i]
-        baselineFeatureResultsByModel[model.__class__.__name__] = modelResults.sample_results_dataframe
+        baselineFeatureResultsByModel[model.__class__.__name__] = modelResults.test_results_dataframe
     pooledBaselineFeatureResults = poolSampleResults(pd.concat([df for df in baselineFeatureResultsByModel.values()]))
         
     return pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeatures
@@ -209,35 +209,30 @@ def readSampleIDs(table, label):
     return sampleIDs.index.tolist()
 
 
-def sequesterOutlierSamples(sampleResultsByModel = None, pooledSampleResults = None):
-    thresholdedSamplesByModel = {}
-    thresholdedSamplesByModel["accurate"] = {}
-    thresholdedSamplesByModel["discordant"] = {}
+def sequesterOutlierSamples(sampleResultsByModel=None, pooledSampleResults=None, config=None, metaconfig=None):
+    thresholdedSamplesByModel = {"accurate": {}, "discordant": {}}
+    
+    # Initialize sequesteredIDs as a dictionary by modelName
+    config["sampling"]["sequesteredIDs"] = {modelName: [] for modelName in sampleResultsByModel.keys()}
     
     for modelName, sampleResults in sampleResultsByModel.items():
         thresholdedSamplesByModel["accurate"][modelName] = sampleResults.loc[sampleResults["accuracy_mean"] >= metaconfig["samples"]["accurateThreshold"]]
         thresholdedSamplesByModel["discordant"][modelName] = sampleResults.loc[sampleResults["accuracy_mean"] <= metaconfig["samples"]["discordantThreshold"]]
     
-    thresholdedPooledSamples = {
-        "accurate": pooledSampleResults.loc[pooledSampleResults["accuracy_mean"] >= metaconfig["samples"]["accurateThreshold"]],
-        "discordant": pooledSampleResults.loc[pooledSampleResults["accuracy_mean"] <= metaconfig["samples"]["discordantThreshold"]],
-    }
-
-    for sampleType, dataframe in thresholdedPooledSamples.items():
-        for labelType, label in {config["clinicalTable"]["caseAlias"]: 1, config["clinicalTable"]["controlAlias"]: 0}.items():
-            if metaconfig["samples"]["sequester"][sampleType][labelType]:
-                ids = readSampleIDs(dataframe, label=label)
-                config["sampling"]["sequesteredIDs"].extend(ids)
-                
+    # Handle individual model samples
     for sampleType, modelSet in thresholdedSamplesByModel.items():
         for modelName, dataframe in modelSet.items():
             for labelType, label in {config["clinicalTable"]["caseAlias"]: 1, config["clinicalTable"]["controlAlias"]: 0}.items():
                 if metaconfig["samples"]["sequester"][sampleType][labelType]:
                     ids = readSampleIDs(dataframe, label=label)
-                    config["sampling"]["sequesteredIDs"].extend(ids)
-                    
-    config["sampling"]["sequesteredIDs"] = list(set(config["sampling"]["sequesteredIDs"]))
+                    config["sampling"]["sequesteredIDs"][modelName].extend(ids)
+    
+    # Remove duplicates by converting to a set and back to a list for each model
+    for modelName in config["sampling"]["sequesteredIDs"]:
+        config["sampling"]["sequesteredIDs"][modelName] = list(set(config["sampling"]["sequesteredIDs"][modelName]))
+    
     return config
+
                     
 
 @flow()
@@ -245,33 +240,38 @@ def main(config):
     newWellClassified = True
     countSuffix = 1
     baseProjectPath = config["tracking"]["project"]
-    genotypeData, clinicalData = None, None
-    while newWellClassified:
-        config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
-        
-        if countSuffix <= metaconfig["tracking"]["lastIteration"]:
-            sampleResultsByModel = {
-                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults_{model.__class__.__name__}_{config['tracking']['project']}.csv", index_col="id") for model in modelStack.keys()
-            }
-            for dataframe in sampleResultsByModel.values():
-                dataframe['probabilities_list'] = dataframe['probabilities_list'].apply(lambda x: np.array(eval(x))) # convert string representation of array to numpy array
-            pooledResults = pd.read_csv(f"projects/{config['tracking']['project']}/pooledSampleResults_{config['tracking']['project']}.csv", index_col="id")
-            
-            if os.path.exists(f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults_{config['tracking']['project']}.csv"):
-                config = sequesterOutlierSamples(sampleResultsByModel, pooledResults)
-                countSuffix += 1
-                continue
-            elif genotypeData is None and clinicalData is None:
-                (
+    genotypeData, clinicalData = (
                     genotypeData,
                     clinicalData,
                 ) = processInputFiles(config)
+    originalTrackingName = config['tracking']['name']
+    while newWellClassified:
+        config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
+        if countSuffix > 1:
+            config['tracking']['name'] = f">={'{:.1%}'.format(metaconfig['samples']['accurateThreshold'])} accurate cases removed, pass {countSuffix}\n" + originalTrackingName
+        
+        if countSuffix <= metaconfig["tracking"]["lastIteration"]:
+            sampleResultsByModel = {
+                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/testResults_{model.__class__.__name__}_{config['tracking']['project']}.csv", index_col="id") for model in modelStack.keys()
+            }
+            
+            for dataframe in sampleResultsByModel.values():
+                dataframe['probabilities_list'] = dataframe['probabilities_list'].apply(lambda x: np.array(eval(x))) # convert string representation of array to numpy array
+           
+            pooledTestResults = pd.read_csv(f"projects/{config['tracking']['project']}/pooledTestResults_{config['tracking']['project']}.csv", index_col="id")
+            config = sequesterOutlierSamples(sampleResultsByModel, pooledTestResults, config=config, metaconfig=metaconfig)
+                
+            countSuffix += 1
+            continue
+            
         else:
             classificationResults, genotypeData, clinicalData = runMLstack(config, genotypeData, clinicalData)
-            sampleResultsByModel = {modelResult.model_name: modelResult.sample_results_dataframe for modelResult in classificationResults.modelResults}
+            sampleResultsByModel = {modelResult.model_name: modelResult.test_results_dataframe for modelResult in classificationResults.modelResults}
             config["sampling"]["lastIteration"] = 0
         
-            pooledResults = poolSampleResults(pd.concat([modelResult.sample_results_dataframe for modelResult in classificationResults.modelResults]))
+            pooledTestResults = poolSampleResults(pd.concat([modelResult.test_results_dataframe for modelResult in classificationResults.modelResults]))
+            pooledHoldoutResults = poolSampleResults(pd.concat([modelResult.holdout_results_dataframe for modelResult in classificationResults.modelResults]))
+            pooledExcessResults = poolSampleResults(pd.concat([modelResult.excess_results_dataframe for modelResult in classificationResults.modelResults]))
         
         (
             pooledSamplePerplexities,
@@ -284,7 +284,7 @@ def main(config):
             baselineFeatureResultsByModel
         ) = measureIterations(
             sampleResultsByModel,
-            pooledResults,
+            pooledTestResults,
             genotypeData,
             clinicalData,
         )
@@ -295,7 +295,7 @@ def main(config):
         pooledBaselineFeatureResults.to_csv(
             f"projects/{config['tracking']['project']}/pooledBaselineFeatureResults_{config['tracking']['project']}.csv"
         )
-        pd.concat([pooledSamplePerplexities, pooledResults[['label', 'accuracy_mean', 'accuracy_std', 'draw_count']]], axis=1).to_csv(
+        pd.concat([pooledSamplePerplexities, pooledTestResults[['label', 'accuracy_mean', 'accuracy_std', 'draw_count']]], axis=1).to_csv(
             f"projects/{config['tracking']['project']}/pooledSamplePerplexities_{config['tracking']['project']}.csv"
         )
         pooledAccurateSamples.to_csv(
@@ -306,7 +306,7 @@ def main(config):
         )
         
         sampleResultsByModel = {
-                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/sampleResults_{model.__class__.__name__}_{config['tracking']['project']}.csv", index_col="id") for model in modelStack.keys()
+                model.__class__.__name__: pd.read_csv(f"projects/{config['tracking']['project']}/{model.__class__.__name__}/testResults_{model.__class__.__name__}_{config['tracking']['project']}.csv", index_col="id") for model in modelStack.keys()
             }
         
         # Store results for each model
@@ -327,7 +327,7 @@ def main(config):
         # Check for new well-classified samples. If not present, stop iterations.
         newWellClassified = not pooledAccurateSamples.empty
         
-        config = sequesterOutlierSamples(sampleResultsByModel, pooledResults)
+        config = sequesterOutlierSamples(sampleResultsByModel, pooledTestResults, config=config, metaconfig=metaconfig)
         countSuffix += 1
 
 

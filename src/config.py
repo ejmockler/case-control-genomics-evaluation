@@ -79,7 +79,7 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 80,
+        "bootstrapIterations": 60,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "holdoutSplit": 0.1,
         "lastIteration": 0,

@@ -170,8 +170,14 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
 
 def trackResults(runID: str, evaluationResult: EvaluationResult, config):
     runPath = runID
-    sampleResultsDataframe = evaluationResult.sample_results_dataframe
-    sampleResultsDataframe.to_csv(f"{runPath}/sampleResults.csv")
+
+    testResultsDataframe = evaluationResult.test_results_dataframe
+    testResultsDataframe.to_csv(f"{runPath}/testResults.csv")
+    holdoutResultsDataframe = evaluationResult.holdout_results_dataframe
+    holdoutResultsDataframe.to_csv(f"{runPath}/holdoutResults.csv")
+    excessResultsDataframe = evaluationResult.excess_results_dataframe
+    excessResultsDataframe.to_csv(f"{runPath}/excessResults.csv")
+    
     evaluationResult.average()
     for k in range(config["sampling"]["crossValIterations"]):
         if config["model"]["hyperparameterOptimization"]:
@@ -526,6 +532,21 @@ def bootstrap(
     bootstrap = BootstrapResult(model.__class__.__name__)
     sampleFrequencies = {id: 0 for id in genotypeData.case.genotype.columns.tolist() + genotypeData.control.genotype.columns.tolist() + genotypeData.holdout_case.genotype.columns.tolist() + genotypeData.holdout_control.genotype.columns.tolist()}
     
+    for attr in ["case", "control", "holdout_case", "holdout_control"]:
+        idsToDrop = config['sampling']['sequesteredIDs'] if isinstance(config['sampling']['sequesteredIDs'],list) else config['sampling']['sequesteredIDs'][model.__class__.__name__]
+        dataset = getattr(genotypeData, attr)
+        allIDs = dataset.ids
+        try:
+            subjectIDs = clinicalData.loc[list(allIDs), config['clinicalTable']['subjectIdColumn']]
+        except:
+            subjectIDs = pd.Series(index=allIDs)
+        preSequesterCount = len(allIDs)
+        dataset.ids = [id for id in allIDs 
+                       if not any([id in idToDrop or idToDrop in id or (str(subjectIDs[id]) in idToDrop or idToDrop in str(subjectIDs[id])) for idToDrop in idsToDrop])]
+        dataset.genotype = dataset.genotype.drop([id for id in idsToDrop if id in dataset.genotype.columns], axis=1)
+        print(f"Sequestered {preSequesterCount - len(dataset.ids)} {attr} samples")
+        setattr(genotypeData, attr, dataset)
+
     # parallelize with workflow engine in cluster environment
     for runNumber in range(
         config["sampling"]["lastIteration"],
@@ -551,7 +572,7 @@ def bootstrap(
             pass
         except Exception as e:
             print("Error in bootstrap iteration " + str(runNumber) + f"{e}")
-            return None
+            raise
         gc.collect()
 
     return bootstrap

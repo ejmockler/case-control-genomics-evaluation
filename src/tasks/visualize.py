@@ -517,17 +517,15 @@ def trackBootstrapVisualizations(
 
 
 def trackModelVisualizations(modelResults: BootstrapResult, config=config):
-    sampleResultsDataFrame = modelResults.sample_results_dataframe
-    seenCases = (
-        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
-        .index.isin(list(modelResults.test_dict.keys()))
-        .sum()
-    )
-    seenControls = (
-        sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
-        .index.isin(list(modelResults.test_dict.keys()))
-        .sum()
-    )
+    testResultsDataFrame = modelResults.test_results_dataframe
+     
+    seenTestCases = (
+        testResultsDataFrame["label"] == 1
+    ).sum()
+    
+    seenTestControls = (
+        testResultsDataFrame["label"] == 0
+    ).sum()
 
     bootstrapTrainCount = modelResults.iteration_results[0].train[0].vectors.shape[0]
     bootstrapTestCount = modelResults.iteration_results[0].test[0].vectors.shape[0]
@@ -539,39 +537,31 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     geneCount = geneCounts[0] if np.min(geneCounts) == np.max(geneCounts) else f"{np.min(geneCounts)}-{np.max(geneCounts)}"
 
     
-    labelsPredictions = {
+    testLabelsPredictions = {
         modelResults.model_name: (
             [
                 label
                 for iterationResult in modelResults.iteration_results
-                for label in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["label"].tolist()
+                for label in iterationResult.test_results_dataframe["label"].tolist()
             ],
             [
                 prediction
                 for iterationResult in modelResults.iteration_results
-                for prediction in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["prediction"].tolist()
+                for prediction in iterationResult.test_results_dataframe["prediction_most_frequent"].tolist()
             ],
         )
     }
-    labelsProbabilities = {
+    testLabelsProbabilities = {
         modelResults.model_name: (
             [
                 label
                 for iterationResult in modelResults.iteration_results
-                for label in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["label"].tolist()
+                for label in iterationResult.test_results_dataframe["label"].tolist()
             ],
             [
                 probability
                 for iterationResult in modelResults.iteration_results
-                for probability in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["probability_mean"].tolist()
+                for probability in iterationResult.test_results_dataframe["probability_mean"].tolist()
             ],
         )
     }
@@ -581,11 +571,11 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
+    {seenTestCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenTestControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
     accuracyHistogram = px.histogram(
-        sampleResultsDataFrame.loc[list(modelResults.test_dict.keys())],
+        testResultsDataFrame,
         x="accuracy_mean",
         color="label",
         pattern_shape="label",
@@ -596,7 +586,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         title=f"""Mean sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
     probabilityHistogram = px.histogram(
-        sampleResultsDataFrame.loc[list(modelResults.test_dict.keys())],
+        testResultsDataFrame,
         x="probability_mean",
         color="label",
         pattern_shape="label",
@@ -610,7 +600,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
-        labelsPredictionsByInstance=labelsProbabilities,
+        labelsPredictionsByInstance=testLabelsProbabilities,
         config=config,
     )
     calibrationPlot = plotCalibration(
@@ -618,7 +608,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             Calibration Curve
             {plotSubtitle}
             """,
-        labelsPredictions,
+        testLabelsPredictions,
         config=config,
     )
     confusionMatrixInstanceList, averageConfusionMatrix = plotConfusionMatrix(
@@ -626,7 +616,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             Confusion Matrix
             {plotSubtitle}
             """,
-        labelsPredictions,
+        testLabelsPredictions,
         config=config,
     )
     if config["model"]["hyperparameterOptimization"]:
@@ -650,16 +640,10 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             convergencePlot = None
 
     if modelResults.iteration_results[0].holdout:
-        seenHoldoutCases = (
-            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 1]
-            .index.isin(list(modelResults.holdout_dict.keys()))
-            .sum()
-        )
-        seenHoldoutControls = (
-            sampleResultsDataFrame.loc[sampleResultsDataFrame["label"] == 0]
-            .index.isin(list(modelResults.holdout_dict.keys()))
-            .sum()
-        )
+        holdoutResultsDataFrame = modelResults.holdout_results_dataframe
+        seenHoldoutCases = (holdoutResultsDataFrame["label"] == 1).sum()
+        
+        seenHoldoutControls = (holdoutResultsDataFrame["label"] == 0).sum()
         bootstrapHoldoutCount = seenHoldoutCases + seenHoldoutControls
 
         holdoutLabelsPredictions = {
@@ -667,16 +651,12 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 [
                     label
                     for iterationResult in modelResults.iteration_results
-                    for label in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["label"].tolist()
+                    for label in iterationResult.holdout_results_dataframe["label"].tolist()
                 ],
                 [
                     prediction
                     for iterationResult in modelResults.iteration_results
-                    for prediction in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["prediction"].tolist()
+                    for prediction in iterationResult.holdout_results_dataframe["prediction_most_frequent"].tolist()
                 ],
             )
         }
@@ -686,16 +666,12 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 [
                     label
                     for iterationResult in modelResults.iteration_results
-                    for label in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["label"].tolist()
+                    for label in iterationResult.holdout_results_dataframe["label"].tolist()
                 ],
                 [
                     probability
                     for iterationResult in modelResults.iteration_results
-                    for probability in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["probability_mean"].tolist()
+                    for probability in iterationResult.holdout_results_dataframe["probability_mean"].tolist()
                 ],
             )
         }
@@ -710,7 +686,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             {bootstrapHoldoutCount} ethnically-variable samples"""
 
         holdoutAccuracyHistogram = px.histogram(
-            sampleResultsDataFrame.loc[list(modelResults.holdout_dict.keys())],
+            holdoutResultsDataFrame,
             x="accuracy_mean",
             color="label",
             pattern_shape="label",
@@ -721,7 +697,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             title=f"""Mean holdout accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
         )
         holdoutProbabilityHistogram = px.histogram(
-            sampleResultsDataFrame.loc[list(modelResults.holdout_dict.keys())],
+            holdoutResultsDataFrame,
             x="probability_mean",
             color="label",
             pattern_shape="label",
@@ -860,7 +836,6 @@ def poolSampleResults(concatenatedResults):
         accuracy_std = pooled_std(group, 'accuracy_std', 'draw_count')
         draw_count_sum = group['draw_count'].sum()
         first_label_instance = group['label'].iloc[0]
-        first_set_instance = group['holdout'].iloc[0]
         
         # Redetermine the most frequent prediction
         mode_prediction =  group['prediction_most_frequent'].mode()[0]
@@ -875,53 +850,38 @@ def poolSampleResults(concatenatedResults):
             'accuracy_std': accuracy_std,
             'draw_count_sum': draw_count_sum,
             'first_label_instance': first_label_instance,
-            'first_set_instance': first_set_instance,
             'mode_prediction': mode_prediction
         })
 
     # Convert results list to DataFrame
     pooledSampleResults = pd.DataFrame(pooled_results).set_index('id')
-    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent', 'first_set_instance': 'holdout'}, inplace=True)
+    pooledSampleResults.rename(columns={'draw_count_sum': 'draw_count', 'first_label_instance': 'label', 'mode_prediction': 'prediction_most_frequent'}, inplace=True)
     
     return pooledSampleResults
 
-def trackProjectVisualizations(classificationResults, config):
+def trackProjectVisualizations(classificationResults: ClassificationResults, config):
     # Concatenate sample results data frames from all model results
-    concatenatedSampleResults = pd.concat(
+    concatenatedTestResults = pd.concat(
         [
-            modelResults.sample_results_dataframe
+            modelResults.test_results_dataframe
+            for modelResults in classificationResults.modelResults
+        ]
+    )
+    concatenatedExcessResults = pd.concat(
+        [
+            modelResults.excess_results_dataframe
             for modelResults in classificationResults.modelResults
         ]
     )
     
-    pooledSampleResults = poolSampleResults(concatenatedSampleResults)
+    pooledTestResults = poolSampleResults(concatenatedTestResults)
 
-    output_path = f"projects/{config['tracking']['project']}/pooledSampleResults_{config['tracking']['project']}.csv"
+    output_path = f"projects/{config['tracking']['project']}/pooledTestResults_{config['tracking']['project']}.csv"
     np.set_printoptions(threshold=np.inf)
-    pooledSampleResults.to_csv(output_path)
+    pooledTestResults.to_csv(output_path)
 
-    seenCases = (
-        pooledSampleResults.loc[pooledSampleResults["label"] == 1]
-        .index.isin(
-            [
-                sampleID
-                for modelResults in classificationResults.modelResults
-                for sampleID in list(modelResults.test_dict.keys())
-            ]
-        )
-        .sum()
-    )
-    seenControls = (
-        pooledSampleResults.loc[pooledSampleResults["label"] == 0]
-        .index.isin(
-            [
-                sampleID
-                for modelResults in classificationResults.modelResults
-                for sampleID in list(modelResults.test_dict.keys())
-            ]
-        )
-        .sum()
-    )
+    seenTestCases = (pooledTestResults["label"] == 1).sum()
+    seenTestControls = (pooledTestResults["label"] == 0).sum()
 
     bootstrapTrainCount = (
         classificationResults.modelResults[0]
@@ -949,41 +909,33 @@ def trackProjectVisualizations(classificationResults, config):
     geneCounts = [trainData.geneCount for modelResults in classificationResults.modelResults for iteration_result in modelResults.iteration_results for trainData in iteration_result.train]
     geneCount = geneCounts[0] if np.min(geneCounts) == np.max(geneCounts) else f"{np.min(geneCounts)}-{np.max(geneCounts)}"
 
-    labelsPredictions = {
+    testLabelsPredictions = {
         modelResults.model_name: (
             [
                 label
                 for iterationResult in modelResults.iteration_results
-                for label in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["label"].tolist()
+                for label in iterationResult.test_results_dataframe["label"].tolist()
             ],
             [
                 prediction
                 for iterationResult in modelResults.iteration_results
-                for prediction in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["prediction"].tolist()
+                for prediction in iterationResult.test_results_dataframe["prediction_most_frequent"].tolist()
             ],
         )
         for modelResults in classificationResults.modelResults
     }
     
-    labelsProbabilities = {
+    testLabelsProbabilities = {
         modelResults.model_name: (
              [
                 label
                 for iterationResult in modelResults.iteration_results
-                for label in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["label"].tolist()
+                for label in iterationResult.test_results_dataframe["label"].tolist()
             ],
              [
                 probability
                 for iterationResult in modelResults.iteration_results
-                for probability in iterationResult.sample_results_dataframe.loc[
-                    list(iterationResult.test_dict.keys())
-                ]["probability_mean"].tolist()
+                for probability in iterationResult.test_results_dataframe["probability_mean"].tolist()
             ],
         )
         for modelResults in classificationResults.modelResults
@@ -994,7 +946,7 @@ def trackProjectVisualizations(classificationResults, config):
     {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-    {seenCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
+    {seenTestCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenTestControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
 
     aucPlot = plotAUC(
@@ -1002,7 +954,7 @@ def trackProjectVisualizations(classificationResults, config):
             Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
-        labelsPredictionsByInstance=labelsProbabilities,
+        labelsPredictionsByInstance=testLabelsProbabilities,
         config=config,
     )
 
@@ -1011,33 +963,20 @@ def trackProjectVisualizations(classificationResults, config):
             Calibration Curve
             {plotSubtitle}
             """,
-        labelsPredictions,
+        testLabelsPredictions,
         config=config,
     )
 
     if classificationResults.modelResults[0].iteration_results[0].holdout:
-        seenHoldoutCases = (
-            pooledSampleResults.loc[pooledSampleResults["label"] == 1]
-            .index.isin(
-                [
-                    sampleID
-                    for modelResults in classificationResults.modelResults
-                    for sampleID in list(modelResults.holdout_dict.keys())
-                ]
-            )
-            .sum()
+        concatenatedHoldoutResults = pd.concat(
+            [
+                modelResults.holdout_results_dataframe
+                for modelResults in classificationResults.modelResults
+            ]
         )
-        seenHoldoutControls = (
-            pooledSampleResults.loc[pooledSampleResults["label"] == 0]
-            .index.isin(
-                [
-                    sampleID
-                    for modelResults in classificationResults.modelResults
-                    for sampleID in list(modelResults.holdout_dict.keys())
-                ]
-            )
-            .sum()
-        )
+        pooledHoldoutResults = pd.concat([concatenatedHoldoutResults])
+        seenHoldoutCases = (pooledHoldoutResults["label"] == 1).sum()
+        seenHoldoutControls = (pooledHoldoutResults["label"] == 0).sum()
         bootstrapHoldoutCount = seenHoldoutCases + seenHoldoutControls
 
         holdoutLabelsPredictions = {
@@ -1045,16 +984,12 @@ def trackProjectVisualizations(classificationResults, config):
                 [
                     label
                     for iterationResult in modelResults.iteration_results
-                    for label in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["label"].tolist()
+                    for label in iterationResult.holdout_results_dataframe["label"].tolist()
                 ],
                 [
                     prediction
                     for iterationResult in modelResults.iteration_results
-                    for prediction in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["prediction"].tolist()
+                    for prediction in iterationResult.holdout_results_dataframe["prediction_most_frequent"].tolist()
                 ],
             )
             for modelResults in classificationResults.modelResults
@@ -1065,16 +1000,12 @@ def trackProjectVisualizations(classificationResults, config):
                 [
                     label
                     for iterationResult in modelResults.iteration_results
-                    for label in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["label"].tolist()
+                    for label in iterationResult.holdout_results_dataframe["label"].tolist()
                 ],
                 [
                     probability
                     for iterationResult in modelResults.iteration_results
-                    for probability in iterationResult.sample_results_dataframe.loc[
-                        list(iterationResult.holdout_dict.keys())
-                    ]["probability_mean"].tolist()
+                    for probability in iterationResult.holdout_results_dataframe["probability_mean"].tolist()
                 ],
             )
             for modelResults in classificationResults.modelResults

@@ -14,7 +14,7 @@ from tasks.visualize import trackModelVisualizations, trackProjectVisualizations
 matplotlib.use("agg")
 
 
-from prefect import flow, task
+from prefect import flow
 from sklearn.model_selection import StratifiedKFold
 
 from tasks.input import (
@@ -28,33 +28,6 @@ from models import stack as modelStack
 
 from joblib import Parallel, delayed
 
-
-@task()
-def download_file(run_id, field="sampleResults", extension="csv", config=config):
-    path = f"./{field}/{run_id}.{extension}"
-    if not os.path.exists(field):
-        os.makedirs(field, exist_ok=True)
-    if os.path.isfile(path):
-        return
-    run = neptune.init_run(
-        with_id=run_id,
-        project=config["entity"] + "/" + config["project"],
-        api_token=config["neptuneApiToken"],
-    )
-    try:
-        if field == "globalFeatureImportance" or field == "testLabels":
-            for i in range(11):
-                path = f"./{field}/{run_id}_{i}.{extension}"
-                run[f"{field}/{i}"].download(destination=path)
-            averageResultsPath = f"./{field}/{run_id}_average.{extension}"
-            run[f"{field}/average"].download(destination=averageResultsPath)
-        else:
-            run[field].download(destination=path)
-    except:
-        pass
-    run.stop()
-
-
 @flow()
 def main(
     config=config,
@@ -62,7 +35,7 @@ def main(
     clinicalData=None,
     trackVisualizations=True,
 ):
-    if (genotypeData is None and clinicalData is None) or len(config['sampling']['sequesteredIDs']) > 0:
+    if (genotypeData is None and clinicalData is None):
         (
             genotypeData,
             clinicalData,
@@ -112,8 +85,14 @@ def main(
             f"projects/{config['tracking']['project']}/{modelResult.model_name}/",
             exist_ok=True,
         )
-        modelResult.sample_results_dataframe.to_csv(
-            f"projects/{config['tracking']['project']}/{modelResult.model_name}/sampleResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
+        modelResult.test_results_dataframe.to_csv(
+            f"projects/{config['tracking']['project']}/{modelResult.model_name}/testResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
+        )
+        modelResult.holdout_results_dataframe.to_csv(
+            f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
+        )
+        modelResult.excess_results_dataframe.to_csv(
+            f"projects/{config['tracking']['project']}/{modelResult.model_name}/excessResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
         )
         if modelResult.average_global_feature_explanations is not None:
             modelResult.average_global_feature_explanations.to_csv(
