@@ -572,7 +572,8 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
     {seenTestCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenTestControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
-    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
+    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration
+    {'Sequestered ' + str(len(config['sampling']['sequesteredIDs'][modelResults.model_name])) + ' test cases' if modelResults.model_name in config['sampling']['sequesteredIDs'] and len(config['sampling']['sequesteredIDs'][modelResults.model_name]) > 0 else ''}"""
 
     accuracyHistogram = px.histogram(
         testResultsDataFrame,
@@ -974,9 +975,13 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
                 for modelResults in classificationResults.modelResults
             ]
         )
-        pooledHoldoutResults = pd.concat([concatenatedHoldoutResults])
-        seenHoldoutCases = (pooledHoldoutResults["label"] == 1).sum()
-        seenHoldoutControls = (pooledHoldoutResults["label"] == 0).sum()
+        # Group by 'id' and aggregate labels to get the most frequent label per id (which should be constant)
+        pooledHoldoutResults = concatenatedHoldoutResults.groupby('id')['label'].agg(lambda x: x.value_counts().idxmax())
+        
+        # Count the number of cases (label 1) and controls (label 0)
+        seenHoldoutCases = (pooledHoldoutResults == 1).sum()
+        seenHoldoutControls = (pooledHoldoutResults == 0).sum()
+
         bootstrapHoldoutCount = seenHoldoutCases + seenHoldoutControls
 
         holdoutLabelsPredictions = {

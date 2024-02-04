@@ -1,14 +1,12 @@
 import asyncio
-import gc
-import os
 from copy import deepcopy
 from joblib import Parallel, delayed
 import pandas as pd
 from prefect import flow, task
-from prefect_ray.task_runners import RayTaskRunner
 import numpy as np
 from numpy import array, float32  # to eval strings as arrays
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis 
+import random
 
 from sklearn.metrics import log_loss
 
@@ -213,7 +211,8 @@ def sequesterOutlierSamples(sampleResultsByModel=None, pooledSampleResults=None,
     thresholdedSamplesByModel = {"accurate": {}, "discordant": {}}
     
     # Initialize sequesteredIDs as a dictionary by modelName
-    config["sampling"]["sequesteredIDs"] = {modelName: [] for modelName in sampleResultsByModel.keys()}
+    if not all(modelName in config["sampling"]["sequesteredIDs"] for modelName in list(sampleResultsByModel.keys())):
+        config["sampling"]["sequesteredIDs"] = {modelName: [] for modelName in sampleResultsByModel.keys()}
     
     for modelName, sampleResults in sampleResultsByModel.items():
         thresholdedSamplesByModel["accurate"][modelName] = sampleResults.loc[sampleResults["accuracy_mean"] >= metaconfig["samples"]["accurateThreshold"]]
@@ -224,8 +223,18 @@ def sequesterOutlierSamples(sampleResultsByModel=None, pooledSampleResults=None,
         for modelName, dataframe in modelSet.items():
             for labelType, label in {config["clinicalTable"]["caseAlias"]: 1, config["clinicalTable"]["controlAlias"]: 0}.items():
                 if metaconfig["samples"]["sequester"][sampleType][labelType]:
-                    ids = readSampleIDs(dataframe, label=label)
-                    config["sampling"]["sequesteredIDs"][modelName].extend(ids)
+                    ids_to_sequester = readSampleIDs(dataframe, label=label)
+                    if labelType not in metaconfig["samples"]["sequester"][sampleType]["random"]:
+                        config["sampling"]["sequesteredIDs"][modelName].extend(ids_to_sequester)
+
+                    # Handle random sequestering
+                    else:
+                        random_label = 1 if labelType == config["clinicalTable"]["caseAlias"] else 0
+                        ids_to_sample = readSampleIDs(sampleResultsByModel[modelName], random_label)
+                        # Randomly select IDs matching the length of sequestered ids
+                        random_sample_ids = random.sample(ids_to_sample, len(ids_to_sequester))
+                        config["sampling"]["sequesteredIDs"][modelName].extend(random_sample_ids)
+                        print(f"Randomly sequestered {len(random_sample_ids)} {labelType} samples from {modelName}")
     
     # Remove duplicates by converting to a set and back to a list for each model
     for modelName in config["sampling"]["sequesteredIDs"]:
@@ -248,7 +257,7 @@ def main(config):
     while newWellClassified:
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
         if countSuffix > 1:
-            config['tracking']['name'] = f">={'{:.1%}'.format(metaconfig['samples']['accurateThreshold'])} accurate cases removed, pass {countSuffix}\n" + originalTrackingName
+            config['tracking']['name'] = f">={'{:.1%}'.format(metaconfig['samples']['accurateThreshold'])} accurate cases removed per model, pass {countSuffix}\n" + originalTrackingName
         
         if countSuffix <= metaconfig["tracking"]["lastIteration"]:
             sampleResultsByModel = {

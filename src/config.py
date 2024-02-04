@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/cardiacGenotypes.csv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -12,8 +12,8 @@ config = {
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
-        "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency,
-        "zygosity": True,  # bin variants by zygosity (homozygous + rare heterozygous, heterozygous)
+        "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency,
+        "zygosity": False,  # bin variants by zygosity (homozygous + rare heterozygous, heterozygous)
         "minAlleleFrequency": 0.005,  # filter out variants with allele frequency less than this
         "maxAlleleFrequency": 1.00,  # filter out variants with allele frequency greater than this
         "maxVariants": None, # set max number of variants for control; set to None to disable
@@ -22,9 +22,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUPs variants (zygosity, rare-binned), Caucasian individuals",  # name of the experiment
+        "name": "Cardiac variants (dominant model), Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "ALS-NUPs60-zygosityRareBinned-0.005MAF",
+        "project": "cardiac60-zygosityRareBinned-0.005MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -71,6 +71,7 @@ config = {
             "Sample name",
         ],  # sample ID header
         "filters": [
+            # TODO add other motor neuron disease labels
             "`Superpopulation code`=='EUR'",
             # "`testLabel`==1",
             "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
@@ -81,7 +82,6 @@ config = {
     "sampling": {
         "bootstrapIterations": 60,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
-        "holdoutSplit": 0.1,
         "lastIteration": 0,
         "sequesteredIDs": [],
     },

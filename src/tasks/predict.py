@@ -8,7 +8,7 @@ from tasks.data import BootstrapResult, EvaluationResult, FoldResult, SampleData
 
 matplotlib.use("agg")
 
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import make_scorer, mean_squared_error, roc_auc_score, roc_curve
 
 from tasks.input import prepareDatasets
 from tasks.visualize import trackBootstrapVisualizations
@@ -111,6 +111,31 @@ def get_probabilities(model, samples):
         if len(probabilities.shape) <= 1:
             probabilities = np.array([[1 - p, p] for p in probabilities])
     return probabilities
+
+def control_group_scorer(estimator, X, y, control_label=0):
+    """
+    Custom scoring function that calculates the negative mean squared error for the control group.
+    
+    Parameters:
+    - estimator: The model being evaluated.
+    - X: The input features for the test set.
+    - y: The true labels for the test set.
+    
+    Returns:
+    - score: The negative mean squared error of the predictions.
+    """
+    # Assuming '0' represents controls and '1' represents ALS patients in 'y'
+    # Modify the condition below if your labeling differs.
+    control_indices = np.where(y == control_label)  # Identify control group samples
+    
+    # Predict for the control group
+    control_predictions = estimator.predict(X[control_indices])
+    
+    # Calculate MSE for the control group
+    mse = mean_squared_error(y[control_indices], control_predictions)
+    
+    # Return the negative MSE because BayesSearchCV maximizes the score
+    return -mse
 
 
 def optimizeHyperparameters(
@@ -287,7 +312,7 @@ def evaluate(
             model,
             hyperParameterSpace,
             cvIterator,
-            "neg_mean_squared_error",
+            make_scorer(control_group_scorer, greater_is_better=True),
         )
         model.set_params(**fittedOptimizer.best_params_)
     else:
@@ -345,7 +370,7 @@ def evaluate(
     )
 
 
-@flow(task_runner=RayTaskRunner())
+@flow(task_runner=RayTaskRunner(), retries=999)
 def classify(
     runNumber,
     model,
@@ -472,7 +497,6 @@ def classify(
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
             {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold"""
-
         if modelResults.holdout:
             holdoutPlotSubtitle = f"""
                 {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}

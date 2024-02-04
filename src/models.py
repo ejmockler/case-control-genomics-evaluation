@@ -99,9 +99,9 @@ stack = {
         "C": Real(1e-3, 10, prior="log-uniform"),
         "gamma": Categorical(["scale", "auto"]),
     },
-    LogisticRegression(penalty="l1", solver="saga"): {
-        "tol": Real(1e-6, 1e-3, prior="log-uniform"),
-        "C": Real(1e-3, 10, prior="log-uniform"),
+    LogisticRegression(penalty="elasticnet", solver="saga"): {
+        "C": Real(1e-6, 1, prior="log-uniform"),
+        "l1_ratio": Real(1e-6, 1, prior="log-uniform"),
     },
     BernoulliNB(): {"alpha": Real(1e-6, 1, prior="log-uniform")},
     AdaBoostClassifier(): {

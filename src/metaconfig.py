@@ -6,12 +6,14 @@ metaconfig = {
             "discordant": {
                 "case": False,
                 "control": False,
+                "random": [], # case, control, or both
             },
             "accurate": {
                 "case": True,
                 "control": False,
+                "random": [], # case, control, or both
             },
         },
     },
-    "tracking": {"lastIteration": 1},
+    "tracking": {"lastIteration": 2},
 }
