@@ -1,6 +1,6 @@
 import asyncio
 import os
-import neptune
+from traceback import print_exception
 import ray
 import matplotlib
 import numpy as np
@@ -11,8 +11,8 @@ from tasks.data import (
 )
 from tasks.visualize import trackModelVisualizations, trackProjectVisualizations
 
+# multiprocessing-friendly backend
 matplotlib.use("agg")
-
 
 from prefect import flow
 from sklearn.model_selection import StratifiedKFold
@@ -29,7 +29,7 @@ from models import stack as modelStack
 from joblib import Parallel, delayed
 
 @flow()
-def main(
+async def main(
     config=config,
     genotypeData=None,
     clinicalData=None,
@@ -38,6 +38,7 @@ def main(
     if (genotypeData is None and clinicalData is None):
         (
             genotypeData,
+            freqReferenceGenotypeData,
             clinicalData,
         ) = processInputFiles(config)
     outerCvIterator = StratifiedKFold(
@@ -48,6 +49,7 @@ def main(
     bootstrap_args = [
         (
             genotypeData,
+            freqReferenceGenotypeData,
             clinicalData,
             model,
             hyperParameterSpace,
@@ -57,16 +59,13 @@ def main(
         )
         for model, hyperParameterSpace in list(modelStack.items())
     ]
-
-    # results = []
-    # for args in bootstrap_args:
-    #     results.append(bootstrap(*args))
-
     results = None
     try:
+        # TODO: represent in workflow engine
         results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
-    except:
-        print("Error during bootstrap, out of samples?")
+    except Exception as e:
+        print(f"Error during bootstrap: {e}")
+        print_exception(e)
     classificationResults = ClassificationResults(modelResults=results)
 
     # TODO recover existing runs into results dataclass
@@ -139,4 +138,4 @@ if __name__ == "__main__":
     if clearHistory:
         asyncio.run(remove_all_flows())
 
-    main()
+    asyncio.run(main())

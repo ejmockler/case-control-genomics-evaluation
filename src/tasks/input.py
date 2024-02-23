@@ -1,6 +1,6 @@
 from typing import Iterable, Literal, Union
 from prefect import unmapped, task, flow
-from prefect.task_runners import ConcurrentTaskRunner
+from prefect_ray.task_runners import RayTaskRunner
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 import pandas as pd
@@ -11,7 +11,6 @@ from multiprocess import Pool, Manager, managers
 
 from tasks.data import Genotype, GenotypeData
 
-
 @task()
 def filterTable(table, filterString):
     if not filterString:
@@ -20,9 +19,8 @@ def filterTable(table, filterString):
     filteredTable = table.query(filterString)
     return filteredTable
 
-
 @task()
-def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
+def applyAlleleModel(values, columns, genotypeIDs, clinicalSampleIDmap, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
     resolvedGenotypeIDs = set()
@@ -35,11 +33,11 @@ def applyAlleleModel(values, columns, genotypeIDs, genotypeSampleIDmap, config):
         for j, column in enumerate(columns):
             matched = False
             subIDs = column.split(config["vcfLike"]["compoundSampleIdDelimiter"])
-            if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in genotypeSampleIDmap or genotypeSampleIDmap[id] not in seenSampleIDs or any([subID in genotypeSampleIDmap.values() for subID in subIDs])):
-                if id in genotypeSampleIDmap: seenSampleIDs.update(genotypeSampleIDmap[id])  # prevent duplicate genotypes from clinical data
+            if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in clinicalSampleIDmap or clinicalSampleIDmap[id] not in seenSampleIDs or any([subID in clinicalSampleIDmap.values() for subID in subIDs])):
+                if id in clinicalSampleIDmap: seenSampleIDs.update(clinicalSampleIDmap[id])  # prevent duplicate genotypes from clinical data
                 else:
                     for subID in subIDs:  # handle case where only external subject ID is available
-                        if subID in genotypeSampleIDmap.values():
+                        if subID in clinicalSampleIDmap.values():
                             seenSampleIDs.update(subID)
                             break
                 matched = True
@@ -154,17 +152,38 @@ def load(config):
             keep_default_na=True,
         )
     )
+    referenceVCF = (
+        (pd.read_csv(
+            config["vcfLike"]["frequencyMatchReference"],
+            sep="\t",
+            dtype=str,
+           
+            na_values=[".", "NA"],
+            keep_default_na=True,
+        )
+        if "xlsx" not in config["vcfLike"]["frequencyMatchReference"]
+        else pd.read_excel(
+            config["vcfLike"]["frequencyMatchReference"],
+            sheet_name=(
+                config["vcfLike"]["sheet"] if config["vcfLike"]["sheet"] else None
+            ),
+            dtype=str,
+            na_values=[".", "NA"],
+            keep_default_na=True,
+        )) if config["vcfLike"]["frequencyMatchReference"] else None
+    )
     
     annotatedVCF = annotatedVCF.set_index(config["vcfLike"]["indexColumn"])
+    referenceVCF = referenceVCF.set_index(config["vcfLike"]["indexColumn"]) if referenceVCF is not None else None
     
     return (
         clinicalData,
         externalSamples,
-        annotatedVCF
+        annotatedVCF.loc[annotatedVCF.index.dropna()],
+        referenceVCF.loc[referenceVCF.index.dropna()] if referenceVCF is not None else None
     )
 
-
-def balanceCaseControlDatasets(caseGenotypes, controlGenotypes, sample_frequencies, doBalance=True):
+def prepareCaseControlSamples(caseGenotypes, controlGenotypes, sample_frequencies, doBalance=True):
     caseIDs = caseGenotypes.columns
     controlIDs = controlGenotypes.columns
     
@@ -202,8 +221,6 @@ def balanceCaseControlDatasets(caseGenotypes, controlGenotypes, sample_frequenci
 
     return minorIDs, balancedMajorIDs, excessMajorIDs, sample_frequencies
 
-
-@task()
 def prepareDatasets(
     caseGenotypes,
     controlGenotypes,
@@ -211,19 +228,20 @@ def prepareDatasets(
     holdoutControlGenotypes,
     sampleFrequencies,
     verbose=True,
-    config=config
+    config=config,
+    freqReferenceGenotypeData=None,
 ):
-    minorIDs, balancedMajorIDs, excessMajorIDs, sampleFrequencies = balanceCaseControlDatasets(
-        caseGenotypes, controlGenotypes, sampleFrequencies
+    minorIDs, balancedMajorIDs, excessMajorIDs, sampleFrequencies = prepareCaseControlSamples(
+        caseGenotypes, controlGenotypes, sampleFrequencies, doBalance=True
     )
 
-    # Don't balance holdout samples to evaluate real-world specificity
+    # Only balance samples used in training
     (
         holdoutMinorIDs,
         holdoutBalancedMajorIDs,
         holdoutExcessMajorIDs,
         sampleFrequencies
-    ) = balanceCaseControlDatasets(holdoutCaseGenotypes, holdoutControlGenotypes, sampleFrequencies, doBalance=False)
+    ) = prepareCaseControlSamples(holdoutCaseGenotypes, holdoutControlGenotypes, sampleFrequencies, doBalance=False)
     holdoutCaseIDs = holdoutCaseGenotypes.columns
   
     allGenotypes = pd.concat(
@@ -284,12 +302,12 @@ def prepareDatasets(
             print(f"\n{len(holdoutExcessIDs)} are excess holdout:\n{holdoutExcessIDs}")
         print(f"\nVariant count: {len(allGenotypes.index)}")
 
-    # drop variants with missing values & that are invariant
+    # drop variants with missing values or invariant
     preCleanedVariantCounts = len(allGenotypes.index)
     allGenotypes = allGenotypes.dropna(
             how="any",
         ).loc[allGenotypes[crossValGenotypeIDs].std(axis=1) > 0]
-    print(f"Dropped {preCleanedVariantCounts - len(allGenotypes.index)} variants with missing values & that are invariant")
+    print(f"Dropped {preCleanedVariantCounts - len(allGenotypes.index)} variants with missing values or invariant")
 
     samples = allGenotypes.loc[:, crossValGenotypeIDs]
     excessMajorSamples = allGenotypes.loc[:, excessIDs]
@@ -344,14 +362,81 @@ def createGenotypeDataframe(genotype_dict, filteredVCF):
     return df
 
 
-@flow(task_runner=ConcurrentTaskRunner(), log_prints=True)
+def processGenotypes(filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config):
+    # cast genotypes as numeric, drop chromosome positions with missing values
+    caseGenotypeFutures, controlGenotypeFutures = applyAlleleModel.map(
+        unmapped(filteredVCF.to_numpy()),
+        unmapped(filteredVCF.columns.to_numpy()),
+        genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
+        clinicalSampleIDmap=unmapped(clinicalSampleIDmap),
+        config=unmapped(config),
+    )
+
+    caseGenotypeDict, missingCaseIDs, resolvedCaseIDs = caseGenotypeFutures.result()
+    controlGenotypeDict, missingControlIDs, resolvedControlIDs = controlGenotypeFutures.result()
+
+    return caseGenotypeDict, controlGenotypeDict, missingCaseIDs, missingControlIDs, resolvedCaseIDs, resolvedControlIDs
+
+
+@task()
+def integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, controlIDs):
+    holdoutCaseIDs = np.array([])
+    holdoutControlIDs = np.array([])
+    for i, label in enumerate(config["externalTables"]["label"]):
+        if config["externalTables"]["setType"][i] == "holdout":
+            if label == config["clinicalTable"]["caseAlias"]:
+                holdoutCaseIDs = np.append(
+                    holdoutCaseIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
+                )
+            elif label == config["clinicalTable"]["controlAlias"]:
+                holdoutControlIDs = np.append(
+                    holdoutControlIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
+                )
+        elif config["externalTables"]["setType"][i] == "crossval":
+            if label == config["clinicalTable"]["caseAlias"]:
+                caseIDs = np.append(
+                    caseIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
+                )
+            elif label == config["clinicalTable"]["controlAlias"]:
+                controlIDs = np.append(
+                    controlIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
+                )
+    return caseIDs, controlIDs, holdoutCaseIDs, holdoutControlIDs
+
+@task()
+def findClosestFrequencyVariant(reference_frequencies, input_frequencies):
+    """
+    Identifies the closest matching variant in the input dataset for each variant in the reference dataset based on allele frequency.
+
+    Args:
+    - reference_frequencies (pd.Series): Allele frequencies of the reference dataset's variants.
+    - input_frequencies (pd.Series): Allele frequencies of the input dataset's variants.
+
+    Returns:
+    - closest_variants (list): Indices of variants in the input dataset that are closest in frequency to each variant in the reference dataset.
+    """
+    closest_variants = []
+    if not reference_frequencies.empty and not input_frequencies.empty:
+        for ref_freq in reference_frequencies:
+            differences = (input_frequencies - ref_freq).abs()
+            # input variant with the smallest difference in frequency
+            closest_variant = differences.idxmin()
+            closest_variants.append(closest_variant)
+            input_frequencies = input_frequencies.drop(closest_variant)
+    else:
+        print("One or both of the frequency datasets are empty.")
+    return closest_variants
+
+
+@flow(task_runner=RayTaskRunner(), log_prints=True)
 def processInputFiles(config):
-    clinicalData, externalSamples, annotatedVCF = load(config)
+    clinicalData, externalSamples, annotatedVCF, referenceVCF = load(config)
 
     filteredClinicalData = filterTable(clinicalData, config["clinicalTable"]["filters"])
     print(
         f"filtered {len(clinicalData) - len(filteredClinicalData)} samples from clinical data"
     )
+    
     filteredExternalSamples = [
         filterTable(externalSampleTable, filterString)
         for externalSampleTable, filterString in zip(
@@ -364,8 +449,14 @@ def processInputFiles(config):
         print(
             f"filtered {len(externalSamples[i]) - len(externalSampleTable)} samples from external data {path}"
         )
+        
     filteredVCF = filterTable(annotatedVCF, config["vcfLike"]["filters"])
     print(f"filtered {annotatedVCF.shape[0] - filteredVCF.shape[0]} variants from VCF")
+    if referenceVCF is not None:
+        filteredReferenceVCF = filterTable(referenceVCF, config["vcfLike"]["filters"])
+        print(
+            f"filtered {referenceVCF.shape[0] - filteredReferenceVCF.shape[0]} variants from reference VCF"
+        )
 
     caseIDsMask, controlIDsMask = [
         filteredClinicalData[config["clinicalTable"]["labelColumn"]]
@@ -377,111 +468,47 @@ def processInputFiles(config):
         )
     ]
 
-    genotypeSampleIDmap = {id: filteredClinicalData.loc[id, config["clinicalTable"]["subjectIdColumn"]] for id in filteredClinicalData.index.tolist()}
+    clinicalSampleIDmap = {id: filteredClinicalData.loc[id, config["clinicalTable"]["subjectIdColumn"]] for id in filteredClinicalData.index.tolist()}
     caseIDs = caseIDsMask[caseIDsMask].index.to_numpy()
     controlIDs = controlIDsMask[controlIDsMask].index.to_numpy()
 
-    holdoutCaseIDs = np.array([])
-    holdoutControlIDs = np.array([])
-    for i, label in enumerate(config["externalTables"]["label"]):
-        if config["externalTables"]["setType"][i] == "holdout":
-            if label == config["clinicalTable"]["caseAlias"]:
-                holdoutCaseIDs = np.append(
-                    holdoutCaseIDs,
-                    [
-                        id
-                        for id in filteredExternalSamples[i].index.to_numpy()
-                        # if id not in config["sampling"]["sequesteredIDs"]
-                    ],
-                )
-            elif label == config["clinicalTable"]["controlAlias"]:
-                holdoutControlIDs = np.append(
-                    holdoutControlIDs,
-                    [
-                        id
-                        for id in filteredExternalSamples[i].index.to_numpy()
-                        # if id not in config["sampling"]["sequesteredIDs"]
-                    ],
-                )
+    caseIDs, controlIDs, holdoutCaseIDs, holdoutControlIDs = integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, controlIDs)
 
-        elif config["externalTables"]["setType"][i] == "crossval":
-            if label == config["clinicalTable"]["caseAlias"]:
-                caseIDs = np.append(
-                    caseIDs,
-                    [
-                        id
-                        for id in filteredExternalSamples[i].index.to_numpy()
-                        # if id not in config["sampling"]["sequesteredIDs"]
-                    ],
-                )
-            elif label == config["clinicalTable"]["controlAlias"]:
-                controlIDs = np.append(
-                    controlIDs,
-                    [
-                        id
-                        for id in filteredExternalSamples[i].index.to_numpy()
-                        # if id not in config["sampling"]["sequesteredIDs"]
-                    ],
-                )
-
-
-    # cast genotypes as numeric, drop chromosome positions with missing values
-    caseGenotypeFutures, controlGenotypeFutures = applyAlleleModel.map(
-        unmapped(filteredVCF.to_numpy()),
-        unmapped(filteredVCF.columns.to_numpy()),
-        genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
-        genotypeSampleIDmap=unmapped(genotypeSampleIDmap),
-        config=unmapped(config),
+    caseGenotypeDict, controlGenotypeDict, missingCaseIDs, missingControlIDs, resolvedCaseIDs, resolvedControlIDs = processGenotypes(
+        filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config
     )
-
-    caseGenotypeDict, missingCaseIDs, resolvedCaseIDs = caseGenotypeFutures.result()
-    (
-        controlGenotypeDict,
-        missingControlIDs,
-        resolvedControlIDs,
-    ) = controlGenotypeFutures.result()
-
+    
     if len(holdoutCaseIDs) > 0:
-        
-        resolvedHoldoutCaseIDs, missingHoldoutCaseIDs = [], []
-        resolvedHoldoutControlIDs, missingHoldoutControlIDs = [], []
-        (
-            holdoutCaseGenotypeFutures,
-            holdoutControlGenotypeFutures,
-        ) = applyAlleleModel.map(
-            unmapped(filteredVCF.to_numpy()),
-            unmapped(filteredVCF.columns.to_numpy()),
-            genotypeIDs=[IDs for IDs in (holdoutCaseIDs, holdoutControlIDs)],
-            genotypeSampleIDmap=unmapped(genotypeSampleIDmap),
-            config=unmapped(config),
+        holdoutCaseGenotypeDict, holdoutControlGenotypeDict, missingHoldoutCaseIDs, missingHoldoutControlIDs, resolvedHoldoutCaseIDs, resolvedHoldoutControlIDs = processGenotypes(
+            filteredVCF, clinicalSampleIDmap, holdoutCaseIDs, holdoutControlIDs, config
         )
-        (
-            holdoutCaseGenotypeDict,
-            missingHoldoutCaseIDs,
-            resolvedHoldoutCaseIDs,
-        ) = holdoutCaseGenotypeFutures.result()
-        (
-            holdoutControlGenotypeDict,
-            missingHoldoutControlIDs,
-            resolvedHoldoutControlIDs,
-        ) = holdoutControlGenotypeFutures.result()
     else:
         holdoutCaseGenotypeDict = {}
         holdoutControlGenotypeDict = {}
         resolvedHoldoutCaseIDs, missingHoldoutCaseIDs = None, None
         resolvedHoldoutControlIDs, missingHoldoutControlIDs = None, None
-
+        
+    if referenceVCF is not None:
+        freqReferenceCaseGenotypeDict, freqReferenceControlGenotypeDict, missingFreqReferenceCaseIDs, missingFreqReferenceControlIDs, resolvedFreqReferenceCaseIDs, resolvedFreqReferenceControlIDs = processGenotypes(
+            filteredReferenceVCF, clinicalSampleIDmap, caseIDs, controlIDs, config
+        )
+        # ensure reference & input share same resolved IDs
+        resolvedCaseIDs = list(set(resolvedCaseIDs).intersection(set(resolvedFreqReferenceCaseIDs)))
+        resolvedControlIDs = list(set(resolvedControlIDs).intersection(set(resolvedFreqReferenceControlIDs)))
+    else:
+        freqReferenceCaseGenotypeDict = {}
+        freqReferenceControlGenotypeDict = {}
+        missingFreqReferenceCaseIDs, missingFreqReferenceControlIDs = None, None
+    
     for alias, (IDs, genotypeDict) in {
         "caseAlias": (missingCaseIDs, caseGenotypeDict),
         "controlAlias": (missingControlIDs, controlGenotypeDict),
         "holdout cases": (missingHoldoutCaseIDs, holdoutCaseGenotypeDict),
         "holdout controls": (missingHoldoutControlIDs, holdoutControlGenotypeDict),
+        "caseAlias": (missingFreqReferenceCaseIDs, freqReferenceCaseGenotypeDict),
+        "controlAlias": (missingFreqReferenceControlIDs, freqReferenceControlGenotypeDict),
     }.items():
         if len(genotypeDict) == 0: continue
-        # sequesteredIDs = set(config["sampling"]["sequesteredIDs"]).intersection(
-        #     set(genotypeDict.keys())
-        # )
-        # IDs = set(IDs) - sequesteredIDs
         if len(IDs) > 0:
             if "holdout" not in alias:
                 print(
@@ -489,16 +516,11 @@ def processInputFiles(config):
                 )
             elif "holdout" in alias:
                 print(f"\nmissing {len(IDs)} {alias} IDs:\n {IDs}")
-        # if len(sequesteredIDs) > 0:
-        #     if "holdout" not in alias:
-        #         print(
-        #             f"\nsequestered {len(sequesteredIDs)} {config['clinicalTable'][alias]} IDs:\n {sequesteredIDs}"
-        #         )
-        #     elif "holdout" in alias:
-        #         print(f"\nsequestered {len(sequesteredIDs)} {alias} IDs:\n {IDs}")
 
     resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
     allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF).dropna().astype(np.int8)
+    if referenceVCF is not None:
+        freqReferenceAllGenotypes = createGenotypeDataframe({**freqReferenceCaseGenotypeDict, **freqReferenceControlGenotypeDict}, filteredReferenceVCF).dropna().astype(np.int8)
     
     if isinstance(allGenotypes.index, pd.MultiIndex):
         # Manually check for nulls in each level of the MultiIndex
@@ -511,24 +533,32 @@ def processInputFiles(config):
     # Calculate the allele frequencies
     allele_frequencies = (
         allGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
-    )
-
-    # Filter the genotypes based on frequency criteria
-    frequencyFilteredGenotypes = allGenotypes.loc[
-        allele_frequencies.between(
-            config["vcfLike"]["minAlleleFrequency"],
-            config["vcfLike"]["maxAlleleFrequency"]
-        )
+    ).loc[
+        lambda x: x.between(config["vcfLike"]["minAlleleFrequency"], config["vcfLike"]["maxAlleleFrequency"])
     ]
 
+    # Filter the genotypes based on frequency criteria
+    if referenceVCF is not None:
+        reference_allele_frequencies = (
+                freqReferenceAllGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
+            ).loc[
+            lambda x: x.between(config["vcfLike"]["minAlleleFrequency"], config["vcfLike"]["maxAlleleFrequency"])
+        ]
+        matched_allele_frequencies = findClosestFrequencyVariant(reference_allele_frequencies, allele_frequencies)
+        frequencyFilteredGenotypes = allGenotypes.loc[
+            matched_allele_frequencies
+        ].sort_index()
+        referenceFrequencyFilteredGenotypes = freqReferenceAllGenotypes.loc[reference_allele_frequencies].sort_index()
+        print(f"Matched {len(frequencyFilteredGenotypes)} alleles to reference VCF {config['vcfLike']['frequencyMatchReference']}")
+    else:
+        frequencyFilteredGenotypes = allGenotypes.loc[
+            allele_frequencies.index
+        ]
+        
     print(
-        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency above {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])} or below {'{:.3%}'.format(config['vcfLike']['maxAlleleFrequency'])}"
+        f"Filtered {len(filteredVCF) - len(frequencyFilteredGenotypes)} alleles with frequency below {'{:.3%}'.format(config['vcfLike']['minAlleleFrequency'])} or above {'{:.3%}'.format(config['vcfLike']['maxAlleleFrequency'])}"
     )
     print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
-    
-    if config['vcfLike']['maxVariants'] and config['vcfLike']['maxVariants'] < len(frequencyFilteredGenotypes):
-        frequencyFilteredGenotypes = frequencyFilteredGenotypes.sample(n=config['vcfLike']['maxVariants'], axis=0)
-        print(f"Thresholded maximum of {config['vcfLike']['maxVariants']} alleles.")
     
     caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
     controlGenotypesDataframe = createGenotypeDataframe(
@@ -545,6 +575,12 @@ def processInputFiles(config):
         if resolvedHoldoutControlIDs
         else pd.DataFrame(index=frequencyFilteredGenotypes.index)
     )
+    
+    if referenceVCF is not None:
+        referenceCaseGenotypesDataframe = createGenotypeDataframe(freqReferenceCaseGenotypeDict, filteredReferenceVCF).loc[referenceFrequencyFilteredGenotypes.index]
+        referenceControlGenotypesDataframe = createGenotypeDataframe(
+            freqReferenceControlGenotypeDict, filteredReferenceVCF
+        ).loc[referenceFrequencyFilteredGenotypes.index]
 
     if config["vcfLike"]["aggregateGenesBy"] != None:
         caseGenotypesDataframe = aggregateIntoGenes(caseGenotypesDataframe, config)
@@ -570,6 +606,9 @@ def processInputFiles(config):
         resolvedHoldoutControlIDs,
         "Holdout Control",
     )
+    if referenceVCF is not None:
+        referenceCaseGenotypes = Genotype(referenceCaseGenotypesDataframe, resolvedFreqReferenceCaseIDs, "Reference Case")
+        referenceControlGenotypes = Genotype(referenceControlGenotypesDataframe, resolvedFreqReferenceControlIDs, "Reference Control")
 
     genotypeData = GenotypeData(
         caseGenotypes,
@@ -577,6 +616,14 @@ def processInputFiles(config):
         controlGenotypes,
         holdoutControlGenotypes,
     )
+    
+    if referenceVCF is not None:
+        frequencyReferenceGenotypeData = {
+            "case": referenceCaseGenotypes,
+            "control": referenceControlGenotypes
+        }
+    else:
+        frequencyReferenceGenotypeData = None
 
     print(f"\n{len(resolvedCaseIDs)} cases:\n {resolvedCaseIDs}")
     print(f"\n{len(resolvedControlIDs)} controls:\n {resolvedControlIDs}")
@@ -587,7 +634,7 @@ def processInputFiles(config):
             f"\n{len(resolvedHoldoutControlIDs)} holdout controls:\n {holdoutControlIDs}"
         )
 
-    return genotypeData, filteredClinicalData
+    return genotypeData, frequencyReferenceGenotypeData, filteredClinicalData
 
 
 def toMultiprocessDict(orig_dict, manager):

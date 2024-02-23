@@ -173,7 +173,7 @@ class FoldResult(SampleData):
             # Check for zygosity configuration and calculate RAF (Rare Allele Frequencies)
             if config['vcfLike']['zygosity']:
                 # Assuming zygosity is coded as 0, 1, 2 (homozygous reference, heterozygous, homozygous and/or rare variant)
-                # Calculate frequency of homozygous variant (zygosity == 2)
+                # Calculate frequency of rare variant (zygosity == 2)
                 case_raf = (targetCaseData[self.ids[np.where(self.labels == 1)]] == 2).mean(axis=1)
                 control_raf = (targetControlData[self.ids[np.where(self.labels == 0)]] == 2).mean(axis=1)
 

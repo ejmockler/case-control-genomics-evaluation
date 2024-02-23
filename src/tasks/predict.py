@@ -13,6 +13,7 @@ from sklearn.metrics import make_scorer, mean_squared_error, roc_auc_score, roc_
 from tasks.input import prepareDatasets
 from tasks.visualize import trackBootstrapVisualizations
 from prefect_ray.task_runners import RayTaskRunner
+from prefect.task_runners import ConcurrentTaskRunner
 
 from neptune.types import File
 from prefect import flow, task
@@ -112,7 +113,7 @@ def get_probabilities(model, samples):
             probabilities = np.array([[1 - p, p] for p in probabilities])
     return probabilities
 
-def control_group_scorer(estimator, X, y, control_label=0):
+def control_group_scorer(y, X, control_label=0):
     """
     Custom scoring function that calculates the negative mean squared error for the control group.
     
@@ -128,11 +129,8 @@ def control_group_scorer(estimator, X, y, control_label=0):
     # Modify the condition below if your labeling differs.
     control_indices = np.where(y == control_label)  # Identify control group samples
     
-    # Predict for the control group
-    control_predictions = estimator.predict(X[control_indices])
-    
     # Calculate MSE for the control group
-    mse = mean_squared_error(y[control_indices], control_predictions)
+    mse = mean_squared_error(y[control_indices], X[control_indices])
     
     # Return the negative MSE because BayesSearchCV maximizes the score
     return -mse
@@ -149,7 +147,7 @@ def optimizeHyperparameters(
         n_jobs=n_jobs,
         n_points=2,
         return_train_score=True,
-        n_iter=30,
+        n_iter=15,
         scoring=metricFunction,
     )
     optimizer.fit(samples, labels)
@@ -312,7 +310,7 @@ def evaluate(
             model,
             hyperParameterSpace,
             cvIterator,
-            make_scorer(control_group_scorer, greater_is_better=True),
+            "neg_mean_squared_error",
         )
         model.set_params(**fittedOptimizer.best_params_)
     else:
@@ -369,13 +367,12 @@ def evaluate(
         )
     )
 
-
-@flow(task_runner=RayTaskRunner(), retries=999)
 def classify(
     runNumber,
     model,
     hyperParameterSpace,
     genotypeData,
+    freqReferenceGenotypeData,
     clinicalData,
     innerCvIterator,
     outerCvIterator,
@@ -395,7 +392,8 @@ def classify(
         holdoutControlGenotypes,
         sample_frequencies,
         verbose=(True if runNumber == 0 else False),
-        config=config
+        config=config,
+        freqReferenceGenotypeData=freqReferenceGenotypeData
     )
     if embedding is None: raise Exception("No samples found in embedding.")
 
@@ -438,7 +436,7 @@ def classify(
         ids=embedding["holdoutSampleIndex"],
         labels=embedding["holdoutLabels"],
         vectors=embedding["holdoutSamples"],
-        geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+        geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
     )
 
     evaluate_args = [
@@ -448,21 +446,21 @@ def classify(
                 ids=embedding["sampleIndex"][trainIndices],
                 labels=embedding["labels"][trainIndices],
                 vectors=embedding["samples"][trainIndices],
-                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
             ),
             SampleData(
                 set="test",
                 ids=embedding["sampleIndex"][testIndices],
                 labels=embedding["labels"][testIndices],
                 vectors=embedding["samples"][testIndices],
-                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
             ),
             SampleData(
                 set=embedding["excessMajorSetName"],
                 ids=embedding["excessMajorIndex"],
                 labels=embedding["excessMajorLabels"],
                 vectors=embedding["excessMajorSamples"],
-                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
                 ),
             holdoutData,
             model,
@@ -492,14 +490,14 @@ def classify(
 
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
-            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
+            {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
             {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold"""
         if modelResults.holdout:
             holdoutPlotSubtitle = f"""
-                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
+                {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
                 Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
                 
                 Ethnically variable holdout
@@ -517,7 +515,7 @@ def classify(
             gc.collect()
         # if modelResults.excess:
         #     excessPlotSubtitle = f"""
-        #         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][-1]).unique())) +' genes)')}
+        #         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
         #         Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
         #         {len(embedding['excessMajorLabels'])} {modelResults.excess[0].set} samples @ {'{:.1%}'.format(modelResults.average_excess_accuracy)} accuracy"""
@@ -541,9 +539,9 @@ def classify(
     return sample_frequencies, modelResults
 
 
-@flow()
 def bootstrap(
     genotypeData,
+    frequencyReferenceGenotypeData,
     clinicalData,
     model,
     hyperParameterSpace,
@@ -583,6 +581,7 @@ def bootstrap(
                     model,
                     hyperParameterSpace,
                     genotypeData,
+                    frequencyReferenceGenotypeData,
                     clinicalData,
                     innerCvIterator,
                     outerCvIterator,
@@ -593,7 +592,6 @@ def bootstrap(
             bootstrap.iteration_results.append(
                 iterationResults
             )
-            pass
         except Exception as e:
             print("Error in bootstrap iteration " + str(runNumber) + f"{e}")
             raise

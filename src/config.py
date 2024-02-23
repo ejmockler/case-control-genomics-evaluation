@@ -1,30 +1,32 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/cardiacGenotypes.csv",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
             "position",
+            "rsID",
             "Gene",
-        ],  # header that indexes variants (set as list with multiple columns)
-        "geneMultiIndexLevel": 2,  # level of gene index in indexColumn
+        ],  # header that indexes variants (list if multiple columns)
+        "geneMultiIndexLevel": 3,  # level of gene index in indexColumn
         "aggregateGenesBy": None,  # aggregate variants by mean or sum across genes. Set to None to disable.
         "compoundSampleIdDelimiter": "__",  # delimiter for compound sample IDs in column names
         "compoundSampleIdStartIndex": 1,  # index of genotype ID in compound sample ID
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
-        "binarize": True,  # binarize variants to 0/1, or sum to weigh allele frequency,
-        "zygosity": False,  # bin variants by zygosity (homozygous + rare heterozygous, heterozygous)
+        "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency,
+        "zygosity": True,  # bin variants by zygosity (homozygous + rare heterozygous, heterozygous)
         "minAlleleFrequency": 0.005,  # filter out variants with allele frequency less than this
         "maxAlleleFrequency": 1.00,  # filter out variants with allele frequency greater than this
         "maxVariants": None, # set max number of variants for control; set to None to disable
+        "frequencyMatchReference": None, # reference VCF-like to frequency-match alleles; must have same indices as vcfLike
         # 'alleleModel': ['dominant', 'recessive', 'overDominant'],  # biallelic allele models to test on gene sets
         "filters": {},
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "Cardiac variants (dominant model), Caucasian individuals",  # name of the experiment
+        "name": "NUP variants (rare-binned, rsID only), Caucasian individuals",  # name of the experiment
         "entity": "ejmockler",
-        "project": "cardiac60-zygosityRareBinned-0.005MAF",
+        "project": "NUPs150-rsID-rareBinned-0.005MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -80,7 +82,7 @@ config = {
         ],
     },
     "sampling": {
-        "bootstrapIterations": 60,
+        "bootstrapIterations": 150,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "lastIteration": 0,
         "sequesteredIDs": [],
