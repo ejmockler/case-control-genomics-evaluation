@@ -424,7 +424,7 @@ def trackBootstrapVisualizations(
                     result
                     for result in modelResults.test[
                         k
-                    ].fitted_optimizer.optimizer_results_
+                    ].optimizer_results
                 ]
                 for k in range(config["sampling"]["crossValIterations"])
             },
@@ -632,7 +632,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                         result
                         for foldResult in modelResults.iteration_results
                         for testFold in foldResult.test
-                        for result in testFold.fitted_optimizer.optimizer_results_
+                        for result in testFold.optimizer_results
                     ]
                 },
             )
@@ -682,9 +682,9 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-            Ethnically variable holdout
+            {config['externalTables']['holdoutSetName']} holdout
             {seenHoldoutCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy)} accuracy, {seenHoldoutControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_control_accuracy)} accuracy
-            {bootstrapHoldoutCount} ethnically-variable samples"""
+            {bootstrapHoldoutCount} {config['externalTables']['holdoutSetName']} samples"""
 
         holdoutAccuracyHistogram = px.histogram(
             holdoutResultsDataFrame,
@@ -729,7 +729,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         ) = plotConfusionMatrix(
             f"""
                 Confusion Matrix
-                {plotSubtitle}
+                {holdoutPlotSubtitle}
                 """,
             holdoutLabelsPredictions,
             config=config,
@@ -1021,9 +1021,9 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
             {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
-            Ethnically variable holdout
+            {config['externalTables']['holdoutSetName']} holdout
             {seenHoldoutCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenHoldoutControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
-            {bootstrapHoldoutCount} ethnically-variable samples"""
+            {bootstrapHoldoutCount} holdout samples"""
 
         holdoutAucPlot = plotAUC(
             f"""

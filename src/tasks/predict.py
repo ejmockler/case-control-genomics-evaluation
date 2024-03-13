@@ -2,6 +2,7 @@ from io import StringIO
 import json
 import os
 import pickle
+from traceback import print_exception
 import matplotlib
 
 from tasks.data import BootstrapResult, EvaluationResult, FoldResult, SampleData
@@ -147,7 +148,7 @@ def optimizeHyperparameters(
         n_jobs=n_jobs,
         n_points=2,
         return_train_score=True,
-        n_iter=15,
+        n_iter=10,
         scoring=metricFunction,
     )
     optimizer.fit(samples, labels)
@@ -191,7 +192,7 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
     return runID
 
 
-def trackResults(runID: str, evaluationResult: EvaluationResult, config):
+def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequencies, config):
     runPath = runID
 
     testResultsDataframe = evaluationResult.test_results_dataframe
@@ -201,13 +202,17 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, config):
     excessResultsDataframe = evaluationResult.excess_results_dataframe
     excessResultsDataframe.to_csv(f"{runPath}/excessResults.csv")
     
+    pd.Series(sampleFrequencies, name="draw_count").to_csv(f"{runPath}/sampleDrawFrequencies.csv")
+    
     evaluationResult.average()
     for k in range(config["sampling"]["crossValIterations"]):
         if config["model"]["hyperparameterOptimization"]:
             hyperparameterDir = f"{runPath}/hyperparameters"
             os.makedirs(hyperparameterDir, exist_ok=True)
             with open(f"{hyperparameterDir}/{k+1}.json", "w") as file:
-                json.dump(evaluationResult.test[k].fitted_optimizer.best_params_, file)
+                json.dump(evaluationResult.test[k].hyperparameters, file)
+            with open(f"{hyperparameterDir}/{k+1}_optimizerResults.pkl", "wb") as file:
+                pickle.dump(evaluationResult.test[k].optimizer_results, file)
 
         os.makedirs(f"{runPath}/testLabels", exist_ok=True)
         os.makedirs(f"{runPath}/trainLabels", exist_ok=True)
@@ -343,7 +348,8 @@ def evaluate(
             shapValues,
             shapExplainer,
             shapMasker,
-            fittedOptimizer,
+            fittedOptimizer.optimizer_results_ if fittedOptimizer else None,
+            fittedOptimizer.best_params_ if fittedOptimizer else None,
         ),
         FoldResult(
             "holdout",
@@ -479,6 +485,7 @@ def classify(
         testResult, holdoutResult, excessResult = evaluate(*args)
         testResult.append_allele_frequencies(genotypeData)
         holdoutResult.append_allele_frequencies(genotypeData)
+        
         modelResults.train.append(args[0])
         modelResults.test.append(testResult)
         modelResults.holdout.append(holdoutResult)
@@ -486,7 +493,7 @@ def classify(
         gc.collect()
 
     if track:
-        trackResults(runID, modelResults, config)
+        trackResults(runID, modelResults, sample_frequencies, config)
 
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
@@ -494,15 +501,16 @@ def classify(
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
-            {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold"""
+            {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold
+            Bootstrap iteration {runNumber+1}"""
         if modelResults.holdout:
             holdoutPlotSubtitle = f"""
                 {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
                 Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
                 
-                Ethnically variable holdout
+                {config['externalTables']['holdoutSetName']} holdout
                 {np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy)} accuracy, {len(embedding['holdoutLabels']) - np.count_nonzero(embedding['holdoutLabels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_control_accuracy)} accuracy
-                {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold"""
+                Bootstrap iteration {runNumber+1}"""
 
             trackBootstrapVisualizations(
                 runID,
@@ -560,13 +568,13 @@ def bootstrap(
         allIDs = dataset.ids
         try:
             subjectIDs = clinicalData.loc[list(allIDs), config['clinicalTable']['subjectIdColumn']]
+            preSequesterCount = len(allIDs)
+            print(f"Sequestered {preSequesterCount - len(dataset.ids)} {attr} samples")
         except:
             subjectIDs = pd.Series(index=allIDs)
-        preSequesterCount = len(allIDs)
         dataset.ids = [id for id in allIDs 
                        if not any([id in idToDrop or idToDrop in id or (str(subjectIDs[id]) in idToDrop or idToDrop in str(subjectIDs[id])) for idToDrop in idsToDrop])]
         dataset.genotype = dataset.genotype.drop([id for id in idsToDrop if id in dataset.genotype.columns], axis=1)
-        print(f"Sequestered {preSequesterCount - len(dataset.ids)} {attr} samples")
         setattr(genotypeData, attr, dataset)
 
     # parallelize with workflow engine in cluster environment
@@ -593,7 +601,8 @@ def bootstrap(
                 iterationResults
             )
         except Exception as e:
-            print("Error in bootstrap iteration " + str(runNumber) + f"{e}")
+            print("Error in bootstrap iteration " + str(runNumber) + f": {e}")
+            print_exception(e)
             raise
         gc.collect()
 

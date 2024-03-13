@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
+        "path": "../adhoc analysis/NUP_aals_mine_genotypes.tsv",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -24,9 +24,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUP variants (rare-binned, rsID only), Caucasian individuals",  # name of the experiment
+        "name": "NUP variants (rare-binned, rsID only)",  # name of the experiment
         "entity": "ejmockler",
-        "project": "NUPs150-rsID-rareBinned-0.005MAF",
+        "project": "NUPs15-rsID-rareBinned-0.005MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -36,7 +36,7 @@ config = {
         "subjectIdColumn": "ExternalSubjectId",  # unique ID for each patient
         "labelColumn": "Subject Group",  # header that has case/control labels
         "controlLabels": [
-            "Non-Neurological Control"
+           "Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
         "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
@@ -44,45 +44,56 @@ config = {
         "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
+        "holdoutSetName": "AALS >=85% Accurate Caucasian Cases and Ethnically-Variable Controls",
         "path": [
             "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
-            # "../adhoc analysis/ALS-NUPS-2000__accurateSamples_>=97.5%.csv",
-            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
-            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
             "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
+            #"../adhoc analysis/>=85%accurateCases_LogisticRegression_NUPs60-rsID-rareBinned-0.005MAF.tsv",
+            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
+            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
+            #"../adhoc analysis/aals_case_ids.tsv",
+            #"../adhoc analysis/mine_control_ids.tsv",
+            #"../adhoc analysis/>=85%accurateCases_highDraw_LogisticRegression_NUPs100-projMine-rsID-rareBinned-0.005MAF.tsv"
         ],  # external sample table
         "label": [
             "control",
-            # "case",
+            "control",
             "case",
             "control",
-            "control",
+            #"case", 
+            #"control",
+            #"case"
         ],  # case | control
         "setType": [
             "crossval",
-            # "crossval",
             "holdout",
             "holdout",
             "holdout",
+            #"holdout",
+            #"crossval",
+            #"crossval"
         ],
         "idColumn": [
             "Sample name",
-            # "id",
-            "ExternalSampleId",
-            "ExternalSampleId",
             "Sample name",
+            "id",
+            "id",
+            #"id",
+            #"id",
+            #"id"
         ],  # sample ID header
         "filters": [
-            # TODO add other motor neuron disease labels
             "`Superpopulation code`=='EUR'",
-            # "`testLabel`==1",
+            "`Superpopulation code`!='EUR'",
             "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
             "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
-            "`Superpopulation code`!='EUR'",
+            #"",
+            "",
+            ""
         ],
     },
     "sampling": {
-        "bootstrapIterations": 150,
+        "bootstrapIterations": 15,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "lastIteration": 0,
         "sequesteredIDs": [],

@@ -189,6 +189,8 @@ def prepareCaseControlSamples(caseGenotypes, controlGenotypes, sample_frequencie
     
     # If balance is False, return all IDs without balancing
     if not doBalance:
+        for id in list(caseIDs) + list(controlIDs):
+            sample_frequencies[id] += 1
         return caseIDs, controlIDs, [], sample_frequencies
     
     # store number of cases & controls

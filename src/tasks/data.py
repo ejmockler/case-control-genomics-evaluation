@@ -149,7 +149,8 @@ class FoldResult(SampleData):
     shap_explanation: Optional[object] = None
     shap_explainer: Optional[Explainer] = None
     shap_masker: Optional[Masker] = None
-    fitted_optimizer: Optional[object] = None
+    optimizer_results: Optional[list] = None
+    hyperparameters: Optional[dict] = None
 
     def __post_init__(self):
         if "excess" not in self.set: self.calculate_AUC()
@@ -691,7 +692,7 @@ class BootstrapResult:
 
 @dataclass
 class ClassificationResults:
-    """Initializes storage for all model results across bootstraps."""
+    """Initializes storage for model result across all bootstraps."""
 
     modelResults: list[BootstrapResult] = field(default_factory=list)
 
