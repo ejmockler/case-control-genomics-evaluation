@@ -32,10 +32,11 @@ from joblib import Parallel, delayed
 async def main(
     config=config,
     genotypeData=None,
+    freqReferenceGenotypeData = None,
     clinicalData=None,
     trackVisualizations=True,
 ):
-    if (genotypeData is None and clinicalData is None):
+    if (genotypeData is None and freqReferenceGenotypeData is None and clinicalData is None):
         (
             genotypeData,
             freqReferenceGenotypeData,

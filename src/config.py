@@ -24,9 +24,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUP variants (rare-binned, rsID only)",  # name of the experiment
+        "name": "NUP variants (rare-binned, rsID only), Project MinE",  # name of the experiment
         "entity": "ejmockler",
-        "project": "NUPs15-rsID-rareBinned-0.005MAF",
+        "project": "NUPs60-projMine-rsID-rareBinned-0.005MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -36,64 +36,69 @@ config = {
         "subjectIdColumn": "ExternalSubjectId",  # unique ID for each patient
         "labelColumn": "Subject Group",  # header that has case/control labels
         "controlLabels": [
-           "Non-Neurological Control"
+           #"Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
-        "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
+        "caseLabels": [],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
         "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
     },
     "externalTables": {
-        "holdoutSetName": "AALS >=85% Accurate Caucasian Cases and Ethnically-Variable Controls",
-        "path": [
-            "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
-            "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
-            #"../adhoc analysis/>=85%accurateCases_LogisticRegression_NUPs60-rsID-rareBinned-0.005MAF.tsv",
-            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
-            "../adhoc analysis/ACWM_ethnicallyVariable.tsv",
-            #"../adhoc analysis/aals_case_ids.tsv",
-            #"../adhoc analysis/mine_control_ids.tsv",
-            #"../adhoc analysis/>=85%accurateCases_highDraw_LogisticRegression_NUPs100-projMine-rsID-rareBinned-0.005MAF.tsv"
-        ],  # external sample table
-        "label": [
-            "control",
-            "control",
-            "case",
-            "control",
-            #"case", 
-            #"control",
-            #"case"
-        ],  # case | control
-        "setType": [
-            "crossval",
-            "holdout",
-            "holdout",
-            "holdout",
-            #"holdout",
-            #"crossval",
-            #"crossval"
-        ],
-        "idColumn": [
-            "Sample name",
-            "Sample name",
-            "id",
-            "id",
-            #"id",
-            #"id",
-            #"id"
-        ],  # sample ID header
-        "filters": [
-            "`Superpopulation code`=='EUR'",
-            "`Superpopulation code`!='EUR'",
-            "`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
-            "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
-            #"",
-            "",
-            ""
-        ],
+        "holdoutSetName": "Caucasian AnswerALS & 1000 Genomes",
+        "metadata": [
+            {
+                "path": "../adhoc analysis/mine_control_ids.tsv",
+                "label": "control",
+                "setType": "crossval",
+                "idColumn": "id",
+                "filters":""
+            },
+            {
+                "path": "../adhoc analysis/mine_case_ids.tsv",
+                "label": "case",
+                "setType": "crossval",
+                "idColumn": "id",
+                "filters":""
+            },
+            {
+                "path": "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv", 
+                "label": "control", 
+                "setType": "holdout", 
+                "idColumn": "Sample name", 
+                "filters":  "`Superpopulation code`=='EUR'",
+            },
+            # {
+            #     "path": "../adhoc analysis/>=95%accurateCases_LogisticRegression_NUPs60-rareBinned-0.005MAF.tsv", 
+            #     "label": "case", 
+            #     "setType": "crossval", 
+            #     "idColumn": "id", 
+            #     "filters":  "",
+            # },
+            # {
+            #     "path": "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv", 
+            #     "label": "control", 
+            #     "setType": "holdout", 
+            #     "idColumn": "Sample name", 
+            #     "filters":  "`Superpopulation code`!='EUR'",
+            # },
+            {
+                "path":"../adhoc analysis/ACWM_ethnicallyVariable.tsv", 
+                "label": "case", 
+                "setType": "holdout", 
+                "idColumn": "ExternalSampleId", 
+                "filters": "`Subject Group`=='ALS Spectrum MND' & `pct_european`>=0.85",
+            },
+            {
+                "path":"../adhoc analysis/ACWM_ethnicallyVariable.tsv", 
+                "label": "control", 
+                "setType": "holdout", 
+                "idColumn": "ExternalSampleId", 
+                "filters":  "`Subject Group`=='Non-Neurological Control' & `pct_european`>=0.85",
+            },
+        ],  # external sample tables
     },
     "sampling": {
-        "bootstrapIterations": 15,
+        "bootstrapIterations": 60,
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "lastIteration": 0,
         "sequesteredIDs": [],

@@ -1,3 +1,4 @@
+from scipy.stats import mode
 from typing import Iterable, Literal, Union
 from prefect import unmapped, task, flow
 from prefect_ray.task_runners import RayTaskRunner
@@ -20,15 +21,15 @@ def filterTable(table, filterString):
     return filteredTable
 
 @task()
-def applyAlleleModel(values, columns, genotypeIDs, clinicalSampleIDmap, config):
+def processAlleles(values, columns, genotypeIDs, clinicalSampleIDmap, config):
     # some genotype IDs are subset of column names (or vice versa)
     genotypeDict = dict()
     resolvedGenotypeIDs = set()
     seenSampleIDs = set()
+    # lookup table for allele mode values to impute missing genotypes
+    alleleModeMap = {}
     # iterate clinical sample IDs
     for id in tqdm(genotypeIDs, unit="id"):
-        # if id in config["sampling"]["sequesteredIDs"]:
-        #     continue
         # iterate genotype samples
         for j, column in enumerate(columns):
             matched = False
@@ -59,31 +60,21 @@ def applyAlleleModel(values, columns, genotypeIDs, clinicalSampleIDmap, config):
                 ):
                     matched = any(idValue in delimitedColumn for idValue in delimitedID)
             if matched:
-                # if column in config["sampling"]["sequesteredIDs"] or id in config["sampling"]["sequesteredIDs"]:
-                #     break
                 processed_genotypes = []
-                for genotype in values[:, j]:
+                for i, genotype in enumerate(values[:, j]):
                     alleles = genotype.replace("'", "").split("/") if isinstance(genotype, str) else []
                     if all([allele.isdigit() for allele in alleles]):
-                        if config["vcfLike"]["binarize"]:
-                            # Binarize logic
-                            result = np.clip(np.sum([int(allele) for allele in alleles]), a_min=0, a_max=1)
-                        elif config["vcfLike"]["zygosity"]:
-                            # Zygosity logic
-                            if all(allele == "0" for allele in alleles):
-                                result = 0
-                            elif all(allele != "0" for allele in alleles):
-                                result = 2
-                            elif any(int(allele) > 1 for allele in alleles):
-                                result = 2
-                            else:
-                                result = 1
-                        else:
-                            # Default case (sum of alleles)
-                            if all([allele.isdigit() for allele in alleles]):
-                                result = np.sum([int(allele) for allele in alleles])
+                        # Compute result based on allele model
+                        result = applyAlleleModel(alleles, config)
                     else:
-                        result = np.nan
+                        # If allele mode not already calculated, compute and store it
+                        if i not in alleleModeMap:
+                            # Extract alleles for all samples for this variant
+                            all_alleles = [genotype.replace("'", "").replace('.', "").split("/") for genotype in values[i] if isinstance(genotype, str)]
+                            # Calculate mode for each allele based on allele model
+                            allele_mode = computeAlleleMode(all_alleles, config)
+                            alleleModeMap[i] = allele_mode
+                        result = alleleModeMap[i]
 
                     processed_genotypes.append(result)
 
@@ -92,11 +83,32 @@ def applyAlleleModel(values, columns, genotypeIDs, clinicalSampleIDmap, config):
                 values = np.delete(values, j, axis=1)
                 resolvedGenotypeIDs.update({id})
                 break
+            
     missingGenotypeIDs = (
         set(genotypeIDs) - resolvedGenotypeIDs
     )  # leftover columns are missing
     return genotypeDict, missingGenotypeIDs, resolvedGenotypeIDs
 
+def applyAlleleModel(alleles, config):
+    if config["vcfLike"]["binarize"]:
+        return np.clip(np.sum([int(allele) for allele in alleles]), a_min=0, a_max=1)
+    elif config["vcfLike"]["zygosity"]:
+        if all(allele == "0" for allele in alleles):
+            return 0
+        elif all(allele != "0" for allele in alleles):
+            return 2
+        elif any(int(allele) > 1 for allele in alleles):
+            return 2
+        else:
+            return 1
+    else:
+        return np.sum([int(allele) for allele in alleles])
+
+def computeAlleleMode(all_alleles, config):
+    # Process all_alleles to match the allele model (binary, zygosity, sum, etc.)
+    processed_alleles = [applyAlleleModel(a, config) for a in all_alleles if all(a)]
+    most_common = mode(processed_alleles)
+    return most_common.mode[0] if most_common.count[0] > 0 else np.nan
 
 def aggregateIntoGenes(
     genotypeDataframe: pd.DataFrame,
@@ -127,17 +139,14 @@ def load(config):
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
     )
     externalSamples = [
-        pd.read_csv(path, sep="\t", index_col=idColumn)
-        for path, idColumn in zip(
-            config["externalTables"]["path"], config["externalTables"]["idColumn"]
-        )
+        pd.read_csv(externalTable["path"], sep="\t", index_col=externalTable["idColumn"])
+        for externalTable in config["externalTables"]["metadata"]
     ]
     annotatedVCF = (
         pd.read_csv(
             config["vcfLike"]["path"],
             sep="\t",
             dtype=str,
-           
             na_values=[".", "NA"],
             keep_default_na=True,
         )
@@ -157,7 +166,6 @@ def load(config):
             config["vcfLike"]["frequencyMatchReference"],
             sep="\t",
             dtype=str,
-           
             na_values=[".", "NA"],
             keep_default_na=True,
         )
@@ -366,7 +374,7 @@ def createGenotypeDataframe(genotype_dict, filteredVCF):
 
 def processGenotypes(filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config):
     # cast genotypes as numeric, drop chromosome positions with missing values
-    caseGenotypeFutures, controlGenotypeFutures = applyAlleleModel.map(
+    caseGenotypeFutures, controlGenotypeFutures = processAlleles.map(
         unmapped(filteredVCF.to_numpy()),
         unmapped(filteredVCF.columns.to_numpy()),
         genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
@@ -384,8 +392,9 @@ def processGenotypes(filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, conf
 def integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, controlIDs):
     holdoutCaseIDs = np.array([])
     holdoutControlIDs = np.array([])
-    for i, label in enumerate(config["externalTables"]["label"]):
-        if config["externalTables"]["setType"][i] == "holdout":
+    for i, externalTableMetadata in enumerate(config["externalTables"]["metadata"]):
+        label = externalTableMetadata["label"]
+        if externalTableMetadata["setType"] == "holdout":
             if label == config["clinicalTable"]["caseAlias"]:
                 holdoutCaseIDs = np.append(
                     holdoutCaseIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
@@ -394,7 +403,7 @@ def integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, control
                 holdoutControlIDs = np.append(
                     holdoutControlIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
                 )
-        elif config["externalTables"]["setType"][i] == "crossval":
+        elif externalTableMetadata["setType"] == "crossval":
             if label == config["clinicalTable"]["caseAlias"]:
                 caseIDs = np.append(
                     caseIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
@@ -436,20 +445,16 @@ def processInputFiles(config):
 
     filteredClinicalData = filterTable(clinicalData, config["clinicalTable"]["filters"])
     print(
-        f"filtered {len(clinicalData) - len(filteredClinicalData)} samples from clinical data"
+        f"dropped {len(clinicalData) - len(filteredClinicalData)} samples from clinical data"
     )
     
-    filteredExternalSamples = [
-        filterTable(externalSampleTable, filterString)
-        for externalSampleTable, filterString in zip(
-            externalSamples, config["externalTables"]["filters"]
+    filteredExternalSamples = []
+    for i, externalTableMetadata in enumerate(config["externalTables"]["metadata"]):
+        filteredExternalSamples.append(
+            filterTable(externalSamples[i], externalTableMetadata["filters"])
         )
-    ]
-    for i, (externalSampleTable, path) in enumerate(
-        zip(filteredExternalSamples, config["externalTables"]["path"])
-    ):
         print(
-            f"filtered {len(externalSamples[i]) - len(externalSampleTable)} samples from external data {path}"
+            f"dropped {len(externalSamples[i]) - len(filteredExternalSamples[i])} samples from external data {externalTableMetadata['path']}"
         )
         
     filteredVCF = filterTable(annotatedVCF, config["vcfLike"]["filters"])
@@ -457,7 +462,7 @@ def processInputFiles(config):
     if referenceVCF is not None:
         filteredReferenceVCF = filterTable(referenceVCF, config["vcfLike"]["filters"])
         print(
-            f"filtered {referenceVCF.shape[0] - filteredReferenceVCF.shape[0]} variants from reference VCF"
+            f"dropped {referenceVCF.shape[0] - filteredReferenceVCF.shape[0]} variants from reference VCF"
         )
 
     caseIDsMask, controlIDsMask = [

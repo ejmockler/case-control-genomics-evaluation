@@ -199,7 +199,7 @@ def plotConfusionMatrix(title, labelsPredictionsByInstance, config):
         all_labels.extend(labels)
         all_predictions.extend(predictions)
 
-    avg_matrix = confusion_matrix(all_labels, all_predictions, normalize="all")
+    avg_matrix = confusion_matrix(all_labels, all_predictions, normalize="columns")
 
     # Create ConfusionMatrixDisplay for the average confusion matrix
     disp = ConfusionMatrixDisplay(
@@ -584,6 +584,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         color_discrete_map={0: "red", 1: "blue"},
         barmode="overlay",
         range_x=[0, 1],
+        nbins=100,
         title=f"""Mean test sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
     probabilityHistogram = px.histogram(
@@ -594,6 +595,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         hover_data={"index": list(modelResults.test_dict.keys())},
         color_discrete_map={0: "red", 1: "blue"},
         barmode="overlay",
+        nbins=100,
         title=f"""Mean test sample probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
     aucPlot = plotAUC(
@@ -677,14 +679,14 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             )
         }
 
-        holdoutPlotSubtitle = f"""
-            {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+        holdoutPlotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+        
             {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
             {config['externalTables']['holdoutSetName']} holdout
             {seenHoldoutCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy)} accuracy, {seenHoldoutControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_holdout_control_accuracy)} accuracy
-            {bootstrapHoldoutCount} {config['externalTables']['holdoutSetName']} samples"""
+            {bootstrapHoldoutCount} holdout samples"""
 
         holdoutAccuracyHistogram = px.histogram(
             holdoutResultsDataFrame,
@@ -695,6 +697,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             color_discrete_map={0: "red", 1: "blue"},
             barmode="overlay",
             range_x=[0, 1],
+            nbins=100,
             title=f"""Mean holdout accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
         )
         holdoutProbabilityHistogram = px.histogram(
@@ -705,6 +708,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             hover_data={"index": list(modelResults.holdout_dict.keys())},
             color_discrete_map={0: "red", 1: "blue"},
             barmode="overlay",
+            nbins=100,
             title=f"""Mean holdout probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
         )
         holdoutAucPlot = plotAUC(
@@ -1016,8 +1020,8 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
             for modelResults in classificationResults.modelResults
         }
 
-        holdoutPlotSubtitle = f"""
-            {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+        holdoutPlotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
+        
             {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
             Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
 

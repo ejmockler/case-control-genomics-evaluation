@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+from traceback import print_exception
 from joblib import Parallel, delayed
 import pandas as pd
 from prefect import flow, task
@@ -40,6 +41,7 @@ def relativePerplexity(y_true, y_pred, y_true_baseline, y_pred_baseline, epsilon
 
 def getBaselineFeatureResults(
     genotypeData,
+    freqReferenceGenotypeData,
     clinicalData,
     config,
 ):
@@ -57,6 +59,7 @@ def getBaselineFeatureResults(
     bootstrap_args = [
         (
             genotypeData,
+            freqReferenceGenotypeData,
             clinicalData,
             model,
             hyperParameterSpace,
@@ -68,10 +71,11 @@ def getBaselineFeatureResults(
         for model, hyperParameterSpace in list(modelStack.items())
     ]
     try:
+        # TODO: represent in workflow engine
         results = Parallel(n_jobs=-1)(delayed(bootstrap)(*args) for args in bootstrap_args)
-    except:
-        print("Error in parallel execution of baseline feature results")
-        raise
+    except Exception as e:
+        print(f"Error during bootstrap: {e}")
+        print_exception(e)
 
     pooledBaselineFeatureResults = {}
     baselineFeatureResultsByModel = {}
@@ -134,10 +138,13 @@ def measureIterations(
     sampleResultsByModel,
     pooledResults,
     genotypeData,
+    freqReferenceGenotypeData,
     clinicalData,
 ):
+    # reduce dataframe attributes to baseline feature & run models
     pooledBaselineFeatureResults, baselineFeatureResultsByModel, selectedFeatures = getBaselineFeatureResults(
-        deepcopy(genotypeData),  # reduce dataframe attributes to baseline feature
+        deepcopy(genotypeData),  
+        freqReferenceGenotypeData,
         clinicalData,
         config,
     )
@@ -249,10 +256,7 @@ def main(config):
     newWellClassified = True
     countSuffix = 1
     baseProjectPath = config["tracking"]["project"]
-    genotypeData, clinicalData = (
-                    genotypeData,
-                    clinicalData,
-                ) = processInputFiles(config)
+    genotypeData, freqReferenceGenotypeData, clinicalData  = processInputFiles(config)
     originalTrackingName = config['tracking']['name']
     while newWellClassified:
         config["tracking"]["project"] = f"{baseProjectPath}__{str(countSuffix)}"
@@ -274,7 +278,7 @@ def main(config):
             continue
             
         else:
-            classificationResults, genotypeData, clinicalData = runMLstack(config, genotypeData, clinicalData)
+            classificationResults, genotypeData, clinicalData = runMLstack(config, genotypeData, freqReferenceGenotypeData, clinicalData)
             sampleResultsByModel = {modelResult.model_name: modelResult.test_results_dataframe for modelResult in classificationResults.modelResults}
             config["sampling"]["lastIteration"] = 0
         
@@ -295,6 +299,7 @@ def main(config):
             sampleResultsByModel,
             pooledTestResults,
             genotypeData,
+            freqReferenceGenotypeData,
             clinicalData,
         )
         
