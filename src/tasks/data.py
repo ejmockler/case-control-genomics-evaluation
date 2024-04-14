@@ -18,6 +18,7 @@ from config import config
 
 @dataclass
 class Genotype:
+    """Associates DataFrame of sample genotypes (variants x samples) with metadata: a list of sample IDs & the sample set name."""
     genotype: pd.DataFrame
     ids: list
     name: str
@@ -25,13 +26,13 @@ class Genotype:
 
 @dataclass
 class GenotypeData:
-    """ "Initializes storage for genotypes and their transformation methods."""
+    """Initializes storage for genotypes and their transformation methods."""
 
     # TODO add allele model method
     case: Genotype
-    holdout_case: Genotype
+    holdout_case: dict
     control: Genotype
-    holdout_control: Genotype
+    holdout_control: dict
 
     def __post_init__(self):
         self._check_duplicates()
@@ -47,16 +48,16 @@ class GenotypeData:
             "control_genotypes": list(self.control.genotype.columns),
         }
 
-        if not self.holdout_case.genotype.empty:
-            df_dict["holdout_case_genotypes"] = list(self.holdout_case.genotype.columns)
-        else:
-            df_dict["holdout_case_genotypes"] = []
-
-        if not self.holdout_control.genotype.empty:
-            df_dict["holdout_control_genotypes"] = list(self.holdout_control.genotype.columns)
-        else:
-            df_dict["holdout_control_genotypes"] = []
-
+        df_dict["holdout_case_genotypes"] = list()
+        for holdout_case in self.holdout_case.values():
+            if not holdout_case.genotype.empty:
+                df_dict["holdout_case_genotypes"].extend(list(holdout_case.genotype.columns))
+         
+        df_dict["holdout_control_genotypes"] = list()
+        for holdout_control in self.holdout_control.values():
+            if not holdout_control.genotype.empty:
+                df_dict["holdout_control_genotypes"].extend(list(holdout_control.genotype.columns))
+        
         # Prepare a dict to hold duplicates
         dup_dict = {}
 
@@ -78,46 +79,12 @@ class GenotypeData:
                 f"Duplicate column labels exist in the following groups: {dup_dict}"
             )
 
-    def filter_allele_frequencies(self, min_allele_frequency):
-        all_genotypes = pd.concat(
-            [geno.genotype.dropna(how="any", axis=0) for geno in self.genotype_groups],
-            axis=1,
-        )
-        filtered_genotypes = all_genotypes.loc[
-            all_genotypes.gt(0).sum(axis=1).divide(len(all_genotypes.columns))
-            >= min_allele_frequency
-        ]
-        print(
-            f"Filtered {len(all_genotypes) - len(filtered_genotypes)} alleles with frequency below {'{:.3%}'.format(min_allele_frequency)}"
-        )
-        print(f"Kept {len(filtered_genotypes)} alleles")
-
-        self.case.genotype = [
-            Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-            for geno in self.case.genotype
-        ]
-        self.control.genotype = [
-            Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-            for geno in self.control.genotype
-        ]
-
-        if len(self.holdout_case.genotype) > 0:
-            self.holdout_case.genotype = [
-                Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-                for geno in self.holdout_case.genotype
-            ]
-        if len(self.holdout_control.genotype) > 0:
-            self.holdout_control.genotype = [
-                Genotype(filtered_genotypes.loc[:, geno.genotype.columns], geno.ids)
-                for geno in self.holdout_control.genotype
-            ]
-
 
 @dataclass
 class SampleData:
     """Initializes storage for sample data. Vectors are samples x features."""
 
-    set: str  # 'test', 'train' or 'holdout'
+    name: str  # 'test', 'train' or holdout set name
     ids: list[str]
     labels: list[str]
     vectors: np.ndarray
@@ -153,35 +120,35 @@ class FoldResult(SampleData):
     hyperparameters: Optional[dict] = None
 
     def __post_init__(self):
-        if "excess" not in self.set: self.calculate_AUC()
+        if "excess" not in self.name: self.calculate_AUC()
         self.calculate_positive_ratios()
         self.calculate_accuracy()
     
     def append_allele_frequencies(self, genotypeData: GenotypeData):
         if isinstance(self.global_feature_explanations, pd.DataFrame) and not self.global_feature_explanations.empty:
-            # Determine target data based on 'self.set'
-            targetCaseData = genotypeData.case.genotype if self.set == 'test' else genotypeData.holdout_case.genotype
-            targetControlData = genotypeData.control.genotype if self.set == 'test' else genotypeData.holdout_control.genotype
+            # Determine target data based on sample set name
+            targetCaseData = {"test": genotypeData.case} if self.name == 'test' else genotypeData.holdout_case
+            targetControlData = {"test": genotypeData.control} if self.name == 'test' else genotypeData.holdout_control
 
-            # Append MAF (Minor Allele Frequencies)
-            self.global_feature_explanations[f'{self.set}_case_maf'] = self.global_feature_explanations.index.map(
-                genotypeData.get_allele_frequencies(
-                    targetCaseData[self.ids[np.where(self.labels == 1)]]).to_dict())
-            self.global_feature_explanations[f'{self.set}_control_maf'] = self.global_feature_explanations.index.map(
-                genotypeData.get_allele_frequencies(
-                    targetControlData[self.ids[np.where(self.labels == 0)]]).to_dict())
-
+            setName = self.name
+            # Append MAF (Minor Allele Frequencies) to the global feature explanations DataFrame
+            self.global_feature_explanations[f'{setName}__case_maf'] = self.global_feature_explanations.index.map(
+            genotypeData.get_allele_frequencies(
+                targetCaseData[setName].genotype[self.ids[np.where(self.labels == 1)]]).to_dict())
             # Check for zygosity configuration and calculate RAF (Rare Allele Frequencies)
             if config['vcfLike']['zygosity']:
                 # Assuming zygosity is coded as 0, 1, 2 (homozygous reference, heterozygous, homozygous and/or rare variant)
                 # Calculate frequency of rare variant (zygosity == 2)
-                case_raf = (targetCaseData[self.ids[np.where(self.labels == 1)]] == 2).mean(axis=1)
-                control_raf = (targetControlData[self.ids[np.where(self.labels == 0)]] == 2).mean(axis=1)
-
-                # Append RAF to the global feature explanations DataFrame
-                self.global_feature_explanations[f'{self.set}_case_raf'] = case_raf
-                self.global_feature_explanations[f'{self.set}_control_raf'] = control_raf
-
+                case_raf = (targetCaseData[setName].genotype[self.ids[np.where(self.labels == 1)]] == 2).mean(axis=1)
+                self.global_feature_explanations[f'{setName}__case_raf'] = case_raf
+                
+            self.global_feature_explanations[f'{setName}__control_maf'] = self.global_feature_explanations.index.map(
+            genotypeData.get_allele_frequencies(
+                targetControlData[setName].genotype[self.ids[np.where(self.labels == 0)]]).to_dict())
+            if config['vcfLike']['zygosity']:
+                control_raf = (targetControlData[setName].genotype[self.ids[np.where(self.labels == 0)]] == 2).mean(axis=1)
+                self.global_feature_explanations[f'{setName}__control_raf'] = control_raf
+                    
 
     @cached_property
     def local_explanations(self):
@@ -237,7 +204,7 @@ class EvaluationResult:
 
     train: list[SampleData] = field(default_factory=list)
     test: list[FoldResult] = field(default_factory=list)
-    holdout: list[FoldResult] = field(default_factory=list)
+    holdout: list[dict] = field(default_factory=list)
     excess: list[FoldResult] = field(default_factory=list)
 
     def average(self):
@@ -247,13 +214,30 @@ class EvaluationResult:
 
     def calculate_average_AUC(self):
         self.average_test_auc = np.mean([fold.auc for fold in self.test])
-        self.average_holdout_auc = np.mean([fold.auc for fold in self.holdout])
+        self.average_holdout_auc = self.calculate_holdout_averages("auc")
 
     def calculate_average_positive_ratios(self):
         self.average_test_tpr = np.mean([fold.tpr for fold in self.test], axis=0)
-        self.average_holdout_tpr = np.mean([fold.tpr for fold in self.holdout], axis=0)
+        self.average_holdout_tpr = self.calculate_holdout_averages("tpr")
         self.average_test_fpr = np.mean([fold.fpr for fold in self.test], axis=0)
-        self.average_holdout_fpr = np.mean([fold.fpr for fold in self.holdout], axis=0)
+        self.average_holdout_fpr = self.calculate_holdout_averages("fpr")
+
+    def calculate_holdout_averages(self, metric):
+        # calculate mean across all folds for each holdout set
+        holdout_averages = {}
+        for setName in self.holdout[0]:
+            if setName not in holdout_averages:
+                holdout_averages[setName] = []
+            holdout_averages[setName].extend([getattr(fold[setName], metric) for fold in self.holdout])
+
+        # Calculate mean across all folds for each holdout set
+        for setName in holdout_averages:
+            if metric in ['tpr', 'fpr']:  # Metrics that require axis=0 for np.mean
+                holdout_averages[setName] = np.mean(holdout_averages[setName], axis=0)
+            else: 
+                holdout_averages[setName] = np.mean(holdout_averages[setName])
+
+        return holdout_averages
 
     @staticmethod
     def aggregate_explanations(explanations):
@@ -271,19 +255,21 @@ class EvaluationResult:
             concatenated = pd.concat(
                 [fold.global_feature_explanations for fold in self.test] + [concatenated]
             )
-            if "holdout_case_maf" not in concatenated.columns:
-                concatenated["holdout_case_maf"] = 0
-            if "holdout_control_maf" not in concatenated.columns:
-                concatenated["holdout_control_maf"] = 0
+        if all(fold[setName].global_feature_explanations is not None for setName in self.holdout[0] for fold in self.holdout):
+            holdoutColumnsMAF = [colName for colName in concatenated.columns if "maf" in colName and "holdout" in colName] 
             aggDict = {
                     "feature_importances": ["mean", "std"],
-                    "test_case_maf": ["mean", "std"],
-                    "test_control_maf": ["mean", "std"],
-                    "holdout_case_maf": ["mean", "std"],
-                    "holdout_control_maf": ["mean", "std"],
+                    "test__case_maf": ["mean", "std"],
+                    "test__control_maf": ["mean", "std"],
+                    **{col: ["mean", "std"] for col in holdoutColumnsMAF}
                 }
             if config['vcfLike']['zygosity']:
-                aggDict.update({"test_case_raf": ["mean", "std"], "test_control_raf": ["mean", "std"], "holdout_case_raf": ["mean", "std"], "holdout_control_raf": ["mean", "std"]})
+                holdoutColumnsRAF = [colName for colName in concatenated.columns if "raf" in colName and "holdout" in colName]
+                aggDict.update({
+                    "test__case_raf": ["mean", "std"], 
+                    "test__control_raf": ["mean", "std"], 
+                    **{col: ["mean", "std"] for col in holdoutColumnsRAF}
+                })
             return concatenated.groupby("feature_name").agg(
                 aggDict
             )
@@ -300,55 +286,70 @@ class EvaluationResult:
     @cached_property
     def average_holdout_local_explanations(self):
         if self.holdout:
-            all_holdout_explanations = []
-            for fold in self.holdout:
-                if fold.shap_explanation is not None:
-                    all_holdout_explanations.append(fold.local_explanations)
-            if all_holdout_explanations:
-                return self.aggregate_explanations(all_holdout_explanations)
+            holdout_explanations_by_set = {}
+            for setName in self.holdout[0]:
+                current_holdout_explanations = []
+                for fold in self.holdout:
+                    if fold[setName].shap_explanation is not None:
+                        current_holdout_explanations.append(fold[setName].local_explanations)
+                if holdout_explanations_by_set[setName]:
+                    holdout_explanations_by_set[setName] = self.aggregate_explanations(current_holdout_explanations)
+            self.aggregate_explanations(current_holdout_explanations)
+        return holdout_explanations_by_set
 
     def calculate_average_accuracies(self):
         if self.test:
             self.average_test_accuracy = np.mean([fold.accuracy for fold in self.test])
+            self.average_test_case_accuracy = np.mean([fold.case_accuracy for fold in self.test])
+            self.average_test_control_accuracy = np.mean([fold.control_accuracy for fold in self.test])
 
         if self.holdout:
-            self.average_holdout_accuracy = np.mean(
-                [fold.accuracy for fold in self.holdout]
-            )
-            
+            if not hasattr(self, "average_holdout_accuracy"):
+                self.average_holdout_accuracy = {}
+                self.average_holdout_case_accuracy = {}
+                self.average_holdout_control_accuracy = {}
+            for setName in self.holdout[0]:
+                all_accuracies = []
+                case_accuracies = []
+                control_accuracies = []
+                for fold in self.holdout:
+                    all_accuracies.append(fold[setName].accuracy)
+                    case_accuracies.append(fold[setName].case_accuracy)
+                    control_accuracies.append(fold[setName].control_accuracy)
+                # Calculate the mean across all folds for each holdout set
+                self.average_holdout_accuracy[setName] = np.mean(all_accuracies)
+                self.average_holdout_case_accuracy[setName] = np.mean(case_accuracies)
+                self.average_holdout_control_accuracy[setName] = np.mean(control_accuracies)
+
         if self.excess:
             self.average_excess_accuracy = np.mean(
                 [fold.accuracy for fold in self.excess]
-            )
-
-        if self.test:
-            self.average_test_case_accuracy = np.mean(
-                [fold.case_accuracy for fold in self.test]
-            )
-            self.average_test_control_accuracy = np.mean(
-                [fold.control_accuracy for fold in self.test]
-            )
-
-        if self.holdout:
-            self.average_holdout_case_accuracy = np.mean(
-                [fold.case_accuracy for fold in self.holdout]
-            )
-            self.average_holdout_control_accuracy = np.mean(
-                [fold.control_accuracy for fold in self.holdout]
             )
 
         all_accuracies = []
         if self.test:
             all_accuracies.extend([fold.accuracy for fold in self.test])
         if self.holdout:
-            all_accuracies.extend([fold.accuracy for fold in self.holdout])
+            for setName in self.holdout[0]:
+                all_accuracies.extend([fold[setName].accuracy for fold in self.holdout])
         if self.excess:
             all_accuracies.extend([fold.accuracy for fold in self.excess])
         if all_accuracies:
             self.overall_average_accuracy = np.mean(all_accuracies)
             
-    def aggregate_sample_results(self, folds):
+    def aggregate_sample_results(self, folds, is_holdout=False):
         np.set_printoptions(threshold=np.inf)
+        
+        if not is_holdout:
+            return self.aggregate_folds(folds)
+        else:
+            holdout_dfs = {}
+            # assuming all holdout sets are evaluated for every fold
+            for setName in folds[0]:
+                holdout_dfs[setName] = self.aggregate_folds([fold[setName] for fold in folds])
+            return holdout_dfs
+
+    def aggregate_folds(self, folds):
         all_probabilities = []
         all_labels = []
         all_ids = []
@@ -394,24 +395,35 @@ class EvaluationResult:
     
     @cached_property
     def holdout_results_dataframe(self):
-        return self.aggregate_sample_results(self.holdout)
+        return self.aggregate_sample_results(self.holdout, is_holdout=True)
     
     @cached_property
     def excess_results_dataframe(self):
         return self.aggregate_sample_results(self.excess)
 
     @staticmethod
-    def get_unique_samples(foldResults: Iterable[FoldResult]):
-        sampleDict = {}
-        for fold in foldResults:
-            for i, id in enumerate(fold.ids):
-                if id not in sampleDict:
-                    sampleDict[id] = fold.labels[i]
-        return sampleDict
+    def get_unique_samples(folds: Iterable[FoldResult], is_holdout=False):
+        if not is_holdout:
+            sampleDict = {}
+            for fold in folds:
+                for i, id_ in enumerate(fold.ids):
+                    if id_ not in sampleDict:
+                        sampleDict[id_] = fold.labels[i]
+            return sampleDict
+        else:
+            holdoutSampleDict = {}
+            for setName in folds[0]:
+                if setName not in holdoutSampleDict:
+                    holdoutSampleDict[setName] = {}
+                for fold in folds:  # folds is expected to be a list of dicts for holdout
+                    for i, id_ in enumerate(fold[setName].ids):
+                        if id_ not in holdoutSampleDict[setName]:
+                            holdoutSampleDict[setName][id_] = fold[setName].labels[i]
+            return holdoutSampleDict
 
     @cached_property
     def holdout_dict(self):
-        return self.get_unique_samples(self.holdout)
+        return self.get_unique_samples(self.holdout, is_holdout=True)
 
     @cached_property
     def test_dict(self):
@@ -428,55 +440,65 @@ class BootstrapResult:
 
     model_name: str
     iteration_results: list[EvaluationResult] = field(default_factory=list)
-
+    
     def aggregate_sample_results(self, fold_type):
-        all_probabilities = []
-        all_labels = []
-        all_ids = []
+        if fold_type == 'holdout':
+            return self.aggregate_holdout_sample_results()
+        else:
+            return self.aggregate_fold_sample_results(fold_type)
 
+    def aggregate_fold_sample_results(self, fold_type):
+        """Aggregate results for test and excess data, which do not involve subsets."""
+        all_probabilities, all_labels, all_ids = [], [], []
         for eval_result in self.iteration_results:
             folds = getattr(eval_result, fold_type, [])
-
             for fold in folds:
-                all_probabilities.extend([probability[1] for probability in fold.probabilities])
+                all_probabilities.extend(fold.probabilities[:, 1] if fold.probabilities.ndim > 1 else fold.probabilities)
                 all_labels.extend(fold.labels)
                 all_ids.extend(fold.ids)
 
-        df = pd.DataFrame({
-            "probability": all_probabilities,
-            "probabilities": all_probabilities,
-            "prediction": np.around(all_probabilities).astype(int),
-            "label": all_labels,
-            "id": all_ids
-        })
+        return self.create_results_dataframe(all_probabilities, all_labels, all_ids)
 
+    def aggregate_holdout_sample_results(self):
+        """Special handling for aggregating holdout data across subsets."""
+        dfs = {}
+        for setName in self.iteration_results[0].holdout[0]:
+            all_probabilities, all_labels, all_ids = [], [], []
+            for eval_result in self.iteration_results:
+                for fold in eval_result.holdout:
+                    all_probabilities.extend(fold[setName].probabilities[:, 1] if fold[setName].probabilities.ndim > 1 else fold[setName].probabilities)
+                    all_labels.extend(fold[setName].labels)
+                    all_ids.extend(fold[setName].ids)
+                dfs[setName] = self.create_results_dataframe(all_probabilities, all_labels, all_ids)
+        return dfs
+
+    def create_results_dataframe(self, probabilities, labels, ids):
+        """Creates a results dataframe from provided lists of probabilities, labels, and ids."""
+        df = pd.DataFrame({
+            "probability": probabilities,
+            "prediction": np.around(probabilities).astype(int),
+            "label": labels,
+            "id": ids
+        })
         df["accuracy"] = (df["prediction"] == df["label"]).astype(int)
 
         aggregation_dict = {
             "probability": [("mean", "mean"), ("std", "std")],
-            "probabilities": [("list", list)],
             "prediction": [("most_frequent", lambda x: x.value_counts().index[0])],
             "label": [("first", "first")],
             "accuracy": [("mean", "mean"), ("std", "std")],
             "id": [("draw_count", "size")],
         }
-
-        sampleResultsDataFrame = df.groupby("id").agg(aggregation_dict).rename(
-            columns={
-                "label_first": "label",
-                "id_draw_count": "draw_count"
-            }
-        )
         
-        sampleResultsDataFrame.columns = [
-            "_".join(col).strip() for col in sampleResultsDataFrame.columns.values
+        df = df.groupby("id").agg(aggregation_dict)
+        
+        df.columns = [
+            "_".join(col).strip() for col in df.columns.values
         ]
 
-        sampleResultsDataFrame = sampleResultsDataFrame.rename(
-            columns={"label_first": "label", "id_draw_count": "draw_count"}
-        )
-        
-        return sampleResultsDataFrame.sort_index()
+        return df.rename(columns={
+            "label_first": "label", "id_draw_count": "draw_count"
+        })
 
     @cached_property
     def test_results_dataframe(self):
@@ -491,26 +513,50 @@ class BootstrapResult:
         return self.aggregate_sample_results('excess')
 
     def get_aggregated_attribute(self, attribute_name, agg_func=None, level=0):
-        if getattr(self.iteration_results[0], attribute_name) is None:
-            return None
+        # Initialize a dict to hold results if dealing with holdout data
+        results_dict = {}
 
-        # Extract means and stds for the specified attribute
-        means_list = [
-            getattr(res, attribute_name).xs("mean", axis=1, level=level)
-            for res in self.iteration_results
-            if getattr(res, attribute_name) is not None
-        ]
-        stds_list = [
-            getattr(res, attribute_name).xs("std", axis=1, level=level)
-            for res in self.iteration_results
-            if getattr(res, attribute_name) is not None
-        ]
-        
-        if agg_func is None:
-            return self.aggregate_global_explanations(
-                means_list, stds_list)
+        # Check if we're dealing with structured holdout data
+        is_holdout_structure = attribute_name.startswith("holdout") and 'holdout' in self.iteration_results[0].__dict__
+
+        if is_holdout_structure:
+            # Loop through each subset within the holdout data
+            for setName in self.iteration_results[0].holdout[0].keys():
+                means_list = []
+                stds_list = []
+
+                # Aggregate data for each holdout subset
+                for res in self.iteration_results:
+                    if res.holdout:
+                        for fold in res.holdout:
+                            if setName in fold:
+                                data = getattr(fold[setName], attribute_name, None)
+                                if isinstance(data, pd.DataFrame) and not data.empty:
+                                    means_list.append(data.xs("mean", axis=1, level=level))
+                                    stds_list.append(data.xs("std", axis=1, level=level))
+                if not means_list:
+                    return None
+                # Use the provided aggregation function or the default
+                if agg_func:
+                    results_dict[setName] = agg_func(means_list, stds_list)
+                else:
+                    results_dict[setName] = self.aggregate_global_explanations(means_list, stds_list)
         else:
-            return agg_func(means_list, stds_list)
+            # Handle non-holdout attributes as before
+            means_list, stds_list = [], []
+            for res in self.iteration_results:
+                data = getattr(res, attribute_name, None)
+                if isinstance(data, pd.DataFrame) and not data.empty:
+                    means_list.append(data.xs("mean", axis=1, level=level))
+                    stds_list.append(data.xs("std", axis=1, level=level))
+            if not means_list:
+                return None
+            if agg_func:
+                return agg_func(means_list, stds_list)
+            else:
+                return self.aggregate_global_explanations(means_list, stds_list)
+
+        return results_dict if is_holdout_structure else None
 
     def aggregate_global_explanations(self, means_list, stds_list):
         """Aggregate global feature importances and MAFs across multiple EvaluationResults."""
@@ -541,18 +587,16 @@ class BootstrapResult:
         # Initial columns list
         columns = [
             "feature_importances", 
-            "test_case_maf", 
-            "test_control_maf", 
-            "holdout_case_maf", 
-            "holdout_control_maf"
+            "test__case_maf", 
+            "test__control_maf", 
+            *[holdoutMAFcol for holdoutMAFcol in concatenated_means.columns if "holdout" in holdoutMAFcol and "maf" in holdoutMAFcol]
         ]
 
         # Add RAF columns if they are present
         raf_columns = [
-            "test_case_raf", 
-            "test_control_raf", 
-            "holdout_case_raf", 
-            "holdout_control_raf"
+            "test__case_raf", 
+            "test__control_raf", 
+            *[holdoutRAFcol for holdoutRAFcol in concatenated_means.columns if "holdout" in holdoutRAFcol and "raf" in holdoutRAFcol]
         ]
         for raf_col in raf_columns:
             if raf_col in concatenated_means.columns or raf_col in concatenated_variances.columns:
@@ -628,54 +672,53 @@ class BootstrapResult:
     def calculate_average_accuracies(self):
         for res in self.iteration_results:
             res.average()
+        
         # Test accuracies
-        all_test_accuracies = [
-            res.average_test_accuracy for res in self.iteration_results
-        ]
-        self.average_test_accuracy = np.mean(all_test_accuracies)
+        self.average_test_accuracy = np.mean([res.average_test_accuracy for res in self.iteration_results])
+        self.average_test_case_accuracy = np.mean([res.average_test_case_accuracy for res in self.iteration_results])
+        self.average_test_control_accuracy = np.mean([res.average_test_control_accuracy for res in self.iteration_results])
 
-        all_test_case_accuracies = [
-            res.average_test_case_accuracy for res in self.iteration_results
-        ]
-        self.average_test_case_accuracy = np.mean(all_test_case_accuracies)
+        # Initialize dictionaries to hold aggregated accuracies for holdout sets
+        holdout_accuracies = {}
+        holdout_case_accuracies = {}
+        holdout_control_accuracies = {}
 
-        all_test_control_accuracies = [
-            res.average_test_control_accuracy for res in self.iteration_results
-        ]
-        self.average_test_control_accuracy = np.mean(all_test_control_accuracies)
+        for res in self.iteration_results:
+            if res.holdout:
+                for setName in res.average_holdout_accuracy.keys():
+                    if setName not in holdout_accuracies:
+                        holdout_accuracies[setName] = []
+                        holdout_case_accuracies[setName] = []
+                        holdout_control_accuracies[setName] = []
 
-        # Holdout accuracies
-        all_holdout_accuracies = [
-            res.average_holdout_accuracy
-            for res in self.iteration_results
-            if res.holdout
-        ]
-        if all_holdout_accuracies:
-            self.average_holdout_accuracy = np.mean(all_holdout_accuracies)
+                    holdout_accuracies[setName].append(res.average_holdout_accuracy[setName])
+                    holdout_case_accuracies[setName].append(res.average_holdout_case_accuracy[setName])
+                    holdout_control_accuracies[setName].append(res.average_holdout_control_accuracy[setName])
 
-            all_holdout_case_accuracies = [
-                res.average_holdout_case_accuracy
-                for res in self.iteration_results
-                if res.holdout
-            ]
-            self.average_holdout_case_accuracy = np.mean(all_holdout_case_accuracies)
-
-            all_holdout_control_accuracies = [
-                res.average_holdout_control_accuracy
-                for res in self.iteration_results
-                if res.holdout
-            ]
-            self.average_holdout_control_accuracy = np.mean(
-                all_holdout_control_accuracies
-            )
+        # Calculate the mean across all bootstrap iterations for each holdout set
+        self.average_holdout_accuracy = {setName: np.mean(accuracies) for setName, accuracies in holdout_accuracies.items()}
+        self.average_holdout_case_accuracy = {setName: np.mean(accuracies) for setName, accuracies in holdout_case_accuracies.items()}
+        self.average_holdout_control_accuracy = {setName: np.mean(accuracies) for setName, accuracies in holdout_control_accuracies.items()}
 
     def get_unique_samples(self, setType):
-        sampleDict = {}
-        for res in self.iteration_results:
-            for id in list(getattr(res, f"{setType}_dict").keys()):
-                if id not in sampleDict:
-                    sampleDict[id] = getattr(res, f"{setType}_dict")[id]
-        return sampleDict
+        if setType != "holdout":
+            # For test and train, where data is not subdivided into subsets
+            sampleDict = {}
+            for res in self.iteration_results:
+                sampleDict.update(getattr(res, f"{setType}_dict", {}))
+            return sampleDict
+        else:
+            # For holdout, organize samples by subset
+            holdoutSampleDict = {}
+            for res in self.iteration_results:
+                if hasattr(res, "holdout_dict"):
+                    for setName, subsetSamples in res.holdout_dict.items():
+                        if setName not in holdoutSampleDict:
+                            holdoutSampleDict[setName] = {}
+                        for id, value in subsetSamples.items():
+                            if id not in holdoutSampleDict[setName]:
+                                holdoutSampleDict[setName][id] = value
+            return holdoutSampleDict
 
     @cached_property
     def holdout_dict(self):

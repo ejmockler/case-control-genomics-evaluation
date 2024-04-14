@@ -88,9 +88,18 @@ async def main(
         modelResult.test_results_dataframe.to_csv(
             f"projects/{config['tracking']['project']}/{modelResult.model_name}/testResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
         )
-        modelResult.holdout_results_dataframe.to_csv(
-            f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
-        )
+        for setName in modelResult.holdout_results_dataframe:
+            os.makedirs(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdout/{setName}/",
+                exist_ok=True,
+            )
+            modelResult.holdout_results_dataframe[setName].to_csv(
+                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdout/{setName}/{setName}_{modelResult.model_name}_{config['tracking']['project']}.csv"
+            )
+            if config['model']['calculateShapelyExplanations']:
+                modelResult.average_holdout_local_explanations[setName].to_csv(
+                    f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdout/{setName}/{setName}__localFeatures_{config['tracking']['project']}.csv"
+                )
         modelResult.excess_results_dataframe.to_csv(
             f"projects/{config['tracking']['project']}/{modelResult.model_name}/excessResults_{modelResult.model_name}_{config['tracking']['project']}.csv"
         )
@@ -98,14 +107,11 @@ async def main(
             modelResult.average_global_feature_explanations.to_csv(
                 f"projects/{config['tracking']['project']}/{modelResult.model_name}/globalFeatures_{modelResult.model_name}_{config['tracking']['project']}.csv"
             )
-        if modelResult.average_test_local_explanations is not None:
+        if config['model']['calculateShapelyExplanations']:
             modelResult.average_test_local_explanations.to_csv(
                 f"projects/{config['tracking']['project']}/{modelResult.model_name}/testLocalFeatures_{modelResult.model_name}_{config['tracking']['project']}.csv"
             )
-        if modelResult.average_holdout_local_explanations is not None:
-            modelResult.average_holdout_local_explanations.to_csv(
-                f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdoutLocalFeatures_{modelResult.model_name}_{config['tracking']['project']}.csv"
-            )
+
         if trackVisualizations: trackModelVisualizations(modelResult, config=config)
 
     if trackVisualizations: trackProjectVisualizations(

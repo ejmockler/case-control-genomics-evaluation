@@ -1,3 +1,4 @@
+import os
 from scipy.stats import mode
 from typing import Iterable, Literal, Union
 from prefect import unmapped, task, flow
@@ -17,76 +18,101 @@ def filterTable(table, filterString):
     if not filterString:
         return table
     print(f"Filtering: {filterString}")
-    filteredTable = table.query(filterString)
+    filteredTable = table.query(filterString, engine="python")
     return filteredTable
 
 @task()
 def processAlleles(values, columns, genotypeIDs, clinicalSampleIDmap, config):
+    """Resolve genotype IDs & apply configured allele model
+
+    Args:
+        values (ndarray): Genotype matrix with variants as rows and samples as columns. 
+        columns (list): Genotype sample column names.
+        genotypeIDs (list): Selected genotype IDs to resolve.
+        clinicalSampleIDmap (dict): Mapping of clinical IDs to genotype IDs (for samples in clinical data)
+        config: Set in src/config.py
+
+    Returns:
+        tuple: genotypeDict, missingGenotypeIDs (dict), resolvedGenotypeIDs (dict)
+    """
     # some genotype IDs are subset of column names (or vice versa)
-    genotypeDict = dict()
-    resolvedGenotypeIDs = set()
-    seenSampleIDs = set()
-    # lookup table for allele mode values to impute missing genotypes
+    resolvedGenotypeIDs = dict()
+    # lookup table for allele values to impute missing genotypes with most common value
     alleleModeMap = {}
-    # iterate clinical sample IDs
-    for id in tqdm(genotypeIDs, unit="id"):
-        # iterate genotype samples
-        for j, column in enumerate(columns):
-            matched = False
-            subIDs = column.split(config["vcfLike"]["compoundSampleIdDelimiter"])
-            if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in clinicalSampleIDmap or clinicalSampleIDmap[id] not in seenSampleIDs or any([subID in clinicalSampleIDmap.values() for subID in subIDs])):
-                if id in clinicalSampleIDmap: seenSampleIDs.update(clinicalSampleIDmap[id])  # prevent duplicate genotypes from clinical data
-                else:
-                    for subID in subIDs:  # handle case where only external subject ID is available
-                        if subID in clinicalSampleIDmap.values():
-                            seenSampleIDs.update(subID)
-                            break
-                matched = True
-            else:
-                # check for compound sample IDs
-                if config["vcfLike"]["compoundSampleIdDelimiter"] in column:
-                    delimitedColumn = column.split(
-                        config["vcfLike"]["compoundSampleIdDelimiter"]
-                    )[config["vcfLike"]["compoundSampleIdStartIndex"] :]
-                    matched = any(columnValue == id for columnValue in delimitedColumn)
-                if config["vcfLike"]["compoundSampleIdDelimiter"] in id:
-                    delimitedID = id.split(
-                        config["vcfLike"]["compoundSampleIdDelimiter"]
-                    )[config["vcfLike"]["compoundSampleIdStartIndex"] :]
-                    matched = any(idValue == column for idValue in delimitedID)
-                if (
-                    config["vcfLike"]["compoundSampleIdDelimiter"] in column
-                    and config["vcfLike"]["compoundSampleIdDelimiter"] in id
-                ):
-                    matched = any(idValue in delimitedColumn for idValue in delimitedID)
-            if matched:
-                processed_genotypes = []
-                for i, genotype in enumerate(values[:, j]):
-                    alleles = genotype.replace("'", "").split("/") if isinstance(genotype, str) else []
-                    if all([allele.isdigit() for allele in alleles]):
-                        # Compute result based on allele model
-                        result = applyAlleleModel(alleles, config)
+    # if genotypeIDs is not a dict with holdout set names, convert to dict for crossval IDs
+    if not isinstance(genotypeIDs, dict):
+        genotypeDict = {"crossval": {}}
+        genotypeIDs = {"crossval": genotypeIDs}
+        resolvedGenotypeIDs = {"crossval": set()}
+        missingGenotypeIDs = {"crossval": set()}
+    else:
+        genotypeDict = {setName: {} for setName in genotypeIDs}
+        resolvedGenotypeIDs = {setName: set() for setName in genotypeIDs}
+        missingGenotypeIDs = {setName: set() for setName in genotypeIDs}
+    #originalColumns = np.copy(columns)
+    #originalValues = np.copy(values)
+    # iterate sample IDs
+    for setName, idSet in genotypeIDs.items():
+        seenSampleIDs = set()
+        #columns = np.copy(originalColumns)
+        #values = np.copy(originalValues)
+        for id in tqdm(idSet, unit="id", desc=f"Processing {setName} IDs"):
+            # iterate genotype samples
+            for j, column in enumerate(columns):
+                matched = False
+                subIDs = column.split(config["vcfLike"]["compoundSampleIdDelimiter"])
+                if (column in id or id in column) and (len(column) > 3 and len(id) > 3) and (id not in clinicalSampleIDmap or clinicalSampleIDmap[id] not in seenSampleIDs or any([subID in clinicalSampleIDmap.values() for subID in subIDs])):
+                    if id in clinicalSampleIDmap: seenSampleIDs.update(clinicalSampleIDmap[id])  # prevent duplicate genotypes from clinical data
                     else:
-                        # If allele mode not already calculated, compute and store it
-                        if i not in alleleModeMap:
-                            # Extract alleles for all samples for this variant
-                            all_alleles = [genotype.replace("'", "").replace('.', "").split("/") for genotype in values[i] if isinstance(genotype, str)]
-                            # Calculate mode for each allele based on allele model
-                            allele_mode = computeAlleleMode(all_alleles, config)
-                            alleleModeMap[i] = allele_mode
-                        result = alleleModeMap[i]
+                        for subID in subIDs:  # handle case where only external subject ID is available
+                            if subID in clinicalSampleIDmap.values():
+                                seenSampleIDs.update(subID)
+                                break
+                    matched = True
+                else:
+                    # check for compound sample IDs
+                    if config["vcfLike"]["compoundSampleIdDelimiter"] in column:
+                        delimitedColumn = column.split(
+                            config["vcfLike"]["compoundSampleIdDelimiter"]
+                        )[config["vcfLike"]["compoundSampleIdStartIndex"] :]
+                        matched = any(columnValue == id for columnValue in delimitedColumn)
+                    if config["vcfLike"]["compoundSampleIdDelimiter"] in id:
+                        delimitedID = id.split(
+                            config["vcfLike"]["compoundSampleIdDelimiter"]
+                        )[config["vcfLike"]["compoundSampleIdStartIndex"] :]
+                        matched = any(idValue == column for idValue in delimitedID)
+                    if (
+                        config["vcfLike"]["compoundSampleIdDelimiter"] in column
+                        and config["vcfLike"]["compoundSampleIdDelimiter"] in id
+                    ):
+                        matched = any(idValue in delimitedColumn for idValue in delimitedID)
+                if matched:
+                    processed_genotypes = []
+                    for i, genotype in enumerate(values[:, j]):
+                        alleles = genotype.replace("'", "").split("/") if isinstance(genotype, str) else []
+                        if all([allele.isdigit() for allele in alleles]):
+                            # Compute result based on allele model
+                            result = applyAlleleModel(alleles, config)
+                        else:
+                            # If allele mode not already calculated, compute and store it
+                            if i not in alleleModeMap:
+                                # Extract alleles for all samples for this variant
+                                all_alleles = [genotype.replace("'", "").replace('.', "").split("/") for genotype in values[i] if isinstance(genotype, str)]
+                                # Calculate mode for each allele based on allele model
+                                allele_mode = computeAlleleMode(all_alleles, config)
+                                alleleModeMap[i] = allele_mode
+                            result = alleleModeMap[i]
 
-                    processed_genotypes.append(result)
+                        processed_genotypes.append(result)
 
-                genotypeDict[f"{column}"] = processed_genotypes
-                columns = np.delete(columns, j)
-                values = np.delete(values, j, axis=1)
-                resolvedGenotypeIDs.update({id})
-                break
-            
-    missingGenotypeIDs = (
-        set(genotypeIDs) - resolvedGenotypeIDs
-    )  # leftover columns are missing
+                    genotypeDict[setName][f"{column}"] = processed_genotypes
+                    #columns = np.delete(columns, j)
+                    #values = np.delete(values, j, axis=1)
+                    resolvedGenotypeIDs[setName].update({id})
+                    break
+        missingGenotypeIDs[setName] = (
+            set(idSet) - resolvedGenotypeIDs[setName]
+        )  # leftover columns are missing
     return genotypeDict, missingGenotypeIDs, resolvedGenotypeIDs
 
 def applyAlleleModel(alleles, config):
@@ -107,8 +133,37 @@ def applyAlleleModel(alleles, config):
 def computeAlleleMode(all_alleles, config):
     # Process all_alleles to match the allele model (binary, zygosity, sum, etc.)
     processed_alleles = [applyAlleleModel(a, config) for a in all_alleles if all(a)]
-    most_common = mode(processed_alleles)
+    most_common = mode(processed_alleles, keepdims=True)
     return most_common.mode[0] if most_common.count[0] > 0 else np.nan
+
+def processGenotypes(filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config):
+    """Process genotypes with configured allele model & resolve sample IDs in VCF-like input. Returned ID lists are keyed to set name; either holdout name or "crossval".
+
+    Args:
+        filteredVCF (DataFrame): VCF-like data with variants as rows and samples as columns.
+        clinicalSampleIDmap (dict): Mapping of genotype IDs to clinical IDs (for genotypes in clinical data).
+        caseIDs (np.array || dict): List of crossval case IDs. If a dict, ID lists are keyed by set name.
+        controlIDs (np.array || dict): List of crossval control IDs. If a dict, ID lists are keyed by set name.
+        config: Set in src/config.py
+
+    Returns:
+        tuple: (caseGenotypeDict (dict), controlGenotypeDict (dict), missingCaseIDs (dict), missingControlIDs (dict), resolvedCaseIDs (dict), resolvedControlIDs (dict))
+    """
+    # cast genotypes as numeric, drop chromosome positions with missing values
+    caseGenotypeFutures, controlGenotypeFutures = processAlleles.map(
+        unmapped(filteredVCF.to_numpy()),
+        unmapped(filteredVCF.columns.to_list()),
+        genotypeIDs=(caseIDs, controlIDs),
+        clinicalSampleIDmap=unmapped(clinicalSampleIDmap),
+        config=unmapped(config),
+    )
+
+    caseGenotypeDict, missingCaseIDs, resolvedCaseIDs = caseGenotypeFutures.result()
+    controlGenotypeDict, missingControlIDs, resolvedControlIDs = controlGenotypeFutures.result()
+
+    return caseGenotypeDict, controlGenotypeDict, missingCaseIDs, missingControlIDs, resolvedCaseIDs, resolvedControlIDs
+
+
 
 def aggregateIntoGenes(
     genotypeDataframe: pd.DataFrame,
@@ -135,11 +190,19 @@ def aggregateIntoGenes(
 
 @task()
 def load(config):
+    """Load VCF-like and clinical datasets from file paths specified in the config.
+
+    Args:
+        config: Set in src/config.py
+
+    Returns:
+        tuple: (clinica metadata dataframe, list of external sample metadata dataframes, VCF dataframe, optional VCF dataframe with reference allele frequencies)
+    """
     clinicalData = pd.read_excel(
         config["clinicalTable"]["path"], index_col=config["clinicalTable"]["idColumn"]
     )
     externalSamples = [
-        pd.read_csv(externalTable["path"], sep="\t", index_col=externalTable["idColumn"])
+        pd.read_csv(externalTable["path"], sep=("\t" if ".tsv" in externalTable["path"] else ","), index_col=externalTable["idColumn"])
         for externalTable in config["externalTables"]["metadata"]
     ]
     annotatedVCF = (
@@ -241,25 +304,32 @@ def prepareDatasets(
     config=config,
     freqReferenceGenotypeData=None,
 ):
+    """Transform genotype data into feature embedding vectors suitable for training and testing a machine learning model. Numerical alleles are normalized to [0, 1] and missing values are imputed with the mean allele frequency. Cases and controls for training are balanced via reservoir sampling.
+
+    Args:
+        caseGenotypes (DataFrame): Case genotypes with numeric allele model
+        controlGenotypes (DataFrame): Control genotypes with numeric allele model
+        holdoutCaseGenotypes (dict[DataFrame]): Dict of holdout case genotypes with numeric allele model, mapped to set name
+        holdoutControlGenotypes (dict[DataFrame]): Dict of holdout control genotypes with numeric allele model, mapped to set name
+        sampleFrequencies (dict): Sample frequencies for each genotype ID to guide reservoir sampling
+        verbose (bool, optional): _description_. Defaults to True.
+        config (optional): _description_. Defaults to config.
+        freqReferenceGenotypeData (optional): _description_. GenotypeData with desired background frequency profile. Defaults to None.
+
+    Raises:
+        e: ValueError if case/control genotypes are empty and/or contain invalid allele values (non-numeric).
+
+    Returns:
+        dict: embedding
+    """
     minorIDs, balancedMajorIDs, excessMajorIDs, sampleFrequencies = prepareCaseControlSamples(
         caseGenotypes, controlGenotypes, sampleFrequencies, doBalance=True
     )
-
-    # Only balance samples used in training
-    (
-        holdoutMinorIDs,
-        holdoutBalancedMajorIDs,
-        holdoutExcessMajorIDs,
-        sampleFrequencies
-    ) = prepareCaseControlSamples(holdoutCaseGenotypes, holdoutControlGenotypes, sampleFrequencies, doBalance=False)
-    holdoutCaseIDs = holdoutCaseGenotypes.columns
   
-    allGenotypes = pd.concat(
+    allCrossValGenotypes = pd.concat(
         [
             caseGenotypes,
             controlGenotypes,
-            holdoutCaseGenotypes,
-            holdoutControlGenotypes,
         ],
         axis=1,
     )
@@ -267,49 +337,40 @@ def prepareDatasets(
     controlIDs = controlGenotypes.columns
 
     excessIDs, crossValGenotypeIDs = [], []
-    holdoutExcessIDs, holdoutTestIDs = [], []
     trainIDs = np.hstack([balancedMajorIDs, minorIDs])
-    holdoutIDs = np.hstack([holdoutBalancedMajorIDs, holdoutMinorIDs])
     
-    for label in tqdm(allGenotypes.columns, desc="Matching IDs", unit="ID"):
-        for setType in ["holdout", "crossval"]:
-            if (
-                setType == "holdout"
-                and len(holdoutCaseGenotypes) <= 0
-                and len(holdoutControlGenotypes) <= 0
-            ):
-                continue
-            for subsetType in ["excess", "toSample"]:
-                idSet = (
-                    (holdoutExcessMajorIDs if setType == "holdout" else excessMajorIDs)
-                    if subsetType == "excess"
-                    else holdoutIDs
-                    if setType == "holdout" and subsetType == "toSample"
-                    else trainIDs
-                )
-                for i, id in enumerate(idSet):
-                    if (id in label) or (label in id):
-                        if setType == "crossval" and subsetType == "toSample":
-                            if label not in crossValGenotypeIDs:
-                                crossValGenotypeIDs.append(label)
-                        elif setType == "crossval" and subsetType == "excess":
-                            if label not in excessIDs:
-                                excessIDs.append(label)
-                        elif setType == "holdout" and subsetType == "toSample":
-                            if label not in holdoutTestIDs:
-                                holdoutTestIDs.append(label)
-                        elif setType == "holdout" and subsetType == "excess":
-                            if label not in holdoutExcessIDs:
-                                holdoutExcessIDs.append(label)
-                        idSet = np.delete(idSet, i)
-                        break
-
+    for label in tqdm(allCrossValGenotypes.columns, desc="Matching IDs", unit="ID"):
+        for subsetType in ["excess", "toSample"]:
+            idSet = (
+                excessMajorIDs
+                if subsetType == "excess"
+                else trainIDs
+            )
+            for i, id in enumerate(idSet):
+                if (id in label) or (label in id):
+                    if subsetType == "toSample":
+                        if label not in crossValGenotypeIDs:
+                            crossValGenotypeIDs.append(label)
+                    elif subsetType == "excess":
+                        if label not in excessIDs:
+                            excessIDs.append(label)
+                    idSet = np.delete(idSet, i)
+                    break
+    
+    allGenotypes = pd.concat([
+            allCrossValGenotypes, 
+            *[holdoutCaseSet for holdoutCaseSet in holdoutCaseGenotypes.values()], 
+            *[holdoutControlSet for holdoutControlSet in holdoutControlGenotypes.values()]
+        ], axis=1)
+    
     if verbose:
-        print(f"\n{len(crossValGenotypeIDs)} for training:\n{crossValGenotypeIDs}")
-        print(f"\n{len(excessIDs)} are excess:\n{excessIDs}")
-        if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:
-            print(f"\n{len(holdoutTestIDs)} for holdout:\n{holdoutTestIDs}")
-            print(f"\n{len(holdoutExcessIDs)} are excess holdout:\n{holdoutExcessIDs}")
+        print(f"\n\n{len(crossValGenotypeIDs)} for training:\n{crossValGenotypeIDs}")
+        print(f"\n\n{len(excessIDs)} are excess:\n{excessIDs}")
+        if len(holdoutCaseGenotypes) > 0 or len(holdoutControlGenotypes) > 0:
+            for setsType, holdoutSets in {"case": holdoutCaseGenotypes, "control": holdoutControlGenotypes}.items():
+                for name in holdoutSets:
+                    holdoutIDs = holdoutSets[name].columns.tolist()
+                    print(f"--\n{len(holdoutIDs)} {setsType} in {name}")
         print(f"\nVariant count: {len(allGenotypes.index)}")
 
     # drop variants with missing values or invariant
@@ -337,25 +398,48 @@ def prepareDatasets(
         "excessMajorSetName": "excess case" if all([id in caseIDs for id in excessIDs]) else "excess control" if all([id in controlIDs for id in controlIDs]) else "mixed excess",
         "variantIndex": variantIndex,
     }
-    if len(holdoutCaseGenotypes) > 0 and len(holdoutControlGenotypes) > 0:
-        holdoutSamples = allGenotypes.loc[:, holdoutTestIDs]
-        excessHoldoutSamples = allGenotypes.loc[:, holdoutExcessIDs]
+    if len(holdoutCaseGenotypes) > 0 or len(holdoutControlGenotypes) > 0:
+        holdoutSamplesBySetName, holdoutIndexBySetName, holdoutLabelsBySetName = {}, {}, {}
+        # first create case embeddings
+        for setName, sampleSet in holdoutCaseGenotypes.items():
+            # transpose so that samples are rows, variants are columns
+            holdoutSamplesBySetName[setName] = scaler.fit_transform(sampleSet).transpose()
+            holdoutIndexBySetName[setName] = np.array(sampleSet.columns.tolist())
+            holdoutLabelsBySetName[setName] = np.array([1] * len(sampleSet.columns.tolist()))
+            if setName in holdoutControlGenotypes:
+                # append control samples to case samples
+                holdoutSamplesBySetName[setName] = np.concatenate(
+                    [
+                        holdoutSamplesBySetName[setName],
+                        scaler.fit_transform(holdoutControlGenotypes[setName]).transpose(),
+                    ]
+                )
+                holdoutIndexBySetName[setName] = np.concatenate(
+                    [
+                        holdoutIndexBySetName[setName],
+                        np.array(holdoutControlGenotypes[setName].columns.tolist()),
+                    ]
+                )
+                holdoutLabelsBySetName[setName] = np.concatenate(
+                    [
+                        holdoutLabelsBySetName[setName],
+                        np.array([0] * len(holdoutControlGenotypes[setName].columns.tolist())),
+                    ]
+                )
+        # create control embeddings
+        for setName, sampleSet in holdoutControlGenotypes.items():
+            if setName in holdoutSamplesBySetName:
+                continue
+            holdoutSamplesBySetName[setName] = scaler.fit_transform(sampleSet).transpose()
+            holdoutIndexBySetName[setName] = np.array(sampleSet.columns.tolist())
+            holdoutLabelsBySetName[setName] = np.array([0] * len(sampleSet.columns.tolist()))
         try:
             embedding = {
                 **embedding,
                 **{
-                    "holdoutSampleIndex": np.array(holdoutTestIDs),
-                    "holdoutLabels": np.array(
-                        [1 if id in holdoutCaseIDs else 0 for id in holdoutTestIDs]
-                    ),
-                    "holdoutSamples": scaler.fit_transform(holdoutSamples).transpose(),
-                    "excessHoldoutMajorIndex": np.array(holdoutExcessIDs),
-                    "excessHoldoutMajorLabels": [
-                        1 if id in holdoutCaseIDs else 0 for id in holdoutExcessIDs
-                    ],
-                    "excessHoldoutMajorSamples": scaler.fit_transform(
-                        excessHoldoutSamples
-                        ).transpose() if not excessHoldoutSamples.empty else np.array([]),
+                    "holdoutSampleIndex": holdoutIndexBySetName,
+                    "holdoutLabels": holdoutLabelsBySetName,
+                    "holdoutSamples": holdoutSamplesBySetName,
                 },
             }
         except ValueError as e:
@@ -372,36 +456,31 @@ def createGenotypeDataframe(genotype_dict, filteredVCF):
     return df
 
 
-def processGenotypes(filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config):
-    # cast genotypes as numeric, drop chromosome positions with missing values
-    caseGenotypeFutures, controlGenotypeFutures = processAlleles.map(
-        unmapped(filteredVCF.to_numpy()),
-        unmapped(filteredVCF.columns.to_numpy()),
-        genotypeIDs=[IDs for IDs in (caseIDs, controlIDs)],
-        clinicalSampleIDmap=unmapped(clinicalSampleIDmap),
-        config=unmapped(config),
-    )
-
-    caseGenotypeDict, missingCaseIDs, resolvedCaseIDs = caseGenotypeFutures.result()
-    controlGenotypeDict, missingControlIDs, resolvedControlIDs = controlGenotypeFutures.result()
-
-    return caseGenotypeDict, controlGenotypeDict, missingCaseIDs, missingControlIDs, resolvedCaseIDs, resolvedControlIDs
-
-
 @task()
 def integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, controlIDs):
-    holdoutCaseIDs = np.array([])
-    holdoutControlIDs = np.array([])
+    """Parse sample IDs from external metadata tables & split into crossval or holdout case/control sets. Holdout sets are matched by set name, defined in config.  
+
+    Args:
+        filteredExternalSamples (Dataframe[]): List of filtered external metadata tables
+        config: Set in src/config.py 
+        caseIDs (np.array): Crossval case IDs to append external IDs to.
+        controlIDs (np.array): Crossval control IDs to append external IDs to.
+
+    Returns:
+        tuple: (crossvalCaseIDs (np.array), crossvalControlIDs (np.array), holdoutCaseIDs (dict), holdoutControlIDs (dict))
+    """
+    holdoutCaseIDs = {holdoutSetName: np.array([]) for holdoutSetName in config['externalTables']['holdoutSetNames']}
+    holdoutControlIDs = {holdoutSetName: np.array([]) for holdoutSetName in config['externalTables']['holdoutSetNames']}
     for i, externalTableMetadata in enumerate(config["externalTables"]["metadata"]):
         label = externalTableMetadata["label"]
-        if externalTableMetadata["setType"] == "holdout":
+        if externalTableMetadata["setType"] in config["externalTables"]["holdoutSetNames"]:
             if label == config["clinicalTable"]["caseAlias"]:
-                holdoutCaseIDs = np.append(
-                    holdoutCaseIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
+                holdoutCaseIDs[externalTableMetadata["setType"]] = np.append(
+                    holdoutCaseIDs[externalTableMetadata["setType"]], [id for id in filteredExternalSamples[i].index.to_numpy()]
                 )
             elif label == config["clinicalTable"]["controlAlias"]:
-                holdoutControlIDs = np.append(
-                    holdoutControlIDs, [id for id in filteredExternalSamples[i].index.to_numpy()]
+                holdoutControlIDs[externalTableMetadata["setType"]] = np.append(
+                    holdoutControlIDs[externalTableMetadata["setType"]], [id for id in filteredExternalSamples[i].index.to_numpy()]
                 )
         elif externalTableMetadata["setType"] == "crossval":
             if label == config["clinicalTable"]["caseAlias"]:
@@ -479,15 +558,16 @@ def processInputFiles(config):
     caseIDs = caseIDsMask[caseIDsMask].index.to_numpy()
     controlIDs = controlIDsMask[controlIDsMask].index.to_numpy()
 
-    caseIDs, controlIDs, holdoutCaseIDs, holdoutControlIDs = integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, controlIDs)
+    caseIDs, controlIDs, holdoutDictCaseIDs, holdoutDictControlIDs = integrateExternalSampleIDs(filteredExternalSamples, config, caseIDs, controlIDs)
 
     caseGenotypeDict, controlGenotypeDict, missingCaseIDs, missingControlIDs, resolvedCaseIDs, resolvedControlIDs = processGenotypes(
         filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config
     )
     
-    if len(holdoutCaseIDs) > 0:
+    # if at least one holdout set exists
+    if len(holdoutDictCaseIDs) > 0:
         holdoutCaseGenotypeDict, holdoutControlGenotypeDict, missingHoldoutCaseIDs, missingHoldoutControlIDs, resolvedHoldoutCaseIDs, resolvedHoldoutControlIDs = processGenotypes(
-            filteredVCF, clinicalSampleIDmap, holdoutCaseIDs, holdoutControlIDs, config
+            filteredVCF, clinicalSampleIDmap, holdoutDictCaseIDs, holdoutDictControlIDs, config
         )
     else:
         holdoutCaseGenotypeDict = {}
@@ -499,21 +579,21 @@ def processInputFiles(config):
         freqReferenceCaseGenotypeDict, freqReferenceControlGenotypeDict, missingFreqReferenceCaseIDs, missingFreqReferenceControlIDs, resolvedFreqReferenceCaseIDs, resolvedFreqReferenceControlIDs = processGenotypes(
             filteredReferenceVCF, clinicalSampleIDmap, caseIDs, controlIDs, config
         )
-        # ensure reference & input share same resolved IDs
-        resolvedCaseIDs = list(set(resolvedCaseIDs).intersection(set(resolvedFreqReferenceCaseIDs)))
-        resolvedControlIDs = list(set(resolvedControlIDs).intersection(set(resolvedFreqReferenceControlIDs)))
+        # ensure training data for reference & input share same resolved IDs
+        resolvedCaseIDs = list(set(resolvedCaseIDs["crossval"]).intersection(set(resolvedFreqReferenceCaseIDs["crossval"])))
+        resolvedControlIDs = list(set(resolvedControlIDs["crossval"]).intersection(set(resolvedFreqReferenceControlIDs["crossval"])))
     else:
         freqReferenceCaseGenotypeDict = {}
         freqReferenceControlGenotypeDict = {}
         missingFreqReferenceCaseIDs, missingFreqReferenceControlIDs = None, None
     
     for alias, (IDs, genotypeDict) in {
-        "caseAlias": (missingCaseIDs, caseGenotypeDict),
-        "controlAlias": (missingControlIDs, controlGenotypeDict),
+        "caseAlias": (missingCaseIDs["crossval"], caseGenotypeDict["crossval"]),
+        "controlAlias": (missingControlIDs["crossval"], controlGenotypeDict["crossval"]),
         "holdout cases": (missingHoldoutCaseIDs, holdoutCaseGenotypeDict),
         "holdout controls": (missingHoldoutControlIDs, holdoutControlGenotypeDict),
-        "caseAlias": (missingFreqReferenceCaseIDs, freqReferenceCaseGenotypeDict),
-        "controlAlias": (missingFreqReferenceControlIDs, freqReferenceControlGenotypeDict),
+        #"caseAlias": (missingFreqReferenceCaseIDs["crossval"], freqReferenceCaseGenotypeDict),
+        #"controlAlias": (missingFreqReferenceControlIDs["crossval"], freqReferenceControlGenotypeDict),
     }.items():
         if len(genotypeDict) == 0: continue
         if len(IDs) > 0:
@@ -522,24 +602,25 @@ def processInputFiles(config):
                     f"\nmissing {len(IDs)} {config['clinicalTable'][alias]} IDs:\n {IDs}"
                 )
             elif "holdout" in alias:
-                print(f"\nmissing {len(IDs)} {alias} IDs:\n {IDs}")
+                for holdoutSetName, idList in IDs.items():
+                    print(f"\n{holdoutSetName} missing {len(idList)} {alias} IDs:\n {idList}")
 
-    resolvedIDs = np.hstack([list(caseGenotypeDict.keys()), list(controlGenotypeDict.keys())])
-    allGenotypes = createGenotypeDataframe({**caseGenotypeDict, **controlGenotypeDict}, filteredVCF).dropna().astype(np.int8)
+    resolvedIDs = np.hstack([list(caseGenotypeDict["crossval"].keys()), list(controlGenotypeDict["crossval"].keys())])
+    allCrossValGenotypes = createGenotypeDataframe({**caseGenotypeDict["crossval"], **controlGenotypeDict["crossval"]}, filteredVCF).dropna().astype(int)
     if referenceVCF is not None:
-        freqReferenceAllGenotypes = createGenotypeDataframe({**freqReferenceCaseGenotypeDict, **freqReferenceControlGenotypeDict}, filteredReferenceVCF).dropna().astype(np.int8)
+        freqReferenceAllCrossValGenotypes = createGenotypeDataframe({**freqReferenceCaseGenotypeDict["crossval"], **freqReferenceControlGenotypeDict["crossval"]}, filteredReferenceVCF).dropna().astype(int)
     
-    if isinstance(allGenotypes.index, pd.MultiIndex):
+    if isinstance(allCrossValGenotypes.index, pd.MultiIndex):
         # Manually check for nulls in each level of the MultiIndex
-        non_null_indices = ~allGenotypes.index.to_frame().isnull().any(axis=1)
-        allGenotypes = allGenotypes[non_null_indices]
+        non_null_indices = ~allCrossValGenotypes.index.to_frame().isnull().any(axis=1)
+        allCrossValGenotypes = allCrossValGenotypes[non_null_indices]
     else:
         # For a standard index, retain rows with non-null indices
-        allGenotypes = allGenotypes[allGenotypes.index.notnull()]
+        allCrossValGenotypes = allCrossValGenotypes[allCrossValGenotypes.index.notnull()]
         
     # Calculate the allele frequencies
     allele_frequencies = (
-        allGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
+        allCrossValGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
     ).loc[
         lambda x: x.between(config["vcfLike"]["minAlleleFrequency"], config["vcfLike"]["maxAlleleFrequency"])
     ]
@@ -547,18 +628,18 @@ def processInputFiles(config):
     # Filter the genotypes based on frequency criteria
     if referenceVCF is not None:
         reference_allele_frequencies = (
-                freqReferenceAllGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
+                freqReferenceAllCrossValGenotypes.gt(0).sum(axis=1) / len(resolvedIDs)
             ).loc[
             lambda x: x.between(config["vcfLike"]["minAlleleFrequency"], config["vcfLike"]["maxAlleleFrequency"])
         ]
         matched_allele_frequencies = findClosestFrequencyVariant(reference_allele_frequencies, allele_frequencies)
-        frequencyFilteredGenotypes = allGenotypes.loc[
+        frequencyFilteredGenotypes = allCrossValGenotypes.loc[
             matched_allele_frequencies
         ].sort_index()
-        referenceFrequencyFilteredGenotypes = freqReferenceAllGenotypes.loc[reference_allele_frequencies].sort_index()
+        referenceFrequencyFilteredGenotypes = freqReferenceAllCrossValGenotypes.loc[reference_allele_frequencies].sort_index()
         print(f"Matched {len(frequencyFilteredGenotypes)} alleles to reference VCF {config['vcfLike']['frequencyMatchReference']}")
     else:
-        frequencyFilteredGenotypes = allGenotypes.loc[
+        frequencyFilteredGenotypes = allCrossValGenotypes.loc[
             allele_frequencies.index
         ]
         
@@ -567,26 +648,26 @@ def processInputFiles(config):
     )
     print(f"Kept {len(frequencyFilteredGenotypes)} alleles")
     
-    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
+    caseGenotypesDataframe = createGenotypeDataframe(caseGenotypeDict["crossval"], filteredVCF).loc[frequencyFilteredGenotypes.index]
     controlGenotypesDataframe = createGenotypeDataframe(
-        controlGenotypeDict, filteredVCF
+        controlGenotypeDict["crossval"], filteredVCF
     ).loc[frequencyFilteredGenotypes.index]
 
     holdoutCaseGenotypesDataframe = (
-        createGenotypeDataframe(holdoutCaseGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
+        createGenotypeDataframe({id:genotype for holdoutSet in holdoutCaseGenotypeDict.values() for id, genotype in holdoutSet.items()}, filteredVCF).loc[frequencyFilteredGenotypes.index]
         if resolvedHoldoutCaseIDs
         else pd.DataFrame(index=frequencyFilteredGenotypes.index)
     )
     holdoutControlGenotypesDataframe = (
-        createGenotypeDataframe(holdoutControlGenotypeDict, filteredVCF).loc[frequencyFilteredGenotypes.index]
+        createGenotypeDataframe({id:genotype for holdoutSet in holdoutControlGenotypeDict.values() for id, genotype in holdoutSet.items()}, filteredVCF).loc[frequencyFilteredGenotypes.index]
         if resolvedHoldoutControlIDs
         else pd.DataFrame(index=frequencyFilteredGenotypes.index)
     )
     
     if referenceVCF is not None:
-        referenceCaseGenotypesDataframe = createGenotypeDataframe(freqReferenceCaseGenotypeDict, filteredReferenceVCF).loc[referenceFrequencyFilteredGenotypes.index]
+        referenceCaseGenotypesDataframe = createGenotypeDataframe(freqReferenceCaseGenotypeDict["crossval"], filteredReferenceVCF).loc[referenceFrequencyFilteredGenotypes.index]
         referenceControlGenotypesDataframe = createGenotypeDataframe(
-            freqReferenceControlGenotypeDict, filteredReferenceVCF
+            freqReferenceControlGenotypeDict["crossval"], filteredReferenceVCF
         ).loc[referenceFrequencyFilteredGenotypes.index]
 
     if config["vcfLike"]["aggregateGenesBy"] != None:
@@ -601,21 +682,27 @@ def processInputFiles(config):
             holdoutControlGenotypesDataframe, config
         )
 
-    caseGenotypes = Genotype(caseGenotypesDataframe, resolvedCaseIDs, "Case")
+    caseGenotypes = Genotype(caseGenotypesDataframe, resolvedCaseIDs["crossval"], "Case")
     controlGenotypes = Genotype(
-        controlGenotypesDataframe, resolvedControlIDs, "Control"
+        controlGenotypesDataframe, resolvedControlIDs["crossval"], "Control"
     )
-    holdoutCaseGenotypes = Genotype(
-        holdoutCaseGenotypesDataframe, resolvedHoldoutCaseIDs, "Holdout Case"
-    )
-    holdoutControlGenotypes = Genotype(
-        holdoutControlGenotypesDataframe,
-        resolvedHoldoutControlIDs,
-        "Holdout Control",
-    )
+    
+    holdoutCaseGenotypes = {
+        setName: Genotype(
+            holdoutCaseGenotypesDataframe[list(holdoutCaseGenotypeDict[setName].keys())], resolvedHoldoutCaseIDs[setName], setName)
+        for setName in holdoutCaseGenotypeDict
+    }
+    holdoutControlGenotypes = {
+        setName: Genotype(
+            holdoutControlGenotypesDataframe[list(holdoutControlGenotypeDict[setName].keys())],
+            resolvedHoldoutControlIDs[setName],
+            setName)
+        for setName in holdoutControlGenotypeDict
+    }
+    
     if referenceVCF is not None:
-        referenceCaseGenotypes = Genotype(referenceCaseGenotypesDataframe, resolvedFreqReferenceCaseIDs, "Reference Case")
-        referenceControlGenotypes = Genotype(referenceControlGenotypesDataframe, resolvedFreqReferenceControlIDs, "Reference Control")
+        referenceCaseGenotypes = Genotype(referenceCaseGenotypesDataframe, resolvedFreqReferenceCaseIDs["crossval"], "Reference Case")
+        referenceControlGenotypes = Genotype(referenceControlGenotypesDataframe, resolvedFreqReferenceControlIDs["crossval"], "Reference Control")
 
     genotypeData = GenotypeData(
         caseGenotypes,
@@ -632,16 +719,34 @@ def processInputFiles(config):
     else:
         frequencyReferenceGenotypeData = None
 
-    print(f"\n{len(resolvedCaseIDs)} cases:\n {resolvedCaseIDs}")
-    print(f"\n{len(resolvedControlIDs)} controls:\n {resolvedControlIDs}")
+    print(f"\n{len(resolvedCaseIDs['crossval'])} cases")
+    print(f"\n{len(resolvedControlIDs['crossval'])} controls\n--")
     if resolvedHoldoutCaseIDs:
-        print(f"\n{len(resolvedHoldoutCaseIDs)} holdout cases:\n {holdoutCaseIDs}")
+        for holdoutSetName, holdoutSetIDs in resolvedHoldoutCaseIDs.items():
+            print(f"\n{len(holdoutSetIDs)} {holdoutSetName} cases")
     if resolvedHoldoutControlIDs:
-        print(
-            f"\n{len(resolvedHoldoutControlIDs)} holdout controls:\n {holdoutControlIDs}"
-        )
+        for holdoutSetName, holdoutSetIDs in resolvedHoldoutControlIDs.items():
+            print(f"\n{len(holdoutSetIDs)} {holdoutSetName} controls")
+    
+    saveSampleEmbeddings(genotypeData, config)
 
     return genotypeData, frequencyReferenceGenotypeData, filteredClinicalData
+
+def saveSampleEmbeddings(genotypeData: GenotypeData, config=config):
+    runPath = f"projects/{config['tracking']['project']}"
+    os.makedirs(runPath, exist_ok=True)
+    for attr in ["case", "control", "holdout_case", "holdout_control"]:
+        if "holdout" not in attr:
+            currentGenotypeData = getattr(genotypeData, attr).genotype
+            currentGenotypeData.to_csv(f"{runPath}/{attr}_embedding.csv")
+        else:
+            holdoutData = getattr(genotypeData, attr)
+            for setName in holdoutData:
+                currentGenotypeData = holdoutData[setName].genotype
+                if len(currentGenotypeData) == 0:
+                    continue
+                os.makedirs(f"{runPath}/holdout/{setName}", exist_ok=True)
+                currentGenotypeData.to_csv(f"{runPath}/holdout/{setName}/{setName}_embedding.csv")
 
 
 def toMultiprocessDict(orig_dict, manager):
