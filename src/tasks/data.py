@@ -256,19 +256,15 @@ class EvaluationResult:
                 [fold.global_feature_explanations for fold in self.test] + [concatenated]
             )
         if all(fold[setName].global_feature_explanations is not None for setName in self.holdout[0] for fold in self.holdout):
-            holdoutColumnsMAF = [colName for colName in concatenated.columns if "maf" in colName and "holdout" in colName] 
+            columnsMAF = [colName for colName in concatenated.columns if "maf" in colName] 
             aggDict = {
                     "feature_importances": ["mean", "std"],
-                    "test__case_maf": ["mean", "std"],
-                    "test__control_maf": ["mean", "std"],
-                    **{col: ["mean", "std"] for col in holdoutColumnsMAF}
+                    **{col: ["mean", "std"] for col in columnsMAF}
                 }
             if config['vcfLike']['zygosity']:
-                holdoutColumnsRAF = [colName for colName in concatenated.columns if "raf" in colName and "holdout" in colName]
+                columnsRAF = [colName for colName in concatenated.columns if "raf" in colName]
                 aggDict.update({
-                    "test__case_raf": ["mean", "std"], 
-                    "test__control_raf": ["mean", "std"], 
-                    **{col: ["mean", "std"] for col in holdoutColumnsRAF}
+                    **{col: ["mean", "std"] for col in columnsRAF}
                 })
             return concatenated.groupby("feature_name").agg(
                 aggDict
@@ -585,18 +581,16 @@ class BootstrapResult:
         concatenated_variances = pd.concat(stds_list, axis=1)**2
         
         # Initial columns list
+        columnsMAF = [colName for colName in concatenated_means.columns if "maf" in colName] 
         columns = [
             "feature_importances", 
-            "test__case_maf", 
-            "test__control_maf", 
-            *[holdoutMAFcol for holdoutMAFcol in concatenated_means.columns if "holdout" in holdoutMAFcol and "maf" in holdoutMAFcol]
+            *[mafCol for mafCol in concatenated_means.columns if "maf" in columnsMAF]
         ]
 
         # Add RAF columns if they are present
+        columnsRAF = [colName for colName in concatenated_means.columns if "raf" in colName] 
         raf_columns = [
-            "test__case_raf", 
-            "test__control_raf", 
-            *[holdoutRAFcol for holdoutRAFcol in concatenated_means.columns if "holdout" in holdoutRAFcol and "raf" in holdoutRAFcol]
+            *[rafCol for rafCol in concatenated_means.columns if "raf" in columnsRAF]
         ]
         for raf_col in raf_columns:
             if raf_col in concatenated_means.columns or raf_col in concatenated_variances.columns:

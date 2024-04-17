@@ -746,7 +746,7 @@ def saveSampleEmbeddings(genotypeData: GenotypeData, config=config):
                 if len(currentGenotypeData) == 0:
                     continue
                 os.makedirs(f"{runPath}/holdout/{setName}", exist_ok=True)
-                currentGenotypeData.to_csv(f"{runPath}/holdout/{setName}/{setName}_embedding.csv")
+                currentGenotypeData.to_csv(f"{runPath}/holdout/{setName}/{setName}_{attr}_embedding.csv")
 
 
 def toMultiprocessDict(orig_dict, manager):

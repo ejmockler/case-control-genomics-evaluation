@@ -692,7 +692,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 holdoutPlotSubtitle += f"\n{seenHoldoutCases} {config['clinicalTable']['caseAlias']}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy[setName])} accuracy"
             if setName in modelResults.average_holdout_control_accuracy:
                 holdoutPlotSubtitle += f"\n{seenHoldoutControls} {config['clinicalTable']['controlAlias']}s @ {'{:.1%}'.format(modelResults.average_holdout_control_accuracy[setName])} accuracy"
-            holdoutPlotSubtitle += f"/n{bootstrapHoldoutCount} holdout samples" 
+            holdoutPlotSubtitle += f"\n{bootstrapHoldoutCount} holdout samples" 
             
             holdoutAccuracyHistogram = px.histogram(
                 holdoutResultsDataFrame,
@@ -1038,9 +1038,9 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
 
                 {setName} holdout"""
             if setName in classificationResults.modelResults[0].average_holdout_case_accuracy:
-                holdoutPlotSubtitle += f"\n{seenHoldoutCases} {config['clinicalTable']['caseAlias']}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_case_accuracy[setName] for modelResults in classificationResults.modelResults for setName in modelResults.average_holdout_accuracy]))} accuracy"
+                holdoutPlotSubtitle += f"\n{seenHoldoutCases} {config['clinicalTable']['caseAlias']}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_case_accuracy[setName] for modelResults in classificationResults.modelResults]))} accuracy"
             if setName in classificationResults.modelResults[0].average_holdout_control_accuracy:
-                holdoutPlotSubtitle += f"\n{seenHoldoutControls} {config['clinicalTable']['controlAlias']}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_control_accuracy[setName] for modelResults in classificationResults.modelResults for setName in modelResults.average_holdout_accuracy]))} accuracy"
+                holdoutPlotSubtitle += f"\n{seenHoldoutControls} {config['clinicalTable']['controlAlias']}s @ {'{:.1%}'.format(np.mean([modelResults.average_holdout_control_accuracy[setName] for modelResults in classificationResults.modelResults]))} accuracy"
             holdoutPlotSubtitle += f"\n{bootstrapHoldoutCount} holdout samples"
 
             holdoutAucPlot = plotAUC(
