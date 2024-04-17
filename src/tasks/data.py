@@ -39,6 +39,7 @@ class GenotypeData:
         
     @staticmethod
     def get_allele_frequencies(genotypeDataframe):
+        # sum counts of non-zero alleles over all samples, normalize by number of samples
         return genotypeDataframe.gt(0).sum(axis=1).divide(len(genotypeDataframe.columns))
 
     def _check_duplicates(self):
@@ -584,13 +585,13 @@ class BootstrapResult:
         columnsMAF = [colName for colName in concatenated_means.columns if "maf" in colName] 
         columns = [
             "feature_importances", 
-            *[mafCol for mafCol in concatenated_means.columns if "maf" in columnsMAF]
+            *[mafCol for mafCol in concatenated_means.columns if "maf" in mafCol]
         ]
 
         # Add RAF columns if they are present
         columnsRAF = [colName for colName in concatenated_means.columns if "raf" in colName] 
         raf_columns = [
-            *[rafCol for rafCol in concatenated_means.columns if "raf" in columnsRAF]
+            *[rafCol for rafCol in concatenated_means.columns if "raf" in rafCol]
         ]
         for raf_col in raf_columns:
             if raf_col in concatenated_means.columns or raf_col in concatenated_variances.columns:

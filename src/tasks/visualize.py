@@ -586,7 +586,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         nbins=100,
         title=f"""Mean test sample accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
-    accuracyHistogram.update_layout(title=f"Mean {modelResults.model_name} test set probability<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations")
+    accuracyHistogram.update_layout(title=f"{config['tracking']['name']}, {featureCount} {'genes' if config['vcfLike']['aggregateGenesBy'] != None else 'variants (' + str(geneCount) + ' genes)'}<br>Mean {modelResults.model_name} test set probability<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations")
     probabilityHistogram = px.histogram(
         testResultsDataFrame,
         x="probability_mean",
@@ -598,7 +598,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         nbins=100,
         title=f"""Mean test sample probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
     )
-    probabilityHistogram.update_layout(title=f"Mean {modelResults.model_name} test set probability<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations")
+    probabilityHistogram.update_layout(title=f"{config['tracking']['name']}, {featureCount} {'genes' if config['vcfLike']['aggregateGenesBy'] != None else 'variants (' + str(geneCount) + ' genes)'}<br>Mean {modelResults.model_name} test set probability<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations")
     
     aucPlot = plotAUC(
         f"""
@@ -706,7 +706,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 nbins=100,
                 title=f"""{setName} accuracy, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
             )
-            holdoutAccuracyHistogram.update_layout(title={'text': f"{setName} holdout {modelResults.model_name} mean accuracy<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations"})
+            holdoutAccuracyHistogram.update_layout(title={'text': f"{config['tracking']['name']}, {featureCount} {'genes' if config['vcfLike']['aggregateGenesBy'] != None else 'variants (' + str(geneCount) + ' genes)'}<br>{setName} holdout {modelResults.model_name} mean accuracy<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations"})
             holdoutProbabilityHistogram = px.histogram(
                 holdoutResultsDataFrame,
                 x="probability_mean",
@@ -718,7 +718,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 nbins=100,
                 title=f"""{setName} mean probability, {config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations""",
             )
-            holdoutProbabilityHistogram.update_layout(title=f"{setName} holdout {modelResults.model_name} mean probability<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations")
+            holdoutProbabilityHistogram.update_layout(title=f"{config['tracking']['name']}, {featureCount} {'genes' if config['vcfLike']['aggregateGenesBy'] != None else 'variants (' + str(geneCount) + ' genes)'}<br>{setName} holdout {modelResults.model_name} mean probability<br>{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations")
             holdoutAucPlot = plotAUC(
                 f"""
                     Receiver Operating Characteristic (ROC) Curve

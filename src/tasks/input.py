@@ -377,8 +377,8 @@ def prepareDatasets(
     preCleanedVariantCounts = len(allGenotypes.index)
     allGenotypes = allGenotypes.dropna(
             how="any",
-        ).loc[allGenotypes[crossValGenotypeIDs].std(axis=1) > 0]
-    print(f"Dropped {preCleanedVariantCounts - len(allGenotypes.index)} variants with missing values or invariant")
+        ).loc[allGenotypes[crossValGenotypeIDs].std(axis=1) > 0.1]
+    print(f"Dropped {preCleanedVariantCounts - len(allGenotypes.index)} variants with insufficient variance (stddev < 0.1) or missing values")
 
     samples = allGenotypes.loc[:, crossValGenotypeIDs]
     excessMajorSamples = allGenotypes.loc[:, excessIDs]
@@ -402,11 +402,14 @@ def prepareDatasets(
         holdoutSamplesBySetName, holdoutIndexBySetName, holdoutLabelsBySetName = {}, {}, {}
         # first create case embeddings
         for setName, sampleSet in holdoutCaseGenotypes.items():
+            # match dropped crossval allele frequencies  
+            sampleSet = sampleSet.loc[allGenotypes.index]
             # transpose so that samples are rows, variants are columns
             holdoutSamplesBySetName[setName] = scaler.fit_transform(sampleSet).transpose()
             holdoutIndexBySetName[setName] = np.array(sampleSet.columns.tolist())
             holdoutLabelsBySetName[setName] = np.array([1] * len(sampleSet.columns.tolist()))
             if setName in holdoutControlGenotypes:
+                holdoutControlGenotypes[setName] = holdoutControlGenotypes[setName].loc[allGenotypes.index]
                 # append control samples to case samples
                 holdoutSamplesBySetName[setName] = np.concatenate(
                     [
@@ -428,6 +431,7 @@ def prepareDatasets(
                 )
         # create control embeddings
         for setName, sampleSet in holdoutControlGenotypes.items():
+            sampleSet = sampleSet.loc[allGenotypes.index]
             if setName in holdoutSamplesBySetName:
                 continue
             holdoutSamplesBySetName[setName] = scaler.fit_transform(sampleSet).transpose()

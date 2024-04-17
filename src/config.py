@@ -15,7 +15,7 @@ config = {
         "compoundSampleMetaIdStartIndex": 1,  # index of clinical ID in compound sample ID
         "binarize": False,  # binarize variants to 0/1, or sum to weigh allele frequency,
         "zygosity": True,  # bin variants by zygosity (homozygous + rare heterozygous, heterozygous)
-        "minAlleleFrequency": 0.005,  # filter out variants with allele frequency less than this
+        "minAlleleFrequency": 0.0025,  # filter out variants with allele frequency less than this
         "maxAlleleFrequency": 1.00,  # filter out variants with allele frequency greater than this
         "maxVariants": None, # set max number of variants for control; set to None to disable
         "frequencyMatchReference": None, # reference VCF-like to frequency-match alleles; must have same indices as vcfLike
@@ -26,7 +26,7 @@ config = {
     "tracking": {
         "name": "NUP variants (rare-binned, rsID only), AnswerALS cases & non-neurological controls (Caucasian)",  # name of the experiment
         "entity": "ejmockler",
-        "project": "NUPs60-AALS-rsID-rareBinned-0.005MAF",
+        "project": "NUPs60-AALS-rsID-rareBinned-0.0025MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -144,8 +144,8 @@ config = {
         ],  # external sample tables
     },
     "sampling": {
-        "bootstrapIterations": 60,
-        "crossValIterations": 10,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 2,
+        "crossValIterations": 3,  # number of validations per bootstrap iteration
         "lastIteration": 0,
         "sequesteredIDs": [],  # crossval IDs to withhold from training
     },
