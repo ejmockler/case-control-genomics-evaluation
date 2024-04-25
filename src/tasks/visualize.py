@@ -482,12 +482,8 @@ def trackBootstrapVisualizations(
         os.makedirs(f"{runPath}/plots", exist_ok=True)
         if not excess:
             aucPlot.savefig(f"{runPath}/plots/{aucName}.svg", bbox_inches="tight")
-            aucPlot.savefig(f"{runPath}/plots/{aucName}.png", bbox_inches="tight")
             calibrationPlot.savefig(
             f"{runPath}/plots/{calibrationName}.svg", bbox_inches="tight"
-            )
-            calibrationPlot.savefig(
-                f"{runPath}/plots/{calibrationName}.png", bbox_inches="tight"
             )
         confusionMatrixPath = f"{runPath}/plots/{confusionMatrixName}"
         os.makedirs(confusionMatrixPath, exist_ok=True)
@@ -496,14 +492,9 @@ def trackBootstrapVisualizations(
                 f"{confusionMatrixPath}/{i+1}.svg", bbox_inches="tight"
             )
         avgConfusionMatrix.savefig(
-            f"{runPath}/plots/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.svg",
+            f"{runPath}/plots/average{confusionMatrixName[1:] + '__' + confusionMatrixName[0].upper()}.svg",
             bbox_inches="tight",
         )
-        avgConfusionMatrix.savefig(
-            f"{runPath}/plots/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.png",
-            bbox_inches="tight",
-        )
-        
         if config["model"]["hyperparameterOptimization"] and not holdout and not excess:
             convergencePlot.savefig(
                 f"{runPath}/plots/{convergencePlotName}.svg", bbox_inches="tight"
@@ -568,7 +559,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
     
     {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
-    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+    Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
     {seenTestCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenTestControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration
@@ -685,7 +676,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             holdoutPlotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
             
                 {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
-                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
                 {setName} holdout"""
             if setName in modelResults.average_holdout_case_accuracy:
@@ -751,33 +742,21 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             os.makedirs(holdoutPlotPath, exist_ok=True)
             
             holdoutAccuracyHistogram.write_html(
-                f"{holdoutPlotPath}/{setName}__accuracyPlot.html"
+                f"{holdoutPlotPath}/accuracyPlot__{setName}.html"
             )
             holdoutProbabilityHistogram.write_html(
-                f"{holdoutPlotPath}/{setName}__probabilityPlot.html"
+                f"{holdoutPlotPath}/probabilityPlot__{setName}.html"
             )
             holdoutAucPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__aucPlot.svg",
-                bbox_inches="tight",
-            )
-            holdoutAucPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__aucPlot.png",
+                f"{holdoutPlotPath}/aucPlot__{setName}.svg",
                 bbox_inches="tight",
             )
             holdoutCalibrationPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__calibrationPlot.svg",
-                bbox_inches="tight",
-            )
-            holdoutCalibrationPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__calibrationPlot.png",
+                f"{holdoutPlotPath}/calibrationPlot__{setName}.svg",
                 bbox_inches="tight",
             )
             averageHoldoutConfusionMatrix.savefig(
-                f"{holdoutPlotPath}/{setName}__confusionMatrix.svg",
-                bbox_inches="tight",
-            )
-            averageHoldoutConfusionMatrix.savefig(
-                f"{holdoutPlotPath}/{setName}__confusionMatrix.png",
+                f"{holdoutPlotPath}/confusionMatrix__{setName}.svg",
                 bbox_inches="tight",
             )
             
@@ -797,35 +776,18 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
         f"{plotPath}/aucPlot.svg",
         bbox_inches="tight",
     )
-    aucPlot.savefig(
-        f"{plotPath}/aucPlot.png",
-        bbox_inches="tight",
-    )
     averageConfusionMatrix.savefig(
         f"{plotPath}/confusionMatrix.svg",
         bbox_inches="tight",
     )
-    averageConfusionMatrix.savefig(
-        f"{plotPath}/confusionMatrix.png",
-        bbox_inches="tight",
-    )
-
     calibrationPlot.savefig(
         f"{plotPath}/calibrationPlot.svg",
-        bbox_inches="tight",
-    )
-    calibrationPlot.savefig(
-        f"{plotPath}/calibrationPlot.png",
         bbox_inches="tight",
     )
     if config["model"]["hyperparameterOptimization"]:
         if convergencePlot is not None:
             convergencePlot.savefig(
                 f"{plotPath}/convergencePlot.svg",
-                bbox_inches="tight",
-            )
-            convergencePlot.savefig(
-                f"{plotPath}/convergencePlot.png",
                 bbox_inches="tight",
             )
 
@@ -958,7 +920,7 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
 
     {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
-    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+    Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
     {seenTestCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_case_accuracy for modelResults in classificationResults.modelResults]))} accuracy, {seenTestControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(np.mean([modelResults.average_test_control_accuracy for modelResults in classificationResults.modelResults]))} accuracy
     {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
@@ -1034,7 +996,7 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
             holdoutPlotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
             
                 {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
-                Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
                 {setName} holdout"""
             if setName in classificationResults.modelResults[0].average_holdout_case_accuracy:
@@ -1064,35 +1026,18 @@ def trackProjectVisualizations(classificationResults: ClassificationResults, con
             os.makedirs(holdoutPlotPath, exist_ok=True)
             
             holdoutAucPlot.savefig(
-            f"{holdoutPlotPath}/{setName}__aucPlot.svg",
+            f"{holdoutPlotPath}/aucPlot__{setName}.svg",
             bbox_inches="tight",
             )
-            holdoutAucPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__aucPlot.png",
-                bbox_inches="tight",
-            )
             holdoutCalibrationPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__calibrationPlot.svg",
+                f"{holdoutPlotPath}/calibrationPlot__{setName}.svg",
                 bbox_inches="tight",
             )
-            holdoutCalibrationPlot.savefig(
-                f"{holdoutPlotPath}/{setName}__calibrationPlot.png",
-                bbox_inches="tight",
-            )
-
 
     aucPlot.savefig(
         f"projects/{config['tracking']['project']}/aucPlot.svg", bbox_inches="tight"
     )
-    aucPlot.savefig(
-        f"projects/{config['tracking']['project']}/aucPlot.png", bbox_inches="tight"
-    )
-
     calibrationPlot.savefig(
         f"projects/{config['tracking']['project']}/calibrationPlot.svg",
-        bbox_inches="tight",
-    )
-    calibrationPlot.savefig(
-        f"projects/{config['tracking']['project']}/calibrationPlot.png",
         bbox_inches="tight",
     )

@@ -98,7 +98,7 @@ async def main(
             )
             if config['model']['calculateShapelyExplanations']:
                 modelResult.average_holdout_local_explanations[setName].to_csv(
-                    f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdout/{setName}/{setName}__localFeatures_{config['tracking']['project']}.csv"
+                    f"projects/{config['tracking']['project']}/{modelResult.model_name}/holdout/{setName}/localFeatures__{setName}_{config['tracking']['project']}.csv"
                 )
         modelResult.excess_results_dataframe.to_csv(
             f"projects/{config['tracking']['project']}/{modelResult.model_name}/excessResults_{modelResult.model_name}_{config['tracking']['project']}.csv"

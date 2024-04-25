@@ -24,9 +24,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUP variants (rare-binned, rsID only), AnswerALS cases & non-neurological controls (Caucasian)",  # name of the experiment
+        "name": "NUP variants (rare-binned, rsID only)\nTrained on: >=85% accurate AnswerALS cases & non-neurological controls (Caucasian)",  # name of the experiment
         "entity": "ejmockler",
-        "project": "NUPs60-AALS-rsID-rareBinned-0.0025MAF",
+        "project": "NUPs60->=85%accurateCasesLR-aals-rsID-rareBinned-0.0025MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -38,7 +38,7 @@ config = {
         "controlLabels": [
            "Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
-        "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
+        "caseLabels": [],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
         "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
@@ -47,10 +47,18 @@ config = {
         "holdoutSetNames": [
             "AnswerALS Cases vs. Controls (Ethnically-Variable)",
             "Other Neurological Cases vs. Controls (Ethnically-Variable)",
-            "MinE Cases vs. MinE Controls",
-            "MinE Cases vs. Ethnically-Variable Controls",
+            # "MinE Cases vs. MinE Controls",
+            # "MinE Cases vs. Ethnically-Variable Controls",
         ],
         "metadata": [
+            {
+                "setType": "crossval", 
+                "path": "../adhoc analysis/>=85%accurateCases_LogisticRegression_NUPs60-aals-rsID-rareBinned-0.0025MAF.tsv", 
+                "label": "case", 
+                "idColumn": "id", 
+                "filters":  "",
+            },
+            
             {
                 "setType": "crossval", 
                 "path": "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv", 
@@ -103,49 +111,49 @@ config = {
                 "filters":  "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
             },
             
-            {
-                "setType": "MinE Cases vs. MinE Controls",
-                "path": "../adhoc analysis/mine_case_ids.tsv",
-                "label": "case",
-                "idColumn": "id",
-                "filters":""
-            },
-            {
-                "setType": "MinE Cases vs. MinE Controls",
-                "path": "../adhoc analysis/mine_control_ids.tsv",
-                "label": "control",
-                "idColumn": "id",
-                "filters":""
-            },
+            # {
+            #     "setType": "MinE Cases vs. MinE Controls",
+            #     "path": "../adhoc analysis/mine_case_ids.tsv",
+            #     "label": "case",
+            #     "idColumn": "id",
+            #     "filters":""
+            # },
+            # {
+            #     "setType": "MinE Cases vs. MinE Controls",
+            #     "path": "../adhoc analysis/mine_control_ids.tsv",
+            #     "label": "control",
+            #     "idColumn": "id",
+            #     "filters":""
+            # },
             
-            {
-                "setType": "MinE Cases vs. Ethnically-Variable Controls",
-                "path": "../adhoc analysis/mine_case_ids.tsv",
-                "label": "case",
-                "idColumn": "id",
-                "filters":""
-            },
-            {
-                "setType": "MinE Cases vs. Ethnically-Variable Controls", 
-                "path": "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv", 
-                "label": "control", 
-                "idColumn": "Sample name", 
-                "filters":  "`Superpopulation code`!='EUR'",
-            },
-            {
-                "setType": "MinE Cases vs. Ethnically-Variable Controls", 
-                "path": "../adhoc analysis/ACWM_ethnicallyVariable.tsv", 
-                "label": "control", 
-                "idColumn": "ExternalSampleId", 
-                "filters":  "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
-            },
+            # {
+            #     "setType": "MinE Cases vs. Ethnically-Variable Controls",
+            #     "path": "../adhoc analysis/mine_case_ids.tsv",
+            #     "label": "case",
+            #     "idColumn": "id",
+            #     "filters":""
+            # },
+            # {
+            #     "setType": "MinE Cases vs. Ethnically-Variable Controls", 
+            #     "path": "../adhoc analysis/igsr-1000 genomes phase 3 release.tsv", 
+            #     "label": "control", 
+            #     "idColumn": "Sample name", 
+            #     "filters":  "`Superpopulation code`!='EUR'",
+            # },
+            # {
+            #     "setType": "MinE Cases vs. Ethnically-Variable Controls", 
+            #     "path": "../adhoc analysis/ACWM_ethnicallyVariable.tsv", 
+            #     "label": "control", 
+            #     "idColumn": "ExternalSampleId", 
+            #     "filters":  "`Subject Group`=='Non-Neurological Control' & `pct_european`<0.85",
+            # },
             
             
         ],  # external sample tables
     },
     "sampling": {
-        "bootstrapIterations": 2,
-        "crossValIterations": 3,  # number of validations per bootstrap iteration
+        "bootstrapIterations": 60,
+        "crossValIterations": 10,  # number of validations per bootstrap iteration
         "lastIteration": 0,
         "sequesteredIDs": [],  # crossval IDs to withhold from training
     },

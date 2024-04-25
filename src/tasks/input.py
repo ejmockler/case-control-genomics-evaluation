@@ -742,7 +742,7 @@ def saveSampleEmbeddings(genotypeData: GenotypeData, config=config):
     for attr in ["case", "control", "holdout_case", "holdout_control"]:
         if "holdout" not in attr:
             currentGenotypeData = getattr(genotypeData, attr).genotype
-            currentGenotypeData.to_csv(f"{runPath}/{attr}_embedding.csv")
+            currentGenotypeData.to_csv(f"{runPath}/embedding_{attr}.csv")
         else:
             holdoutData = getattr(genotypeData, attr)
             for setName in holdoutData:
@@ -750,7 +750,7 @@ def saveSampleEmbeddings(genotypeData: GenotypeData, config=config):
                 if len(currentGenotypeData) == 0:
                     continue
                 os.makedirs(f"{runPath}/holdout/{setName}", exist_ok=True)
-                currentGenotypeData.to_csv(f"{runPath}/holdout/{setName}/{setName}_{attr}_embedding.csv")
+                currentGenotypeData.to_csv(f"{runPath}/holdout/{setName}/embedding_{attr}__{setName}.csv")
 
 
 def toMultiprocessDict(orig_dict, manager):

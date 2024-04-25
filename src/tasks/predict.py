@@ -194,7 +194,7 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
     for setName in evaluationResult.holdout_results_dataframe:
         holdoutPath = f"{runPath}/holdout/{setName}"
         os.makedirs(holdoutPath, exist_ok=True)
-        evaluationResult.holdout_results_dataframe[setName].to_csv(f"{holdoutPath}/{setName}__results.csv")
+        evaluationResult.holdout_results_dataframe[setName].to_csv(f"{holdoutPath}/results__{setName}.csv")
     
     pd.Series(sampleFrequencies, name="draw_count").to_csv(f"{runPath}/sampleDrawFrequencies.csv")
     
@@ -243,7 +243,7 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
         if evaluationResult.holdout:
             for setName in evaluationResult.average_holdout_local_explanations:
                 evaluationResult.average_holdout_local_explanations[setName].to_csv(
-                    f"{runPath}/holdout/{setName}/{setName}__localExplanations.csv"
+                    f"{runPath}/holdout/{setName}/localExplanations__{setName}.csv"
                 )
 
     with open(
@@ -502,7 +502,7 @@ def classify(
         # plot AUC & hyperparameter convergence
         plotSubtitle = f"""
             {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
-            Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+            Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
             
             {np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {len(embedding['labels']) - np.count_nonzero(embedding['labels'])} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
             {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold
@@ -511,9 +511,9 @@ def classify(
             for setName in modelResults.holdout[-1]: # assuming all folds have the same holdout sets
                 holdoutPlotSubtitle = f"""
                     {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
-                    Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+                    Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
                     
-                    {setName} holdout"""
+                    Holdout: {setName}"""
                 if setName in modelResults.average_holdout_case_accuracy:
                     holdoutPlotSubtitle += f"\n{np.count_nonzero(embedding['holdoutLabels'][setName])} {config['clinicalTable']['caseAlias']}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy[setName])} accuracy"
                 if setName in modelResults.average_holdout_control_accuracy:
@@ -532,7 +532,7 @@ def classify(
         # if modelResults.excess:
         #     excessPlotSubtitle = f"""
         #         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
-        #         Minor allele frequency over {'{:.1%}'.format(config['vcfLike']['minAlleleFrequency'])}
+        #         Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
         #         {len(embedding['excessMajorLabels'])} {modelResults.excess[0].set} samples @ {'{:.1%}'.format(modelResults.average_excess_accuracy)} accuracy"""
         #     trackBootstrapVisualizations(
