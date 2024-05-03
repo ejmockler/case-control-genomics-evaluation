@@ -278,6 +278,7 @@ def prepareCaseControlSamples(caseGenotypes, controlGenotypes, sample_frequencie
     weights /= weights.sum()
     
     # Downsample larger group to match smaller group
+    print(weights)
     majorIndex = np.random.choice(
         np.arange(len(majorIDs)), min(caseControlCounts), replace=False, p=weights
     )
@@ -557,7 +558,7 @@ def processInputFiles(config):
             config["clinicalTable"]["controlLabels"],
         )
     ]
-
+    
     clinicalSampleIDmap = {id: filteredClinicalData.loc[id, config["clinicalTable"]["subjectIdColumn"]] for id in filteredClinicalData.index.tolist()}
     caseIDs = caseIDsMask[caseIDsMask].index.to_numpy()
     controlIDs = controlIDsMask[controlIDsMask].index.to_numpy()
@@ -568,6 +569,18 @@ def processInputFiles(config):
         filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config
     )
     
+    if config['sampling']['shuffleLabels']:
+        combinedIDs = list(resolvedCaseIDs['crossval']) + list(resolvedControlIDs['crossval'])
+        np.random.shuffle(combinedIDs)
+        caseIDs = combinedIDs[:len(resolvedCaseIDs['crossval'])]
+        controlIDs = combinedIDs[len(resolvedCaseIDs['crossval']):]
+        caseGenotypeDict, controlGenotypeDict, missingCaseIDs, missingControlIDs, resolvedCaseIDs, resolvedControlIDs = processGenotypes(
+            filteredVCF, clinicalSampleIDmap, caseIDs, controlIDs, config
+        )
+        print(f"shuffled case ID len: {len(caseGenotypeDict['crossval'].keys())}")
+        print(f"shuffled control ID len: {len(controlGenotypeDict['crossval'].keys())}")
+        
+            
     # if at least one holdout set exists
     if len(holdoutDictCaseIDs) > 0:
         holdoutCaseGenotypeDict, holdoutControlGenotypeDict, missingHoldoutCaseIDs, missingHoldoutControlIDs, resolvedHoldoutCaseIDs, resolvedHoldoutControlIDs = processGenotypes(

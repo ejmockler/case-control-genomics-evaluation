@@ -556,62 +556,38 @@ class BootstrapResult:
         return results_dict if is_holdout_structure else None
 
     def aggregate_global_explanations(self, means_list, stds_list):
-        """Aggregate global feature importances and MAFs across multiple EvaluationResults."""
-        
-        def calculate_overall_mean(data, column):
-            return data[column].mean(axis=1)
-        
-        def calculate_overall_std(data, column):
-            variances = (data[column]**2).mean(axis=1)
-            return np.sqrt(variances)
-        
-        def aggregate_data(column_prefix):
-            mean = calculate_overall_mean(concatenated_means, column_prefix)
-            std = calculate_overall_std(concatenated_variances, column_prefix)
-            
-            # Additional calculations specifically for feature_importances
-            if column_prefix == "feature_importances":
-                median_val = concatenated_means[column_prefix].median(axis=1)
-                min_val = concatenated_means[column_prefix].min(axis=1)
-                max_val = concatenated_means[column_prefix].max(axis=1)
-                return mean, std, min_val, max_val, median_val
-            else:
-                return mean, std
+        concatenated_variances = pd.concat(stds_list, axis=0)
+        concatenated_means = pd.concat(means_list, axis=0)
 
-        concatenated_means = pd.concat(means_list, axis=1)
-        concatenated_variances = pd.concat(stds_list, axis=1)**2
-        
-        # Initial columns list
-        columnsMAF = [colName for colName in concatenated_means.columns if "maf" in colName] 
-        columns = [
-            "feature_importances", 
-            *[mafCol for mafCol in concatenated_means.columns if "maf" in mafCol]
-        ]
+        # Now apply sqrt to the aggregated variances to get the standard deviation
+        results_std = concatenated_variances.apply(np.sqrt)
 
-        # Add RAF columns if they are present
-        columnsRAF = [colName for colName in concatenated_means.columns if "raf" in colName] 
-        raf_columns = [
-            *[rafCol for rafCol in concatenated_means.columns if "raf" in rafCol]
-        ]
-        for raf_col in raf_columns:
-            if raf_col in concatenated_means.columns or raf_col in concatenated_variances.columns:
-                columns.append(raf_col)
+        # Define the columns to be aggregated and the methods of aggregation
+        columns_to_aggregate = means_list[0].columns
+        agg_dict = {}
 
-        # Aggregating data
-        results = []
-        keys = []
+        for col in columns_to_aggregate:
+            if "maf" in col or "raf" in col:
+                agg_dict[col] = ['mean', 'std']  # Only storing these labels for later use
+            elif col == "feature_importances":
+                agg_dict[col] = ['mean', 'std', 'min', 'max', 'median']
 
-        for column in columns:
-            aggregated_values = aggregate_data(column)
-            results.extend(aggregated_values)
+        # Prepare the final dataframe with proper labels for mean and std
+        final_results = pd.DataFrame()
+        for col in agg_dict:
+            if 'mean' in agg_dict[col]:
+                final_results[f"mean_{col}"] = concatenated_means[col].groupby("feature_name").mean()
+            if 'std' in agg_dict[col]:
+                final_results[f"std_{col}"] = concatenated_variances[col].groupby("feature_name").mean()
+            if 'min' in agg_dict[col]:
+                final_results[f"min_{col}"] = concatenated_means[col].groupby("feature_name").min()
+            if 'max' in agg_dict[col]:
+                final_results[f"max_{col}"] = concatenated_means[col].groupby("feature_name").max()
+            if 'median' in agg_dict[col]:
+                final_results[f"median_{col}"] = concatenated_means[col].groupby("feature_name").median()
 
-            if column == "feature_importances":
-                keys.extend([f"mean_{column}", f"std_{column}", f"min_{column}", f"max_{column}", f"median_{column}"])
-            else:
-                keys.extend([f"mean_{column}", f"std_{column}"])
+        return final_results
 
-        result = pd.concat(results, axis=1, keys=keys)
-        return result
 
 
     @cached_property

@@ -492,7 +492,7 @@ def trackBootstrapVisualizations(
                 f"{confusionMatrixPath}/{i+1}.svg", bbox_inches="tight"
             )
         avgConfusionMatrix.savefig(
-            f"{runPath}/plots/average{confusionMatrixName[1:] + '__' + confusionMatrixName[0].upper()}.svg",
+            f"{runPath}/plots/average{confusionMatrixName[0].upper() + confusionMatrixName[1:]}.svg",
             bbox_inches="tight",
         )
         if config["model"]["hyperparameterOptimization"] and not holdout and not excess:
@@ -541,29 +541,33 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             ],
         )
     }
-    testLabelsProbabilities = {
-        modelResults.model_name: (
+    testLabelsProbabilitiesByFold = {
+        f"Fold {foldCount+1}": (
             [
                 label
                 for iterationResult in modelResults.iteration_results
-                for label in iterationResult.test_results_dataframe["label"].tolist()
+                for label in iterationResult.test[foldCount].labels
             ],
             [
-                probability
+                probability[1]
                 for iterationResult in modelResults.iteration_results
-                for probability in iterationResult.test_results_dataframe["probability_mean"].tolist()
+                for probability in iterationResult.test[foldCount].probabilities
             ],
         )
+        for foldCount in range(len(modelResults.iteration_results[0].test))
     }
 
     plotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
     
     {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
     Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
-
+   
+    {modelResults.model_name}
     {seenTestCases} {config["clinicalTable"]["caseAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_case_accuracy)} accuracy, {seenTestControls} {config["clinicalTable"]["controlAlias"]}s @ {'{:.1%}'.format(modelResults.average_test_control_accuracy)} accuracy
-    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration
-    {'Sequestered ' + str(len(config['sampling']['sequesteredIDs'][modelResults.model_name])) + ' test cases' if modelResults.model_name in config['sampling']['sequesteredIDs'] and len(config['sampling']['sequesteredIDs'][modelResults.model_name]) > 0 else ''}"""
+    {bootstrapTrainCount}±1 train, {bootstrapTestCount}±1 test samples per bootstrap iteration"""
+    
+    if modelResults.model_name in config['sampling']['sequesteredIDs'] and len(config['sampling']['sequesteredIDs'][modelResults.model_name]) > 0:
+        plotSubtitle += f"""\n{'Sequestered ' + str(len(config['sampling']['sequesteredIDs'][modelResults.model_name])) + ' test cases'}"""
 
     accuracyHistogram = px.histogram(
         testResultsDataFrame,
@@ -596,7 +600,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
             Receiver Operating Characteristic (ROC) Curve
             {plotSubtitle}
             """,
-        labelsPredictionsByInstance=testLabelsProbabilities,
+        labelsPredictionsByInstance=testLabelsProbabilitiesByFold,
         config=config,
     )
     calibrationPlot = plotCalibration(
@@ -658,19 +662,20 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 )
             }
             
-            holdoutLabelsProbabilities = {
-                modelResults.model_name: (
+            holdoutLabelsProbabilitiesByFold = {
+                f"Fold {foldCount+1}": (
                     [
                         label
                         for iterationResult in modelResults.iteration_results
-                        for label in iterationResult.holdout_results_dataframe[setName]["label"].tolist()
+                        for label in iterationResult.holdout[foldCount][setName].labels
                     ],
                     [
-                        probability
+                        probability[1]
                         for iterationResult in modelResults.iteration_results
-                        for probability in iterationResult.holdout_results_dataframe[setName]["probability_mean"].tolist()
+                        for probability in iterationResult.holdout[foldCount][setName].probabilities
                     ],
                 )
+                for foldCount in range(len(modelResults.iteration_results[0].test))
             }
 
             holdoutPlotSubtitle = f"""{config['sampling']['crossValIterations']}x cross-validation over {config['sampling']['bootstrapIterations']} bootstrap iterations
@@ -678,6 +683,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                 {config["tracking"]["name"]}, {featureCount} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else "variants (" + str(geneCount) + " genes)"}
                 Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
 
+                {modelResults.model_name}
                 {setName} holdout"""
             if setName in modelResults.average_holdout_case_accuracy:
                 holdoutPlotSubtitle += f"\n{seenHoldoutCases} {config['clinicalTable']['caseAlias']}s @ {'{:.1%}'.format(modelResults.average_holdout_case_accuracy[setName])} accuracy"
@@ -715,7 +721,7 @@ def trackModelVisualizations(modelResults: BootstrapResult, config=config):
                     Receiver Operating Characteristic (ROC) Curve
                     {holdoutPlotSubtitle}
                     """,
-                labelsPredictionsByInstance=holdoutLabelsProbabilities,
+                labelsPredictionsByInstance=holdoutLabelsProbabilitiesByFold,
                 config=config,
             )
             holdoutCalibrationPlot = plotCalibration(

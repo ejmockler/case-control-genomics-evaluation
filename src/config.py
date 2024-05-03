@@ -1,6 +1,6 @@
 config = {
     "vcfLike": {
-        "path": "../adhoc analysis/NUP_aals_mine_genotypes.tsv",  # variant call table with annotations
+        "path": "../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",  # variant call table with annotations
         "sheet": "all cases vs all controls",  # sheet name if Excel spreadsheet
         "indexColumn": [
             "chrom",
@@ -24,9 +24,9 @@ config = {
     },  # TODO handle genotypes from related individuals
     "geneSets": {},  # TODO gene sets
     "tracking": {
-        "name": "NUP variants (rare-binned, rsID only)\nTrained on: >=85% accurate AnswerALS cases & non-neurological controls (Caucasian)",  # name of the experiment
+        "name": "NUP variants (rare-binned, rsID only)\nTrained on: Shuffled labels, AnswerALS cases & non-neurological controls (Caucasian)",  # name of the experiment
         "entity": "ejmockler",
-        "project": "NUPs60->=85%accurateCasesLR-aals-rsID-rareBinned-0.0025MAF",
+        "project": "NUPs60-aals-shuffledLabels-rsID-rareBinned-0.0025MAF",
         "plotAllSampleImportances": True,  # if calculating Shapely explanations, plot each sample in Neptune
         "remote": False,  # if True, log to Neptune
     },
@@ -38,7 +38,7 @@ config = {
         "controlLabels": [
            "Non-Neurological Control"
         ],  # these labels include external sample IDs (like 1000 Genomes)
-        "caseLabels": [],  # "ALS Spectrum MND"
+        "caseLabels": ["ALS Spectrum MND"],  # "ALS Spectrum MND"
         "controlAlias": "control",
         "caseAlias": "case",
         "filters": "pct_european>=0.85",  # filter out nonhomogenous samples with less than 85% European ancestry
@@ -51,13 +51,14 @@ config = {
             # "MinE Cases vs. Ethnically-Variable Controls",
         ],
         "metadata": [
-            {
-                "setType": "crossval", 
-                "path": "../adhoc analysis/>=85%accurateCases_LogisticRegression_NUPs60-aals-rsID-rareBinned-0.0025MAF.tsv", 
-                "label": "case", 
-                "idColumn": "id", 
-                "filters":  "",
-            },
+            
+            # {
+            #     "setType": "crossval", 
+            #     "path": "../adhoc analysis/>=85%accurateCases_LogisticRegression_NUPs60-aals-rsID-rareBinned-0.0025MAF.tsv", 
+            #     "label": "case", 
+            #     "idColumn": "id", 
+            #     "filters":  "",
+            # },
             
             {
                 "setType": "crossval", 
@@ -156,6 +157,7 @@ config = {
         "crossValIterations": 10,  # number of validations per bootstrap iteration
         "lastIteration": 0,
         "sequesteredIDs": [],  # crossval IDs to withhold from training
+        "shuffleLabels": True,  # shuffle case/control labels to test internal validity
     },
     "model": {
         "hyperparameterOptimization": True,
