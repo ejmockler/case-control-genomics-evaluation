@@ -108,7 +108,7 @@ def processAlleles(values, columns, genotypeIDs, clinicalSampleIDmap, config):
                     genotypeDict[setName][f"{column}"] = processed_genotypes
                     #columns = np.delete(columns, j)
                     #values = np.delete(values, j, axis=1)
-                    resolvedGenotypeIDs[setName].update({id})
+                    resolvedGenotypeIDs[setName].update({column})
                     break
         missingGenotypeIDs[setName] = (
             set(idSet) - resolvedGenotypeIDs[setName]
