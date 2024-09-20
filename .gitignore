@@ -150,6 +150,14 @@ projects/
 # neptune.ai
 .neptune
 
+# data
+*.mt
+*.ht
+*.bgz
+*.gz
+*.tbi
+*.bed
+
 # os
 .DS_Store
 

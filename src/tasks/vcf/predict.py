@@ -5,14 +5,20 @@ import pickle
 from traceback import print_exception
 import matplotlib
 
-from tasks.data import BootstrapResult, EvaluationResult, FoldResult, GenotypeData, SampleData
+from tasks.vcf.data import (
+    BootstrapResult,
+    EvaluationResult,
+    FoldResult,
+    GenotypeData,
+    SampleData,
+)
 
 matplotlib.use("agg")
 
 from sklearn.metrics import make_scorer, mean_squared_error, roc_auc_score, roc_curve
 
-from tasks.input import prepareDatasets
-from tasks.visualize import trackBootstrapVisualizations
+from tasks.vcf.input import prepareDatasets
+from tasks.vcf.visualize import trackBootstrapVisualizations
 from prefect_ray.task_runners import RayTaskRunner
 from prefect.task_runners import ConcurrentTaskRunner
 
@@ -31,7 +37,9 @@ import gc
 import faulthandler
 
 
-def getFeatureImportances(model, testData, holdoutData, excessData, featureLabels, config):
+def getFeatureImportances(
+    model, testData, holdoutData, excessData, featureLabels, config
+):
     """Get feature importances from fitted model and create SHAP explainer"""
     if model.__class__.__name__ == "MultinomialNB":
         modelCoefficientDF = pd.DataFrame()
@@ -60,8 +68,11 @@ def getFeatureImportances(model, testData, holdoutData, excessData, featureLabel
                 modelCoefficientDF = pd.DataFrame()
                 modelCoefficientDF[f"feature_importances"] = model.coef_[0]
         else:
-            modelCoefficientDF[f"feature_importances"] = model.coef_[0]
-    elif hasattr(model, "feature_importances_"):
+            modelCoefficientDF[f"feature_importances"] = model.coef_.flatten()
+    elif (
+        hasattr(model, "feature_importances_")
+        and model.feature_importances_ is not None
+    ):
         modelCoefficientDF = pd.DataFrame()
         modelCoefficientDF[f"feature_importances"] = model.feature_importances_
     else:
@@ -92,7 +103,7 @@ def getFeatureImportances(model, testData, holdoutData, excessData, featureLabel
 
         # Get SHAP values
         shapValues = shapExplainer(testData.vectors)
-        
+
         # Same for excess data
         if len(excessData.vectors) > 0:
             excessShapValues = shapExplainer(excessData.vectors)
@@ -102,9 +113,15 @@ def getFeatureImportances(model, testData, holdoutData, excessData, featureLabel
             holdoutShapValues = {}
             for setName in holdoutData:
                 holdoutShapValues[setName] = shapExplainer(holdoutData[setName].vectors)
-            
-        
-    return modelCoefficientDF, shapValues, excessShapValues, holdoutShapValues, shapExplainer, masker
+
+    return (
+        modelCoefficientDF,
+        shapValues,
+        excessShapValues,
+        holdoutShapValues,
+        shapExplainer,
+        masker,
+    )
 
 
 def get_probabilities(model, samples):
@@ -116,25 +133,26 @@ def get_probabilities(model, samples):
             probabilities = np.array([[1 - p, p] for p in probabilities])
     return probabilities
 
+
 def control_group_scorer(y, X, control_label=0):
     """
     Custom scoring function that calculates the negative mean squared error for the control group.
-    
+
     Parameters:
     - estimator: The model being evaluated.
     - X: The input features for the test set.
     - y: The true labels for the test set.
-    
+
     Returns:
     - score: The negative mean squared error of the predictions.
     """
     # Assuming '0' represents controls and '1' represents ALS patients in 'y'
     # Modify the condition below if your labeling differs.
     control_indices = np.where(y == control_label)  # Identify control group samples
-    
+
     # Calculate MSE for the control group
     mse = mean_squared_error(y[control_indices], X[control_indices])
-    
+
     # Return the negative MSE because BayesSearchCV maximizes the score
     return -mse
 
@@ -184,7 +202,9 @@ def beginTracking(model, runNumber, embedding, clinicalData, clinicalIDs, config
     return runID
 
 
-def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequencies, config):
+def trackResults(
+    runID: str, evaluationResult: EvaluationResult, sampleFrequencies, config
+):
     runPath = runID
 
     testResultsDataframe = evaluationResult.test_results_dataframe
@@ -194,10 +214,14 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
     for setName in evaluationResult.holdout_results_dataframe:
         holdoutPath = f"{runPath}/holdout/{setName}"
         os.makedirs(holdoutPath, exist_ok=True)
-        evaluationResult.holdout_results_dataframe[setName].to_csv(f"{holdoutPath}/results__{setName}.csv")
-    
-    pd.Series(sampleFrequencies, name="draw_count").to_csv(f"{runPath}/sampleDrawFrequencies.csv")
-    
+        evaluationResult.holdout_results_dataframe[setName].to_csv(
+            f"{holdoutPath}/results__{setName}.csv"
+        )
+
+    pd.Series(sampleFrequencies, name="draw_count").to_csv(
+        f"{runPath}/sampleDrawFrequencies.csv"
+    )
+
     evaluationResult.average()
     for k in range(config["sampling"]["crossValIterations"]):
         if config["model"]["hyperparameterOptimization"]:
@@ -222,7 +246,12 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
             name="labels",
         ).to_csv(f"{runPath}/trainLabels/{k+1}.csv")
 
-        if any([len(resultsSet.labels) > 0 for resultsSet in evaluationResult.holdout[k].values()]):
+        if any(
+            [
+                len(resultsSet.labels) > 0
+                for resultsSet in evaluationResult.holdout[k].values()
+            ]
+        ):
             for setName, resultsSet in evaluationResult.holdout[k].items():
                 os.makedirs(f"{runPath}/holdout/{setName}/labels", exist_ok=True)
                 pd.Series(
@@ -230,7 +259,7 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
                     index=resultsSet.ids,
                     name="labels",
                 ).to_csv(f"{runPath}/holdout/{setName}/labels/{k+1}.csv")
-     
+
     if evaluationResult.average_global_feature_explanations is not None:
         evaluationResult.average_global_feature_explanations.to_csv(
             f"{runPath}/averageGlobalExplanations.csv"
@@ -256,7 +285,9 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
         "w",
     ) as file:
         pass
-    with open(f"{runPath}/test__meanAUC_{evaluationResult.average_test_auc}", "w") as file:
+    with open(
+        f"{runPath}/test__meanAUC_{evaluationResult.average_test_auc}", "w"
+    ) as file:
         pass
     with open(
         f"{runPath}/test__meanAccuracy_{evaluationResult.average_test_accuracy}",
@@ -276,10 +307,11 @@ def trackResults(runID: str, evaluationResult: EvaluationResult, sampleFrequenci
             ) as file:
                 pass
             with open(
-                f"{runPath}/holdout/{setName}/meanAUC_{evaluationResult.average_holdout_auc[setName]}", "w"
+                f"{runPath}/holdout/{setName}/meanAUC_{evaluationResult.average_holdout_auc[setName]}",
+                "w",
             ) as file:
                 pass
-  
+
     if evaluationResult.excess:
         with open(
             f"{runPath}/{evaluationResult.excess[0].name}__count_{np.mean([len(foldResult.labels) for foldResult in evaluationResult.excess])}",
@@ -325,7 +357,9 @@ def evaluate(
     excessProbabilities = get_probabilities(model, excessData.vectors)
     holdoutProbabilities = {}
     for setName in holdoutData:
-        holdoutProbabilities[setName] = get_probabilities(model, holdoutData[setName].vectors)
+        holdoutProbabilities[setName] = get_probabilities(
+            model, holdoutData[setName].vectors
+        )
 
     (
         modelValues,
@@ -334,7 +368,9 @@ def evaluate(
         holdoutShapValues,
         shapExplainer,
         shapMasker,
-    ) = getFeatureImportances(model, testData, holdoutData, excessData, variantIndex, config)
+    ) = getFeatureImportances(
+        model, testData, holdoutData, excessData, variantIndex, config
+    )
 
     return (
         FoldResult(
@@ -359,19 +395,23 @@ def evaluate(
             excessData.geneCount,
             excessProbabilities,
             modelValues,
-            excessShapValues
+            excessShapValues,
         ),
-        {setName: FoldResult(
-            setName,
-            holdoutData[setName].ids,
-            holdoutData[setName].labels,
-            holdoutData[setName].vectors,
-            holdoutData[setName].geneCount,
-            holdoutProbabilities[setName],
-            modelValues,
-            holdoutShapValues[setName] if holdoutShapValues else None,
-        ) for setName in holdoutData},
+        {
+            setName: FoldResult(
+                setName,
+                holdoutData[setName].ids,
+                holdoutData[setName].labels,
+                holdoutData[setName].vectors,
+                holdoutData[setName].geneCount,
+                holdoutProbabilities[setName],
+                modelValues,
+                holdoutShapValues[setName] if holdoutShapValues else None,
+            )
+            for setName in holdoutData
+        },
     )
+
 
 def classify(
     runNumber,
@@ -388,9 +428,15 @@ def classify(
 ):
     caseGenotypes = genotypeData.case.genotype
     controlGenotypes = genotypeData.control.genotype
-    holdoutCaseGenotypes = {setName: holdoutCaseSet.genotype for setName, holdoutCaseSet in genotypeData.holdout_case.items()}
-    holdoutControlGenotypes = {setName: holdoutControlSet.genotype for setName, holdoutControlSet in genotypeData.holdout_control.items()}
-    
+    holdoutCaseGenotypes = {
+        setName: holdoutCaseSet.genotype
+        for setName, holdoutCaseSet in genotypeData.holdout_case.items()
+    }
+    holdoutControlGenotypes = {
+        setName: holdoutControlSet.genotype
+        for setName, holdoutControlSet in genotypeData.holdout_control.items()
+    }
+
     sample_frequencies, embedding = prepareDatasets(
         caseGenotypes,
         controlGenotypes,
@@ -399,13 +445,16 @@ def classify(
         sample_frequencies,
         verbose=(True if runNumber == 0 else False),
         config=config,
-        freqReferenceGenotypeData=freqReferenceGenotypeData
+        freqReferenceGenotypeData=freqReferenceGenotypeData,
     )
-    if embedding is None: raise Exception("No samples found in embedding.")
+    if embedding is None:
+        raise Exception("No samples found in embedding.")
 
     clinicalIDs = list()
 
-    for id in np.hstack([embedding["sampleIndex"], *list(embedding["holdoutSampleIndex"].values())]):
+    for id in np.hstack(
+        [embedding["sampleIndex"], *list(embedding["holdoutSampleIndex"].values())]
+    ):
         if config["vcfLike"]["compoundSampleIdDelimiter"] in id:
             clinicalIDs.append(
                 id.split(config["vcfLike"]["compoundSampleIdDelimiter"])[
@@ -426,9 +475,7 @@ def classify(
             holdoutCaseCount = np.count_nonzero(holdoutSetLabels)
             print(f"--\n{len(holdoutSetSamples)} {setName} holdout samples\n")
             print(f"{holdoutCaseCount} cases\n")
-            print(
-                f"{len(holdoutSetSamples) - holdoutCaseCount} controls\n--"
-            )
+            print(f"{len(holdoutSetSamples) - holdoutCaseCount} controls\n--")
     print(f"Iteration {runNumber+1} with model {model.__class__.__name__}")
 
     if track:
@@ -447,7 +494,19 @@ def classify(
             ids=embedding["holdoutSampleIndex"][setName],
             labels=embedding["holdoutLabels"][setName],
             vectors=embedding["holdoutSamples"][setName],
-            geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+            geneCount=(
+                len(
+                    embedding["variantIndex"]
+                    .get_level_values(
+                        config["vcfLike"]["indexColumn"][
+                            config["vcfLike"]["geneMultiIndexLevel"]
+                        ]
+                    )
+                    .unique()
+                )
+                if config["vcfLike"]["aggregateGenesBy"] == None
+                else len(embedding["variantIndex"])
+            ),
         )
 
     evaluate_args = [
@@ -457,22 +516,58 @@ def classify(
                 ids=embedding["sampleIndex"][trainIndices],
                 labels=embedding["labels"][trainIndices],
                 vectors=embedding["samples"][trainIndices],
-                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                geneCount=(
+                    len(
+                        embedding["variantIndex"]
+                        .get_level_values(
+                            config["vcfLike"]["indexColumn"][
+                                config["vcfLike"]["geneMultiIndexLevel"]
+                            ]
+                        )
+                        .unique()
+                    )
+                    if config["vcfLike"]["aggregateGenesBy"] == None
+                    else len(embedding["variantIndex"])
+                ),
             ),
             SampleData(
                 name="test",
                 ids=embedding["sampleIndex"][testIndices],
                 labels=embedding["labels"][testIndices],
                 vectors=embedding["samples"][testIndices],
-                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                geneCount=(
+                    len(
+                        embedding["variantIndex"]
+                        .get_level_values(
+                            config["vcfLike"]["indexColumn"][
+                                config["vcfLike"]["geneMultiIndexLevel"]
+                            ]
+                        )
+                        .unique()
+                    )
+                    if config["vcfLike"]["aggregateGenesBy"] == None
+                    else len(embedding["variantIndex"])
+                ),
             ),
             SampleData(
                 name=embedding["excessMajorSetName"],
                 ids=embedding["excessMajorIndex"],
                 labels=embedding["excessMajorLabels"],
                 vectors=embedding["excessMajorSamples"],
-                geneCount=len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique()) if config['vcfLike']['aggregateGenesBy'] == None else len(embedding["variantIndex"])
+                geneCount=(
+                    len(
+                        embedding["variantIndex"]
+                        .get_level_values(
+                            config["vcfLike"]["indexColumn"][
+                                config["vcfLike"]["geneMultiIndexLevel"]
+                            ]
+                        )
+                        .unique()
+                    )
+                    if config["vcfLike"]["aggregateGenesBy"] == None
+                    else len(embedding["variantIndex"])
                 ),
+            ),
             holdoutData,
             model,
             hyperParameterSpace,
@@ -508,7 +603,9 @@ def classify(
             {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.train])))}±1 train, {int(np.around(np.mean([len(foldResult.labels) for foldResult in modelResults.test])))}±1 test samples per x-val fold
             Bootstrap iteration {runNumber+1}"""
         if modelResults.holdout:
-            for setName in modelResults.holdout[-1]: # assuming all folds have the same holdout sets
+            for setName in modelResults.holdout[
+                -1
+            ]:  # assuming all folds have the same holdout sets
                 holdoutPlotSubtitle = f"""
                     {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
                     Minor allele frequency over {'{:.2%}'.format(config['vcfLike']['minAlleleFrequency'])}
@@ -528,7 +625,7 @@ def classify(
                     config=config,
                 )
                 gc.collect()
-                
+
         # if modelResults.excess:
         #     excessPlotSubtitle = f"""
         #         {config["tracking"]["name"]}, {embedding["samples"].shape[1]} {"genes" if config['vcfLike']['aggregateGenesBy'] != None else ("variants (" + str(len(embedding["variantIndex"].get_level_values(config['vcfLike']['indexColumn'][config['vcfLike']['geneMultiIndexLevel']]).unique())) +' genes)')}
@@ -568,12 +665,26 @@ def bootstrap(
 ):
     gc.collect()
     bootstrap = BootstrapResult(model.__class__.__name__)
-    holdoutGenotypeIDs = [id for holdoutSet in list(genotypeData.holdout_case.values()) + list(genotypeData.holdout_control.values()) for id in holdoutSet.genotype.columns.tolist()]
-    sampleFrequencies = {id: 0 for id in genotypeData.case.genotype.columns.tolist() + genotypeData.control.genotype.columns.tolist() + holdoutGenotypeIDs}
-    
+    holdoutGenotypeIDs = [
+        id
+        for holdoutSet in list(genotypeData.holdout_case.values())
+        + list(genotypeData.holdout_control.values())
+        for id in holdoutSet.genotype.columns.tolist()
+    ]
+    sampleFrequencies = {
+        id: 0
+        for id in genotypeData.case.genotype.columns.tolist()
+        + genotypeData.control.genotype.columns.tolist()
+        + holdoutGenotypeIDs
+    }
+
     # remove sequestered samples
     for attr in ["case", "control"]:
-        idsToDrop = config['sampling']['sequesteredIDs'] if isinstance(config['sampling']['sequesteredIDs'],list) else config['sampling']['sequesteredIDs'][model.__class__.__name__]
+        idsToDrop = (
+            config["sampling"]["sequesteredIDs"]
+            if isinstance(config["sampling"]["sequesteredIDs"], list)
+            else config["sampling"]["sequesteredIDs"][model.__class__.__name__]
+        )
         if "holdout" not in attr:
             datasetDict = {"crossval": getattr(genotypeData, attr)}
         else:
@@ -581,18 +692,37 @@ def bootstrap(
         for setName, dataset in datasetDict.items():
             allIDs = dataset.ids
             try:
-                subjectIDs = clinicalData.loc[list(allIDs), config['clinicalTable']['subjectIdColumn']]
+                subjectIDs = clinicalData.loc[
+                    list(allIDs), config["clinicalTable"]["subjectIdColumn"]
+                ]
                 preSequesterCount = len(allIDs)
-                print(f"Sequestered {preSequesterCount - len(dataset.ids)} {attr} samples")
+                print(
+                    f"Sequestered {preSequesterCount - len(dataset.ids)} {attr} samples"
+                )
             except:
                 subjectIDs = pd.Series(index=allIDs)
-            dataset.ids = [id for id in allIDs 
-                        if not any([id in idToDrop or idToDrop in id or (str(subjectIDs[id]) in idToDrop or idToDrop in str(subjectIDs[id])) for idToDrop in idsToDrop])]
-            dataset.genotype = dataset.genotype.drop([id for id in idsToDrop if id in dataset.genotype.columns], axis=1)
+            dataset.ids = [
+                id
+                for id in allIDs
+                if not any(
+                    [
+                        id in idToDrop
+                        or idToDrop in id
+                        or (
+                            str(subjectIDs[id]) in idToDrop
+                            or idToDrop in str(subjectIDs[id])
+                        )
+                        for idToDrop in idsToDrop
+                    ]
+                )
+            ]
+            dataset.genotype = dataset.genotype.drop(
+                [id for id in idsToDrop if id in dataset.genotype.columns], axis=1
+            )
             datasetDict[setName] = dataset
         if "holdout" not in attr:
             setattr(genotypeData, attr, datasetDict["crossval"])
-        else: 
+        else:
             setattr(genotypeData, attr, datasetDict)
 
     # parallelize with workflow engine in cluster environment
@@ -603,23 +733,21 @@ def bootstrap(
         try:
             # update results for every bootstrap iteration
             sampleFrequencies, iterationResults = classify(
-                    runNumber,
-                    model,
-                    hyperParameterSpace,
-                    genotypeData,
-                    frequencyReferenceGenotypeData,
-                    clinicalData,
-                    innerCvIterator,
-                    outerCvIterator,
-                    sampleFrequencies,
-                    config,
-                    track,
-                )
-            bootstrap.iteration_results.append(
-                iterationResults
+                runNumber,
+                model,
+                hyperParameterSpace,
+                genotypeData,
+                frequencyReferenceGenotypeData,
+                clinicalData,
+                innerCvIterator,
+                outerCvIterator,
+                sampleFrequencies,
+                config,
+                track,
             )
+            bootstrap.iteration_results.append(iterationResults)
         except Exception as e:
-            print("Error in bootstrap iteration " + str(runNumber+1) + f": {e}")
+            print("Error in bootstrap iteration " + str(runNumber + 1) + f": {e}")
             print_exception(e)
             raise
         gc.collect()

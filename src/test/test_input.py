@@ -5,7 +5,7 @@ import sys
 
 sys.path.append("src")
 from example_config import config
-from tasks.input import load, processInputFiles
+from tasks.vcf.input import load, processInputFiles
 
 
 @pytest.fixture(autouse=True, scope="session")
