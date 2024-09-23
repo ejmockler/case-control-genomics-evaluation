@@ -1,7 +1,8 @@
 import hail as hl
 import logging
 from config import VCFConfig
-from data.dataloader import GTFLoader
+import re
+from typing import List
 
 class GenotypeProcessor:
     def __init__(self, config: VCFConfig):
@@ -14,6 +15,12 @@ class GenotypeProcessor:
 
         # Drop invariant variants
         mt = self._drop_invariant_variants(mt)
+
+        # Filter by chromosome pattern (include biologically useful contigs)
+        mt = self._filter_biologically_useful_contigs(mt)
+
+        # Filter to only include SNPs
+        mt = self._filter_snps(mt)
 
         # Calculate allele frequencies and apply MAF filter
         mt = self._apply_maf_filter(mt)
@@ -100,8 +107,55 @@ class GenotypeProcessor:
         self.logger.info(f"Dropped {n_variants_dropped} invariant variants.")
         
         return mt.drop('n_unique_genotypes')
+    
+    def _filter_biologically_useful_contigs(self, mt: hl.MatrixTable) -> hl.MatrixTable:
+        # Regular expression to match primary chromosomes, mitochondrial DNA, PAR regions, and alternate haplotypes
+        contig_pattern = re.compile(
+            r'^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y|M|.*_alt|.*_PAR)$'  
+            # Match 1-22, X, Y, M, and any contig with "_alt" or "_PAR"
+        )
+
+        # Count variants before and after filtering
+        n_variants_before = mt.count_rows()
+        mt = mt.filter_rows(mt.locus.contig.matches(contig_pattern.pattern))
+        n_variants_after = mt.count_rows()
+
+        # Log the number of dropped variants
+        n_variants_dropped = n_variants_before - n_variants_after
+        self.logger.info(f"Filtered irrelevant contigs. Dropped {n_variants_dropped} variants.")
+
+        return mt
+
+    def _filter_snps(self, mt: hl.MatrixTable) -> hl.MatrixTable:
+        # Count variants before and after filtering
+        n_variants_before = mt.count_rows()
+        mt = mt.filter_rows(
+            hl.all(
+                hl.len(mt.alleles) == 2,  # Ensure there are exactly two alleles
+                hl.len(mt.alleles[0]) == 1,  # Reference allele is a single nucleotide
+                hl.len(mt.alleles[1]) == 1   # Alternate allele is a single nucleotide
+            )
+        )
+        n_variants_after = mt.count_rows()
+
+        # Log the number of dropped variants
+        n_variants_dropped = n_variants_before - n_variants_after
+        self.logger.info(f"Filtered to only include SNPs. Dropped {n_variants_dropped} variants.")
+
+        return mt
 
     def _aggregate_genes(self, mt: hl.MatrixTable) -> hl.MatrixTable:
         # Implement gene aggregation logic here
         # This is a placeholder and should be implemented based on specific requirements
         return mt
+
+    def fetch_genotypes(self, mt: hl.MatrixTable, sample_ids: List[str]) -> hl.MatrixTable:
+        """
+        Fetch genotypes for the given sample IDs.
+
+        :param mt: Hail MatrixTable containing genotype data.
+        :param sample_ids: List of sample IDs to fetch genotypes for.
+        :return: Filtered MatrixTable containing only the specified samples.
+        """
+        filtered_mt = mt.filter_cols(hl.literal(sample_ids).contains(mt.s))
+        return filtered_mt

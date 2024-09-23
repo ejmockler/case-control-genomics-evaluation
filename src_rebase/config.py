@@ -9,11 +9,11 @@ class VCFConfig(BaseModel):
     min_allele_frequency: float = 0.0025
     max_allele_frequency: float = 1.0
     max_variants: Optional[int] = None
-    filters: list = []
+    filter: str = ""
 
 class GTFConfig(BaseModel):
     path: str
-    filters: list = []
+    filter: str = ""
 
 class TrackingConfig(BaseModel):
     name: str
@@ -21,36 +21,21 @@ class TrackingConfig(BaseModel):
     project: str
     plot_all_sample_importances: bool = False
 
-class ClinicalTableConfig(BaseModel):
-    path: str
-    id_column: str
-    subject_id_column: str
-    label_column: str
-    control_labels: List[str]
-    case_labels: List[str]
-    control_alias: str
-    case_alias: str
-    filters: str
-
 class TableMetadata(BaseModel):
     name: str
-    set_type: str
     path: str
     label: str
     id_column: str
-    filters: str
+    filter: str
 
-
-class HoldoutTablesConfig(BaseModel):
-    metadata: List[TableMetadata]
-
+class SampleTableConfig(BaseModel):
+    tables: List[TableMetadata]
 
 class SamplingConfig(BaseModel):
     bootstrap_iterations: int = 60
     cross_val_iterations: int = 10
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
-
 
 class ModelConfig(BaseModel):
     hyperparameter_optimization: bool = True
@@ -61,25 +46,25 @@ class Config(BaseModel):
     vcf: VCFConfig
     gtf: GTFConfig
     tracking: TrackingConfig
-    clinical_table: ClinicalTableConfig
-    holdout_tables: HoldoutTablesConfig
+    crossval_tables: SampleTableConfig
+    holdout_tables: SampleTableConfig
     sampling: SamplingConfig
     model: ModelConfig
 
 
 config = Config(
     vcf=VCFConfig(
-        path="../adhoc analysis/whole_genome_merged_no_vqsr_no_annotation_KarenRegions_MICROGLIAL_ANNOTATED.vcf.gz",
+        path="../adhoc analysis/mock.vcf.gz",
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.0025,
         max_allele_frequency=1.0,
         max_variants=None,
-        filters=[],
+        filter="",
     ),
     gtf=GTFConfig(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
-        filters=["(mt.transcript_type == 'protein_coding') | (mt.transcript_type == 'protein_coding_LoF')"], # to keep
+        filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')", # to keep
     ),
     tracking=TrackingConfig(
         name="NUP variants (rare-binned, rsID only)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
@@ -87,28 +72,49 @@ config = Config(
         project="highReg-l1-NUPs60-aals-rsID-rareBinned-0.0025MAF",
         plot_all_sample_importances=False,
     ),
-    clinical_table=ClinicalTableConfig(
-        path="../adhoc analysis/ACWM.xlsx",
-        id_column="ExternalSampleId",
-        subject_id_column="ExternalSubjectId",
-        label_column="Subject Group",
-        control_labels=["Non-Neurological Control"],
-        case_labels=["ALS Spectrum MND"],
-        control_alias="control",
-        case_alias="case",
-        filters="pct_european>=0.85",
-    ),
-    holdout_tables=HoldoutTablesConfig(
-        metadata=[
+    crossval_tables=SampleTableConfig(
+        tables=[
+            TableMetadata(
+                name="AnswerALS cases, EUR",
+                path="../adhoc analysis/ACWM.xlsx",
+                label="case",
+                id_column="ExternalSampleId",
+                filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`>=0.85",
+            ),
+            TableMetadata(
+                name="AnswerALS non-neurological controls, EUR",
+                path="../adhoc analysis/ACWM.xlsx",
+                label="control",
+                id_column="ExternalSampleId",
+                filter="`Subject Group`=='Non-Neurological Control' & `pct_european`>=0.85",
+            ),
             TableMetadata(
                 name="1000 Genomes EUR",
-                set_type="crossval",
                 path="../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
                 label="control",
                 id_column="Sample name",
-                filters="`Superpopulation code`=='EUR'",
+                filter="`Superpopulation code`=='EUR'",
             ),
-        ],
+        ]
+    ),
+    holdout_tables=SampleTableConfig(
+        # TODO option to define comparison tables other than crossval
+        tables=[
+            TableMetadata(
+                name="1000 Genomes ethnically-variable, non-EUR",
+                path="../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
+                label="control",
+                id_column="Sample name",
+                filter="`Superpopulation code`!='EUR'",
+            ),
+            TableMetadata(
+                name="AnswerALS cases, ethnically-variable, non-EUR",
+                path="../adhoc analysis/ACWM.xlsx",
+                label="case",
+                id_column="ExternalSampleId",
+                filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
+            ),
+        ]
     ),
     sampling=SamplingConfig(
         bootstrap_iterations=60,

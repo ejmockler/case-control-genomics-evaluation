@@ -7,11 +7,12 @@ import logging
 from abc import ABC, abstractmethod
 
 import hail as hl
-
-from config import GTFConfig, VCFConfig, ClinicalTableConfig
+from config import GTFConfig, VCFConfig
 import gzip
 import shutil
 import subprocess
+
+from config import TableMetadata
 
 class DataLoader(ABC):
     def __init__(self, config):
@@ -20,15 +21,12 @@ class DataLoader(ABC):
         self.logger.setLevel(logging.INFO)
 
     @abstractmethod
-    def load_data(self):
+    def load_data(self) -> hl.MatrixTable | pd.DataFrame:
         pass
-
-    def _apply_filters(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        # Apply filters if specified in the config
-        if self.config.filters:
-            for condition in self.config.filters:
-                mt = mt.filter(eval(condition))
-        return mt
+    
+    @abstractmethod
+    def _apply_filters(self, data: hl.MatrixTable | pd.DataFrame | hl.Table) -> hl.MatrixTable | pd.DataFrame | hl.Table:
+        pass
 
 class BgzipMixin:
     def _ensure_bgz_compression(self, file_path: str) -> str:
@@ -148,6 +146,11 @@ class GTFLoader(DataLoader, BgzipMixin):
         gtf_ht = self._apply_filters(gtf_ht)
 
         return gtf_ht
+    
+    def _apply_filters(self, ht: hl.Table) -> hl.Table:
+        if self.config.filter:
+            ht = ht.filter(eval(self.config.filter))
+        return ht
 
 class VCFLoader(DataLoader, BgzipMixin):
     def __init__(self, config: VCFConfig):
@@ -170,11 +173,15 @@ class VCFLoader(DataLoader, BgzipMixin):
         # Apply filters if specified in the config
         mt = self._apply_filters(mt)
 
-
+        return mt
+    
+    def _apply_filters(self, mt: hl.MatrixTable) -> hl.MatrixTable:
+        if self.config.filter:
+            mt = mt.filter_rows(eval(self.config.filter))
         return mt
 
 class TabularLoader(DataLoader):
-    def __init__(self, config: ClinicalTableConfig):
+    def __init__(self, config: TableMetadata):
         super().__init__(config)
 
     def load_data(self) -> pd.DataFrame:
@@ -188,12 +195,23 @@ class TabularLoader(DataLoader):
             df = pd.read_excel(file_path)
         else:
             raise ValueError(f"Unsupported tabular file type: {file_path}")
+        df = self._apply_filters(df)
+        df.set_index(self.config.id_column, inplace=True)
+        return df
+    
+    def _apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.config.filter:
+            self.logger.info(f"Applying filter: {self.config.filter}")
+            len_before = len(df)
+            df = df.query(self.config.filter)
+            len_after = len(df)
+            self.logger.info(f"Filtered {len_before - len_after} rows")
         return df
 
-def create_loader(config: VCFConfig | ClinicalTableConfig | GTFConfig) -> DataLoader:
+def create_loader(config: VCFConfig | TableMetadata | GTFConfig) -> DataLoader:
     if isinstance(config, VCFConfig):
         return VCFLoader(config)
-    elif isinstance(config, ClinicalTableConfig):
+    elif isinstance(config, TableMetadata):
         return TabularLoader(config)
     elif isinstance(config, GTFConfig):
         return GTFLoader(config)
