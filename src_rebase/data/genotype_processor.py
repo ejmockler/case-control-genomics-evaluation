@@ -86,7 +86,7 @@ class GenotypeProcessor:
                          f"Dropped {n_variants_dropped} variants.")
         
         return mt
-    
+
     def _drop_invariant_variants(self, mt: hl.MatrixTable) -> hl.MatrixTable:
         # Count variants before filtering
         n_variants_before = mt.count_rows()
@@ -107,7 +107,7 @@ class GenotypeProcessor:
         self.logger.info(f"Dropped {n_variants_dropped} invariant variants.")
         
         return mt.drop('n_unique_genotypes')
-    
+
     def _filter_biologically_useful_contigs(self, mt: hl.MatrixTable) -> hl.MatrixTable:
         # Regular expression to match primary chromosomes, mitochondrial DNA, PAR regions, and alternate haplotypes
         contig_pattern = re.compile(

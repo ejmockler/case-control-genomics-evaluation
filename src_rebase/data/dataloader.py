@@ -142,6 +142,9 @@ class GTFLoader(DataLoader, BgzipMixin):
             # Key the GTF table by the interval for fast joins
             gtf_ht = gtf_ht.key_by('interval')
 
+            # Write the processed table to disk for future use
+            gtf_ht.write(ht_path, overwrite=True)
+
         # Apply filters if specified in the config
         gtf_ht = self._apply_filters(gtf_ht)
 

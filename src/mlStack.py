@@ -17,7 +17,7 @@ from config import (
     ModelConfig,
 )
 from data import GenotypeData, ClassificationResults
-from models import (
+from src_rebase.models import (
     model_stack,
 )  # Assuming models.py defines your models and hyperparameter spaces
 from tasks.input import process_input_files

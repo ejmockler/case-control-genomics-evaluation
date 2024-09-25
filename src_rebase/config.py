@@ -27,6 +27,8 @@ class TableMetadata(BaseModel):
     label: str
     id_column: str
     filter: str
+    # Change strata_columns to a mapping from standard strata to table-specific column names
+    strata_mapping: Optional[Dict[str, str]] = None  # e.g., {"sex": "Sex Call", "age": "Age"}
 
 class SampleTableConfig(BaseModel):
     tables: List[TableMetadata]
@@ -36,11 +38,12 @@ class SamplingConfig(BaseModel):
     cross_val_iterations: int = 10
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
+    # Specify which strata to use for sampling
+    strata: Optional[List[str]] = ["sex"]  # Allowed values: "sex", "age"
 
 class ModelConfig(BaseModel):
     hyperparameter_optimization: bool = True
     calculate_shapely_explanations: bool = False
-
 
 class Config(BaseModel):
     vcf: VCFConfig
@@ -50,7 +53,6 @@ class Config(BaseModel):
     holdout_tables: SampleTableConfig
     sampling: SamplingConfig
     model: ModelConfig
-
 
 config = Config(
     vcf=VCFConfig(
@@ -80,6 +82,10 @@ config = Config(
                 label="case",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`>=0.85",
+                strata_mapping={
+                    "sex": "Sex Call",
+                    # "age": "Age"  # Add if available
+                },
             ),
             TableMetadata(
                 name="AnswerALS non-neurological controls, EUR",
@@ -87,6 +93,10 @@ config = Config(
                 label="control",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='Non-Neurological Control' & `pct_european`>=0.85",
+                strata_mapping={
+                    "sex": "Sex Call",
+                    # "age": "Age"  # Add if available
+                },
             ),
             TableMetadata(
                 name="1000 Genomes EUR",
@@ -94,6 +104,10 @@ config = Config(
                 label="control",
                 id_column="Sample name",
                 filter="`Superpopulation code`=='EUR'",
+                strata_mapping={
+                    "sex": "Sex",
+                    # "age": "Age"  # Include if available
+                },
             ),
         ]
     ),
@@ -106,6 +120,10 @@ config = Config(
                 label="control",
                 id_column="Sample name",
                 filter="`Superpopulation code`!='EUR'",
+                strata_mapping={
+                    "sex": "Sex",
+                    # "age": "Age"  # Include if available
+                },
             ),
             TableMetadata(
                 name="AnswerALS cases, ethnically-variable, non-EUR",
@@ -113,6 +131,10 @@ config = Config(
                 label="case",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
+                strata_mapping={
+                    "sex": "Sex Call",
+                    # "age": "Age"  # Add if available
+                },
             ),
         ]
     ),
@@ -121,6 +143,7 @@ config = Config(
         cross_val_iterations=10,
         sequestered_ids=[],
         shuffle_labels=False,
+        strata=["sex"],  # Define which strata to use
     ),
     model=ModelConfig(
         hyperparameter_optimization=True,

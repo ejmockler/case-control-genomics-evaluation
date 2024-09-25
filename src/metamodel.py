@@ -21,7 +21,7 @@ from mlStack import (
 )
 from metaconfig import metaconfig
 from config import config
-from models import stack as modelStack
+from src_rebase.models import stack as modelStack
 from tasks.vcf.input import processInputFiles
 from tasks.vcf.visualize import poolSampleResults
 
