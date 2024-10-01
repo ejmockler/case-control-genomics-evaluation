@@ -36,6 +36,7 @@ class SampleTableConfig(BaseModel):
 class SamplingConfig(BaseModel):
     bootstrap_iterations: int = 60
     cross_val_iterations: int = 10
+    test_size: float = 0.2
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
     # Specify which strata to use for sampling
@@ -141,6 +142,7 @@ config = Config(
     sampling=SamplingConfig(
         bootstrap_iterations=60,
         cross_val_iterations=10,
+        test_size=0.2,
         sequestered_ids=[],
         shuffle_labels=False,
         strata=["sex"],  # Define which strata to use

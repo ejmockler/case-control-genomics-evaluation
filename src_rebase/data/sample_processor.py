@@ -301,3 +301,40 @@ class SampleProcessor:
             if sample_id in table_info['data'].index:
                 return table_info['metadata'].label
         raise ValueError(f"Sample ID '{sample_id}' not found in any table.")
+
+    def get_labels(self, sample_ids: List[str], dataset: str = 'crossval') -> pd.Series:
+        """
+        Retrieves labels for the given sample IDs from the specified dataset.
+
+        Args:
+            sample_ids (List[str]): List of sample IDs to retrieve labels for.
+            dataset (str): Dataset type ('crossval' or 'holdout'). Defaults to 'crossval'.
+
+        Returns:
+            pd.Series: A Pandas Series mapping sample IDs to their labels (1 for case, 0 for control).
+
+        Raises:
+            ValueError: If an invalid dataset is specified or if a label is missing for any sample.
+        """
+        if dataset not in ['crossval', 'holdout']:
+            raise ValueError("Dataset must be 'crossval' or 'holdout'")
+
+        label_mapping = {}
+
+        for sample_id in sample_ids:
+            try:
+                label = self._get_label(sample_id, dataset)
+                label_mapping[sample_id] = 1 if label.lower() == 'case' else 0
+            except ValueError as e:
+                self.logger.error(f"Error retrieving label for sample '{sample_id}': {e}")
+                raise ValueError(f"Missing label for sample '{sample_id}'")
+
+        # Convert the dictionary to a Pandas Series
+        labels_series = pd.Series(label_mapping)
+        
+        # Ensure all samples have labels
+        if len(labels_series) != len(sample_ids):
+            missing_samples = set(sample_ids) - set(labels_series.index)
+            raise ValueError(f"Labels are missing for the following samples: {missing_samples}")
+        
+        return labels_series

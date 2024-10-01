@@ -2,7 +2,9 @@ import hail as hl
 import logging
 from config import VCFConfig
 import re
-from typing import List
+from typing import List, Optional
+from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import functions as F
 
 class GenotypeProcessor:
     def __init__(self, config: VCFConfig):
@@ -37,7 +39,7 @@ class GenotypeProcessor:
             raise ValueError("GTF table must be keyed by interval")
 
         # Annotate with a boolean indicating if the variant is within any GTF interval
-        mt = mt.annotate_rows(in_gtf_interval = hl.is_defined(gtf_ht[mt.locus]))
+        mt = mt.annotate_rows(in_gtf_interval=hl.is_defined(gtf_ht[mt.locus]))
 
         # Count variants before filtering
         n_variants_before = mt.count_rows()
@@ -75,16 +77,16 @@ class GenotypeProcessor:
         )
         min_maf = self.config.min_allele_frequency
         max_maf = self.config.max_allele_frequency
-        
+
         n_variants_before = mt.count_rows()
         mt = mt.filter_rows((mt.maf >= min_maf) & (mt.maf <= max_maf))
         n_variants_after = mt.count_rows()
-        
+
         n_variants_dropped = n_variants_before - n_variants_after
         self.logger.info(f"Filtered variants based on minor allele frequency. "
                          f"Min MAF: {min_maf}, Max MAF: {max_maf}. "
                          f"Dropped {n_variants_dropped} variants.")
-        
+
         return mt
 
     def _drop_invariant_variants(self, mt: hl.MatrixTable) -> hl.MatrixTable:
@@ -93,19 +95,19 @@ class GenotypeProcessor:
 
         # Calculate the number of unique genotypes
         mt = mt.annotate_rows(
-            n_unique_genotypes = hl.agg.collect_as_set(mt.GT_processed).length()
+            n_unique_genotypes=hl.agg.collect_as_set(mt.GT_processed).length()
         )
-        
+
         # Filter out variants with only one unique genotype (invariant)
         mt = mt.filter_rows(mt.n_unique_genotypes > 1)
-        
+
         # Count remaining variants
         n_variants_after = mt.count_rows()
-        
+
         # Calculate and log the number of dropped variants
         n_variants_dropped = n_variants_before - n_variants_after
         self.logger.info(f"Dropped {n_variants_dropped} invariant variants.")
-        
+
         return mt.drop('n_unique_genotypes')
 
     def _filter_biologically_useful_contigs(self, mt: hl.MatrixTable) -> hl.MatrixTable:
@@ -149,13 +151,83 @@ class GenotypeProcessor:
         # This is a placeholder and should be implemented based on specific requirements
         return mt
 
-    def fetch_genotypes(self, mt: hl.MatrixTable, sample_ids: List[str]) -> hl.MatrixTable:
+    def fetch_genotypes(
+        self, 
+        mt: hl.MatrixTable, 
+        sample_ids: List[str], 
+        return_spark: bool = False
+    ) -> Optional[SparkDataFrame]:
         """
         Fetch genotypes for the given sample IDs.
 
         :param mt: Hail MatrixTable containing genotype data.
         :param sample_ids: List of sample IDs to fetch genotypes for.
-        :return: Filtered MatrixTable containing only the specified samples.
+        :param return_spark: If True, returns a PySpark DataFrame containing only 'GT_processed'.
+                              If False, returns a Hail MatrixTable.
+        :return: Filtered MatrixTable or PySpark DataFrame based on 'return_spark' flag.
         """
         filtered_mt = mt.filter_cols(hl.literal(sample_ids).contains(mt.s))
-        return filtered_mt
+        self.logger.info(f"Filtered MatrixTable to include {len(sample_ids)} samples.")
+
+        if return_spark:
+            self.logger.info("Converting filtered MatrixTable to PySpark DataFrame with only 'GT_processed'.")
+            try:
+                # Step 1: Access entry fields
+                entries_table = filtered_mt.entries()
+
+                # Step 2: Create 'variant_id' by combining 'locus.contig' and 'locus.position'
+                entries_table = entries_table.annotate(
+                    variant_id=hl.str(entries_table.locus.contig) + ':' + hl.str(entries_table.locus.position)
+                )
+
+                # Step 3: Select and rename fields without altering key fields directly
+                gt_table = entries_table.select(
+                    sample_id=entries_table.s,
+                    variant_id=entries_table.variant_id,
+                    GT_processed=entries_table.GT_processed
+                )
+
+                # Step 4: Rekey the table by 'sample_id' and 'variant_id'
+                gt_table = gt_table.key_by('sample_id', 'variant_id')
+
+                # Step 5: Convert Hail Table to PySpark DataFrame
+                spark_df = gt_table.to_spark()
+
+                # Step 6: Pivot the DataFrame to have samples as rows and variants as columns
+                spark_df_pivot = spark_df.groupBy("sample_id") \
+                    .pivot("variant_id") \
+                    .agg(F.first("GT_processed")) \
+                    .fillna(0)  # Replace missing values with 0 or an appropriate default
+
+                return spark_df_pivot
+            except Exception as e:
+                self.logger.error(f"Failed to convert MatrixTable to PySpark DataFrame: {e}")
+                raise e
+        else:
+            self.logger.info("Returning filtered Hail MatrixTable.")
+            return filtered_mt
+
+def calculate_ld_matrix(mt, window_size=1000000, min_af=0.01):
+    """
+    Calculate the LD matrix for a given MatrixTable.
+    
+    :param mt: Input MatrixTable
+    :param window_size: Window size in base pairs for LD calculation (default: 1,000,000)
+    :param min_af: Minimum allele frequency threshold (default: 0.01)
+    :return: LD matrix as a BlockMatrix
+    """
+    # Ensure the MatrixTable is row-keyed by locus
+    if 'locus' not in mt.row_key:
+        mt = mt.key_rows_by('locus')
+    
+    # Filter variants by allele frequency
+    mt = mt.filter_rows(hl.agg.stats(mt.GT.n_alt_alleles()).mean / 2 >= min_af)
+    
+    # Prune variants in linkage equilibrium
+    pruned_variant_table = hl.ld_prune(mt.GT, r2=0.2, bp_window_size=window_size)
+    mt = mt.filter_rows(hl.is_defined(pruned_variant_table[mt.row_key]))
+    
+    # Calculate LD matrix
+    ld_matrix = hl.ld_matrix(mt.GT, window_size)
+    
+    return ld_matrix
