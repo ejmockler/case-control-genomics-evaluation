@@ -8,7 +8,6 @@ from data.genotype_processor import GenotypeProcessor
 from data.sample_processor import SampleProcessor
 from models import stack
 from eval.evaluation import bootstrap_models
-import pandas as pd
 
 def main():
     logging.basicConfig(level=logging.INFO)
@@ -17,41 +16,72 @@ def main():
     # Initialize Hail
     hl.init(default_reference='GRCh38')
 
-    # Load and process data
-    logger.info("Loading VCF data.")
-    vcf_mt = create_loader(config.vcf).load_data()
-    logger.info("Loading GTF data.")
-    gtf_ht = create_loader(config.gtf).load_data()
+    try:
+        # Load VCF Data
+        logger.info("Loading VCF data.")
+        vcf_loader = create_loader(config.vcf)
+        vcf_mt = vcf_loader.load_data()
+        logger.info("VCF data loaded successfully.")
 
-    genotype_processor = GenotypeProcessor(config.vcf)
-    logger.info("Processing genotype data.")
-    mt_processed = genotype_processor.process(vcf_mt, gtf_ht)
-    mt_processed = genotype_processor.align_to_annotations(mt_processed, gtf_ht)
+        # Load GTF Data
+        logger.info("Loading GTF data.")
+        gtf_loader = create_loader(config.gtf)
+        gtf_ht = gtf_loader.load_data()
+        logger.info("GTF data loaded successfully.")
 
-    # Initialize SampleProcessor with config
-    sample_processor = SampleProcessor(config, mt_processed.s.collect())
+        # Load GMT Data
+        if config.gmt:
+            logger.info("Loading GMT data.")
+            gmt_loader = create_loader(config.gmt)
+            gmt_df = gmt_loader.load_data()
+            logger.info("GMT data loaded successfully.")
+        else:
+            logger.warning("No GMT configuration found. Skipping GMT-based filtering.")
+            gmt_df = None
 
-    # Perform bootstrapped model evaluations
-    logger.info("Starting bootstrapped model evaluations.")
-    results_df = bootstrap_models(
-        sample_processor=sample_processor,
-        genotype_processor=genotype_processor,
-        mt_processed=mt_processed,
-        config=config.sampling,
-        stack=stack
-    )
+        # Initialize GenotypeProcessor
+        genotype_processor = GenotypeProcessor(config.vcf, config.gtf)
 
-    # Log the aggregated results
-    logger.info("Aggregated Bootstrapping Results:")
-    for index, row in results_df.iterrows():
-        logger.info(f"Iteration {row['iteration']}: Model {row['model']} achieved AUC {row['best_auc']} with params {row['best_params']}")
+        # Process Genotype Data with GTF and GMT
+        logger.info("Processing genotype data.")
+        mt_processed = genotype_processor.process(vcf_mt, gtf_ht, gmt_df)
+        logger.info("Genotype data processed successfully.")
 
-    # Optionally, save the results to a CSV file
-    results_file = config.output.results_csv
-    logger.info(f"Saving results to {results_file}")
-    results_df.to_csv(results_file, index=False)
+        # Initialize SampleProcessor with config
+        sample_ids = mt_processed.s.collect()
+        sample_processor = SampleProcessor(config, sample_ids)
 
-    logger.info("Bootstrapped model evaluations completed.")
+        # Perform bootstrapped model evaluations
+        logger.info("Starting bootstrapped model evaluations.")
+        results_df = bootstrap_models(
+            sample_processor=sample_processor,
+            genotype_processor=genotype_processor,
+            mt_processed=mt_processed,
+            config=config.sampling,
+            stack=stack
+        )
+        logger.info("Bootstrapped model evaluations completed.")
+
+        # Log the aggregated results
+        logger.info("Aggregated Bootstrapping Results:")
+        for index, row in results_df.iterrows():
+            logger.info(f"Iteration {row['iteration']}: Model {row['model']} achieved AUC {row['best_auc']} with params {row['best_params']}")
+
+        # Optionally, save the results to a CSV file
+        if hasattr(config, 'output') and hasattr(config.output, 'results_csv'):
+            results_file = config.output.results_csv
+            logger.info(f"Saving results to {results_file}")
+            results_df.to_csv(results_file, index=False)
+        else:
+            logger.warning("Output path for results CSV not found in configuration. Skipping saving results.")
+
+    except Exception as e:
+        logger.error(f"An error occurred during data processing: {e}")
+        raise e
+
+    finally:
+        # Clean up Hail
+        hl.stop()
 
 if __name__ == "__main__":
     main()

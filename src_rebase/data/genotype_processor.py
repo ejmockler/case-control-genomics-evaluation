@@ -1,17 +1,30 @@
 import hail as hl
 import logging
-from config import VCFConfig
+from config import VCFConfig, GMTConfig, GTFConfig
 import re
 from typing import List, Optional
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
+import pandas as pd
 
 class GenotypeProcessor:
-    def __init__(self, config: VCFConfig):
+    def __init__(self, config: VCFConfig, gtf_config: GTFConfig):
         self.config = config
-        self.logger = logging.getLogger(__name__)
+        self.gtf_config = gtf_config
+        self.logger = logging.getLogger(self.__class__.__name__)
 
-    def process(self, mt: hl.MatrixTable, gtf_ht: hl.Table) -> hl.MatrixTable:
+    def process(self, mt: hl.MatrixTable, gtf_ht: hl.Table, gmt_df: Optional[pd.DataFrame] = None) -> hl.MatrixTable:
+        """
+        Processes the MatrixTable by applying various filters, including GMT-based filtering.
+
+        Args:
+            mt (hl.MatrixTable): Input MatrixTable.
+            gtf_ht (hl.Table): Hail Table with GTF annotations.
+            gmt_df (Optional[pd.DataFrame]): DataFrame containing gene sets.
+
+        Returns:
+            hl.MatrixTable: Processed MatrixTable.
+        """
         # Apply allele models
         mt = self._apply_allele_model(mt)
 
@@ -30,6 +43,28 @@ class GenotypeProcessor:
         # Aggregate genes if specified
         if hasattr(self.config, 'aggregate_genes_by'):
             mt = self._aggregate_genes(mt)
+
+        # Filter GTF to include only genes present in GMT DataFrame
+        if gmt_df is not None and gtf_ht is not None and not gmt_df.empty:
+            # Cast as set since hail can't convert numpy dtypes
+            gene_names = set(gmt_df['genes'].explode().unique())
+            self.logger.info(f"Filtering GTF annotations to include only {len(gene_names)} genes from GMT.")
+            
+            # Count GTF intervals before filtering
+            n_intervals_before = gtf_ht.count()
+            
+            # Filter GTF
+            gtf_ht = gtf_ht.filter(hl.literal(gene_names).contains(gtf_ht[self.gtf_config.gene_name_field]))
+            
+            # Count GTF intervals after filtering
+            n_intervals_after = gtf_ht.count()
+            
+            # Calculate and log the number of dropped intervals
+            n_intervals_dropped = n_intervals_before - n_intervals_after
+            self.logger.info(f"Dropped {n_intervals_dropped} GTF intervals not containing genes in the set.")
+
+        # Align to annotations using the filtered GTF
+        mt = self.align_to_annotations(mt, gtf_ht)
 
         return mt
 

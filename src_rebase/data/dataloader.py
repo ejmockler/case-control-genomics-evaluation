@@ -2,17 +2,18 @@
 
 import os
 import pandas as pd
-from typing import List, Optional
+from typing import List, Optional, Dict
 import logging
 from abc import ABC, abstractmethod
 
 import hail as hl
-from config import GTFConfig, VCFConfig
+from config import GTFConfig, VCFConfig, GMTConfig
 import gzip
 import shutil
 import subprocess
 
 from config import TableMetadata
+import gseapy as gp  # Import gseapy for GMT parsing
 
 class DataLoader(ABC):
     def __init__(self, config):
@@ -183,7 +184,7 @@ class VCFLoader(DataLoader, BgzipMixin):
             mt = mt.filter_rows(eval(self.config.filter))
         return mt
 
-class TabularLoader(DataLoader):
+class SmallTableLoader(DataLoader):
     def __init__(self, config: TableMetadata):
         super().__init__(config)
 
@@ -211,13 +212,112 @@ class TabularLoader(DataLoader):
             self.logger.info(f"Filtered {len_before - len_after} rows")
         return df
 
-def create_loader(config: VCFConfig | TableMetadata | GTFConfig) -> DataLoader:
+class GMTLoader(DataLoader):
+    def __init__(self, config: GMTConfig):
+        super().__init__(config)
+        self.logger = logging.getLogger(self.__class__.__name__)
+    
+    def load_data(self) -> pd.DataFrame:
+        """
+        Loads and processes the GMT file into a pandas DataFrame using gseapy.
+        
+        Returns:
+            pd.DataFrame: DataFrame containing gene sets.
+        """
+        file_path = self.config.path
+        self.logger.info(f"Loading GMT file: {file_path}")
+        
+        # Read GMT file using gseapy
+        gene_sets = self._parse_gmt(file_path)
+        
+        # Convert to DataFrame by exploding the gene lists
+        gmt_df = self._convert_to_dataframe(gene_sets)
+        
+        # Apply filters if specified
+        gmt_df = self._apply_filters(gmt_df)
+        
+        return gmt_df
+
+    def _parse_gmt(self, file_path: str) -> List[Dict[str, any]]:
+        """
+        Parses the GMT file using gseapy.
+        
+        Args:
+            file_path (str): Path to the GMT file.
+        
+        Returns:
+            List[Dict[str, any]]: List of gene sets with their descriptions and genes.
+        """
+        try:
+            gene_sets = gp.parser.read_gmt(file_path)  # Returns List[Tuple[str, str, List[str]]]
+            self.logger.info(f"Parsed {len(gene_sets)} gene sets from GMT file using gseapy.")
+            
+            # Convert tuples to dictionaries for easier handling
+            gene_set_records = [
+                {"set": name, "genes": genes}
+                for name, genes in gene_sets.items()
+            ]
+            return gene_set_records
+        except Exception as e:
+            self.logger.error(f"Failed to parse GMT file {file_path} with gseapy: {e}")
+            raise e
+
+    def _convert_to_dataframe(self, gene_sets: List[Dict[str, any]]) -> pd.DataFrame:
+        """
+        Converts the list of gene sets into a pandas DataFrame by exploding the gene lists.
+        
+        Args:
+            gene_sets (List[Dict[str, any]]): List of gene sets.
+        
+        Returns:
+            pd.DataFrame: Exploded DataFrame with each gene in a separate row.
+        """
+        # Create initial DataFrame
+        gmt_df = pd.DataFrame.from_dict(gene_sets)
+        
+        return gmt_df
+
+    def _apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Applies filtering to the GMT DataFrame based on the config.
+
+        Args:
+            df (pd.DataFrame): DataFrame with gene sets.
+
+        Returns:
+            pd.DataFrame: Filtered DataFrame.
+        """
+        if self.config.filter:
+            self.logger.info(f"Applying filter: {self.config.filter}")
+            try:
+                # Example filter: sets containing a specific gene
+                df = df[df['gene'].apply(lambda gene: self.config.filter in gene)]
+                self.logger.info(f"Filtered GMT DataFrame to {len(df)} entries.")
+            except Exception as e:
+                self.logger.error(f"Failed to apply filter '{self.config.filter}' on GMT DataFrame: {e}")
+                raise e
+        return df
+
+def create_loader(config) -> DataLoader:
+    """
+    Factory function to create appropriate DataLoader instances based on config type.
+
+    Args:
+        config: Configuration object.
+
+    Returns:
+        DataLoader: An instance of a DataLoader subclass.
+
+    Raises:
+        ValueError: If config type is unsupported.
+    """
     if isinstance(config, VCFConfig):
         return VCFLoader(config)
-    elif isinstance(config, TableMetadata):
-        return TabularLoader(config)
+    elif isinstance(config, GMTConfig):
+        return GMTLoader(config)
     elif isinstance(config, GTFConfig):
         return GTFLoader(config)
+    elif isinstance(config, TableMetadata):
+        return SmallTableLoader(config)
     else:
         raise ValueError(f"Unsupported config type: {type(config)}")
-

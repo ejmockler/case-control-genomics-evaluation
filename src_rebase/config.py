@@ -13,6 +13,12 @@ class VCFConfig(BaseModel):
 
 class GTFConfig(BaseModel):
     path: str
+    gene_name_field: str = "gene_name"
+    filter: str = ""
+
+class GMTConfig(BaseModel):
+    # requires GTF annotations with a defined gene_name field
+    path: str
     filter: str = ""
 
 class TrackingConfig(BaseModel):
@@ -49,6 +55,7 @@ class ModelConfig(BaseModel):
 class Config(BaseModel):
     vcf: VCFConfig
     gtf: GTFConfig
+    gmt: Optional[GMTConfig] = None  # Add GMTConfig as optional
     tracking: TrackingConfig
     crossval_tables: SampleTableConfig
     holdout_tables: SampleTableConfig
@@ -67,7 +74,11 @@ config = Config(
     ),
     gtf=GTFConfig(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
-        filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')", # to keep
+        filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
+    ),
+    gmt=GMTConfig(
+        path="../adhoc analysis/microglial_associated_genes.gmt",
+        filter="",
     ),
     tracking=TrackingConfig(
         name="NUP variants (rare-binned, rsID only)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
