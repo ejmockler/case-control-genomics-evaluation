@@ -56,7 +56,7 @@ def main():
         results_df = bootstrap_models(
             sample_processor=sample_processor,
             genotype_processor=genotype_processor,
-            mt_processed=mt_processed,
+            data=mt_processed,  # Pass the processed MatrixTable
             config=config.sampling,
             stack=stack
         )

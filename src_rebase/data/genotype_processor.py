@@ -1,10 +1,10 @@
 import hail as hl
 import logging
-from config import VCFConfig, GMTConfig, GTFConfig
-import re
-from typing import List, Optional
+from config import VCFConfig, GTFConfig
+from typing import List, Union, Optional
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
+from pyspark.sql import SparkSession
 import pandas as pd
 
 class GenotypeProcessor:
@@ -13,7 +13,12 @@ class GenotypeProcessor:
         self.gtf_config = gtf_config
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    def process(self, mt: hl.MatrixTable, gtf_ht: hl.Table, gmt_df: Optional[pd.DataFrame] = None) -> hl.MatrixTable:
+    def process(
+        self, 
+        mt: hl.MatrixTable, 
+        gtf_ht: hl.Table, 
+        gmt_df: Optional[pd.DataFrame] = None
+    ) -> hl.MatrixTable:
         """
         Processes the MatrixTable by applying various filters, including GMT-based filtering.
 
@@ -25,244 +30,175 @@ class GenotypeProcessor:
         Returns:
             hl.MatrixTable: Processed MatrixTable.
         """
-        # Apply allele models
-        mt = self._apply_allele_model(mt)
-
-        # Drop invariant variants
-        mt = self._drop_invariant_variants(mt)
-
-        # Filter by chromosome pattern (include biologically useful contigs)
-        mt = self._filter_biologically_useful_contigs(mt)
-
-        # Filter to only include SNPs
-        mt = self._filter_snps(mt)
-
-        # Calculate allele frequencies and apply MAF filter
-        mt = self._apply_maf_filter(mt)
-
-        # Aggregate genes if specified
-        if hasattr(self.config, 'aggregate_genes_by'):
-            mt = self._aggregate_genes(mt)
-
+        mt = self._preprocess_and_filter(mt)
+        
         # Filter GTF to include only genes present in GMT DataFrame
         if gmt_df is not None and gtf_ht is not None and not gmt_df.empty:
-            # Cast as set since hail can't convert numpy dtypes
-            gene_names = set(gmt_df['genes'].explode().unique())
-            self.logger.info(f"Filtering GTF annotations to include only {len(gene_names)} genes from GMT.")
-            
-            # Count GTF intervals before filtering
-            n_intervals_before = gtf_ht.count()
-            
-            # Filter GTF
-            gtf_ht = gtf_ht.filter(hl.literal(gene_names).contains(gtf_ht[self.gtf_config.gene_name_field]))
-            
-            # Count GTF intervals after filtering
-            n_intervals_after = gtf_ht.count()
-            
-            # Calculate and log the number of dropped intervals
-            n_intervals_dropped = n_intervals_before - n_intervals_after
-            self.logger.info(f"Dropped {n_intervals_dropped} GTF intervals not containing genes in the set.")
-
+            gtf_ht = self._filter_gtf_by_gmt(gtf_ht, gmt_df)
+        
         # Align to annotations using the filtered GTF
-        mt = self.align_to_annotations(mt, gtf_ht)
-
+        mt = self._align_to_annotations(mt, gtf_ht)
+        
+        # Create variant_id as a row field
+        mt = mt.annotate_rows(variant_id = hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position))
+        
         return mt
 
-    def align_to_annotations(self, mt: hl.MatrixTable, gtf_ht: hl.Table) -> hl.MatrixTable:
-        # Ensure gtf_ht is keyed by interval
+    def _preprocess_and_filter(self, mt: hl.MatrixTable) -> hl.MatrixTable:
+        """Applies all preprocessing steps and filters in a single pass."""
+        mt = mt.annotate_entries(GT_processed=self._get_processed_gt(mt.GT))
+        
+        mt = mt.annotate_rows(
+            maf=hl.agg.mean(mt.GT_processed) / 2,
+            n_unique_genotypes=hl.agg.collect_as_set(mt.GT_processed).length(),
+            has_missing=hl.agg.any(hl.is_missing(mt.GT_processed))
+        )
+
+        mt = mt.filter_rows(
+            (mt.n_unique_genotypes > 1) &  # Drop invariant variants
+            (mt.locus.contig.matches(self._get_contig_pattern())) &  # Filter biologically useful contigs
+            hl.all(lambda a: hl.len(a) == 1, mt.alleles) &  # Filter to only include SNPs
+            (hl.len(mt.alleles) == 2) &  # Ensure there are exactly two alleles
+            (mt.maf >= self.config.min_allele_frequency) &  # Apply MAF filter
+            (mt.maf <= self.config.max_allele_frequency) &
+            (~mt.has_missing)  # Drop variants with any missing values
+        )
+
+        self._log_filtering_results(mt)
+        return mt
+
+    def _get_processed_gt(self, gt):
+        if self.config.binarize:
+            return hl.if_else(gt.is_non_ref(), 1, 0)
+        elif self.config.zygosity:
+            return hl.case().when(gt.is_hom_ref(), 0).when(gt.is_het(), 1).when(gt.is_hom_var(), 2).default(hl.null('int'))
+        else:
+            return gt.n_alt_alleles()
+
+    @staticmethod
+    def _get_contig_pattern():
+        return r'^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y|M|.*_alt|.*_PAR)$'
+
+    def _log_filtering_results(self, mt: hl.MatrixTable):
+        n_variants = mt.count_rows()
+        self.logger.info(f"After filtering, {n_variants} variants remain.")
+
+    def _filter_gtf_by_gmt(self, gtf_ht: hl.Table, gmt_df: pd.DataFrame) -> hl.Table:
+        gene_names = set(gmt_df['genes'].explode().unique())
+        self.logger.info(f"Filtering GTF annotations to include only {len(gene_names)} genes from GMT.")
+        
+        n_intervals_before = gtf_ht.count()
+        gtf_ht = gtf_ht.filter(hl.literal(gene_names).contains(gtf_ht[self.gtf_config.gene_name_field]))
+        n_intervals_after = gtf_ht.count()
+        
+        n_intervals_dropped = n_intervals_before - n_intervals_after
+        self.logger.info(f"Dropped {n_intervals_dropped} GTF intervals not containing genes in the set.")
+        
+        return gtf_ht
+
+    def _align_to_annotations(self, mt: hl.MatrixTable, gtf_ht: hl.Table) -> hl.MatrixTable:
         if not isinstance(gtf_ht.key[0], hl.expr.IntervalExpression):
             raise ValueError("GTF table must be keyed by interval")
 
-        # Annotate with a boolean indicating if the variant is within any GTF interval
         mt = mt.annotate_rows(in_gtf_interval=hl.is_defined(gtf_ht[mt.locus]))
-
-        # Count variants before filtering
         n_variants_before = mt.count_rows()
-
-        # Filter rows
         mt = mt.filter_rows(mt.in_gtf_interval)
-
-        # Count variants after filtering
         n_variants_after = mt.count_rows()
 
-        # Calculate and log the number of dropped variants
         n_variants_dropped = n_variants_before - n_variants_after
         self.logger.info(f"Dropped {n_variants_dropped} variants after aligning to annotations.")
-
+        self.logger.info(f"{n_variants_after} variants remain after alignment.")
+        
         return mt.drop('in_gtf_interval')
 
-    def _apply_allele_model(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        if self.config.binarize:
-            mt = mt.annotate_entries(GT_processed=hl.if_else(mt.GT.is_non_ref(), 1, 0))
-        elif self.config.zygosity:
-            mt = mt.annotate_entries(
-                GT_processed=hl.case()
-                .when(mt.GT.is_hom_ref(), 0)
-                .when(mt.GT.is_het(), 1)
-                .when(mt.GT.is_hom_var(), 2)
-                .default(hl.null('int'))
-            )
-        else:
-            mt = mt.annotate_entries(GT_processed=mt.GT.n_alt_alleles())
-        return mt
+    def to_spark_df(self, mt: hl.MatrixTable) -> SparkDataFrame:
+        """
+        Convert the preprocessed MatrixTable to a Spark DataFrame.
 
-    def _apply_maf_filter(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        mt = mt.annotate_rows(
-            maf=hl.agg.sum(mt.GT_processed) / (2 * hl.agg.count_where(hl.is_defined(mt.GT_processed)))
-        )
-        min_maf = self.config.min_allele_frequency
-        max_maf = self.config.max_allele_frequency
+        Args:
+            mt (hl.MatrixTable): Processed Hail MatrixTable.
 
-        n_variants_before = mt.count_rows()
-        mt = mt.filter_rows((mt.maf >= min_maf) & (mt.maf <= max_maf))
-        n_variants_after = mt.count_rows()
+        Returns:
+            SparkDataFrame: Converted Spark DataFrame.
+        """
+        self.logger.info("Converting processed MatrixTable to Spark DataFrame.")
+        
+        # First, create a table with row and entry fields
+        row_entry_table = mt.select_entries('GT_processed') 
 
-        n_variants_dropped = n_variants_before - n_variants_after
-        self.logger.info(f"Filtered variants based on minor allele frequency. "
-                         f"Min MAF: {min_maf}, Max MAF: {max_maf}. "
-                         f"Dropped {n_variants_dropped} variants.")
+        # Now, flatten this to a table
+        flat_table = row_entry_table.entries()
 
-        return mt
+        # Convert to Spark DataFrame
+        spark_df = flat_table.select(
+            flat_table.variant_id,
+            sample_id = flat_table.s,
+            GT_processed = flat_table.GT_processed
+        ).to_spark()
 
-    def _drop_invariant_variants(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        # Count variants before filtering
-        n_variants_before = mt.count_rows()
-
-        # Calculate the number of unique genotypes
-        mt = mt.annotate_rows(
-            n_unique_genotypes=hl.agg.collect_as_set(mt.GT_processed).length()
-        )
-
-        # Filter out variants with only one unique genotype (invariant)
-        mt = mt.filter_rows(mt.n_unique_genotypes > 1)
-
-        # Count remaining variants
-        n_variants_after = mt.count_rows()
-
-        # Calculate and log the number of dropped variants
-        n_variants_dropped = n_variants_before - n_variants_after
-        self.logger.info(f"Dropped {n_variants_dropped} invariant variants.")
-
-        return mt.drop('n_unique_genotypes')
-
-    def _filter_biologically_useful_contigs(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        # Regular expression to match primary chromosomes, mitochondrial DNA, PAR regions, and alternate haplotypes
-        contig_pattern = re.compile(
-            r'^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y|M|.*_alt|.*_PAR)$'  
-            # Match 1-22, X, Y, M, and any contig with "_alt" or "_PAR"
-        )
-
-        # Count variants before and after filtering
-        n_variants_before = mt.count_rows()
-        mt = mt.filter_rows(mt.locus.contig.matches(contig_pattern.pattern))
-        n_variants_after = mt.count_rows()
-
-        # Log the number of dropped variants
-        n_variants_dropped = n_variants_before - n_variants_after
-        self.logger.info(f"Filtered irrelevant contigs. Dropped {n_variants_dropped} variants.")
-
-        return mt
-
-    def _filter_snps(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        # Count variants before and after filtering
-        n_variants_before = mt.count_rows()
-        mt = mt.filter_rows(
-            hl.all(
-                hl.len(mt.alleles) == 2,  # Ensure there are exactly two alleles
-                hl.len(mt.alleles[0]) == 1,  # Reference allele is a single nucleotide
-                hl.len(mt.alleles[1]) == 1   # Alternate allele is a single nucleotide
-            )
-        )
-        n_variants_after = mt.count_rows()
-
-        # Log the number of dropped variants
-        n_variants_dropped = n_variants_before - n_variants_after
-        self.logger.info(f"Filtered to only include SNPs. Dropped {n_variants_dropped} variants.")
-
-        return mt
-
-    def _aggregate_genes(self, mt: hl.MatrixTable) -> hl.MatrixTable:
-        # Implement gene aggregation logic here
-        # This is a placeholder and should be implemented based on specific requirements
-        return mt
+        return spark_df
 
     def fetch_genotypes(
         self, 
-        mt: hl.MatrixTable, 
+        data: Union[hl.MatrixTable, SparkDataFrame],
         sample_ids: List[str], 
         return_spark: bool = False
-    ) -> Optional[SparkDataFrame]:
+    ) -> Union[hl.MatrixTable, SparkDataFrame]:
         """
         Fetch genotypes for the given sample IDs.
 
-        :param mt: Hail MatrixTable containing genotype data.
+        :param data: Input dataset, either a Hail MatrixTable or a Spark DataFrame.
         :param sample_ids: List of sample IDs to fetch genotypes for.
-        :param return_spark: If True, returns a PySpark DataFrame containing only 'GT_processed'.
-                              If False, returns a Hail MatrixTable.
+        :param return_spark: If True, returns a PySpark DataFrame.
+                             If False, returns a Hail MatrixTable.
         :return: Filtered MatrixTable or PySpark DataFrame based on 'return_spark' flag.
         """
-        filtered_mt = mt.filter_cols(hl.literal(sample_ids).contains(mt.s))
-        self.logger.info(f"Filtered MatrixTable to include {len(sample_ids)} samples.")
+        if isinstance(data, hl.MatrixTable):
+            self.logger.info("Processing Hail MatrixTable.")
+            # Step 1: Filter the MatrixTable to include only specified samples
+            filtered_mt = data.filter_cols(hl.literal(sample_ids).contains(data.s))
+            self.logger.info(f"Filtered MatrixTable to include {len(sample_ids)} samples.")
 
-        if return_spark:
-            self.logger.info("Converting filtered MatrixTable to PySpark DataFrame with only 'GT_processed'.")
-            try:
-                # Step 1: Access entry fields
-                entries_table = filtered_mt.entries()
+            if return_spark:
+                self.logger.info("Converting filtered MatrixTable to PySpark DataFrame.")
+                try:
+                    # Step 2: Access entry fields
+                    entries_table = filtered_mt.entries()
 
-                # Step 2: Create 'variant_id' by combining 'locus.contig' and 'locus.position'
-                entries_table = entries_table.annotate(
-                    variant_id=hl.str(entries_table.locus.contig) + ':' + hl.str(entries_table.locus.position)
-                )
+                    # Step 3: Select and rename fields without altering key fields directly
+                    # It's crucial to remove keys before selecting fields to avoid key conflicts
+                    unkeyed_entries = entries_table.key_by()
 
-                # Step 3: Select and rename fields without altering key fields directly
-                gt_table = entries_table.select(
-                    sample_id=entries_table.s,
-                    variant_id=entries_table.variant_id,
-                    GT_processed=entries_table.GT_processed
-                )
+                    # Step 4: Annotate or select fields as needed
+                    selected_table = unkeyed_entries.select(
+                        variant_id = unkeyed_entries.variant_id,
+                        sample_id = unkeyed_entries.s,
+                        GT_processed = unkeyed_entries.GT_processed
+                    )
 
-                # Step 4: Rekey the table by 'sample_id' and 'variant_id'
-                gt_table = gt_table.key_by('sample_id', 'variant_id')
+                    # Step 5: Rekey the table by 'sample_id' and 'variant_id' to prepare for pivoting
+                    rekeyed_table = selected_table.key_by('sample_id', 'variant_id')
 
-                # Step 5: Convert Hail Table to PySpark DataFrame
-                spark_df = gt_table.to_spark()
+                    # Step 6: Convert Hail Table to PySpark DataFrame
+                    spark_df = rekeyed_table.to_spark()
 
-                # Step 6: Pivot the DataFrame to have samples as rows and variants as columns
-                spark_df_pivot = spark_df.groupBy("sample_id") \
-                    .pivot("variant_id") \
-                    .agg(F.first("GT_processed")) \
-                    .fillna(0)  # Replace missing values with 0 or an appropriate default
+                    # Step 7: Pivot the DataFrame to have samples as rows and variants as columns
+                    spark_df_pivot = spark_df.groupBy("sample_id") \
+                        .pivot("variant_id") \
+                        .agg(F.first("GT_processed")) \
+                        .fillna(0)  # Replace missing values with 0 or an appropriate default
 
-                return spark_df_pivot
-            except Exception as e:
-                self.logger.error(f"Failed to convert MatrixTable to PySpark DataFrame: {e}")
-                raise e
+                    return spark_df_pivot
+                except Exception as e:
+                    self.logger.error(f"Failed to convert MatrixTable to PySpark DataFrame: {e}")
+                    raise e
+            else:
+                self.logger.info("Returning filtered Hail MatrixTable.")
+                return filtered_mt
+
+        elif isinstance(data, SparkDataFrame):
+            if return_spark:
+                self.logger.info("Returning the provided Spark DataFrame.")
+                return data.filter(F.col("sample_id").isin(sample_ids))
         else:
-            self.logger.info("Returning filtered Hail MatrixTable.")
-            return filtered_mt
-
-def calculate_ld_matrix(mt, window_size=1000000, min_af=0.01):
-    """
-    Calculate the LD matrix for a given MatrixTable.
-    
-    :param mt: Input MatrixTable
-    :param window_size: Window size in base pairs for LD calculation (default: 1,000,000)
-    :param min_af: Minimum allele frequency threshold (default: 0.01)
-    :return: LD matrix as a BlockMatrix
-    """
-    # Ensure the MatrixTable is row-keyed by locus
-    if 'locus' not in mt.row_key:
-        mt = mt.key_rows_by('locus')
-    
-    # Filter variants by allele frequency
-    mt = mt.filter_rows(hl.agg.stats(mt.GT.n_alt_alleles()).mean / 2 >= min_af)
-    
-    # Prune variants in linkage equilibrium
-    pruned_variant_table = hl.ld_prune(mt.GT, r2=0.2, bp_window_size=window_size)
-    mt = mt.filter_rows(hl.is_defined(pruned_variant_table[mt.row_key]))
-    
-    # Calculate LD matrix
-    ld_matrix = hl.ld_matrix(mt.GT, window_size)
-    
-    return ld_matrix
+            raise TypeError("Input data must be either a Hail MatrixTable or a Spark DataFrame.")

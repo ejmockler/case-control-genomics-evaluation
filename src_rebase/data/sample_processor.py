@@ -133,7 +133,7 @@ class SampleProcessor:
         np.random.shuffle(balanced_test_ids)
 
         # Map sample IDs to genotype IDs and table names
-        train_samples = {sample_id: sample_id for sample_id in balanced_train_ids}
+        train_samples = {sample_id: self.id_mapping[sample_id] for sample_id in balanced_train_ids}
         train_table_mapping = {
             sample_id: self._get_table_name(sample_id, 'crossval')
             for sample_id in balanced_train_ids
@@ -143,7 +143,7 @@ class SampleProcessor:
             for sample_id in balanced_train_ids
         }
 
-        test_samples = {sample_id: sample_id for sample_id in balanced_test_ids}
+        test_samples = {sample_id: self.id_mapping[sample_id] for sample_id in balanced_test_ids}
         test_table_mapping = {
             sample_id: self._get_table_name(sample_id, 'crossval')
             for sample_id in balanced_test_ids
@@ -322,8 +322,15 @@ class SampleProcessor:
         label_mapping = {}
 
         for sample_id in sample_ids:
+            # Resolve the correct sample ID using the id_mapping
+            resolved_id = next((key for key, value in self.id_mapping.items() if value == sample_id or key == sample_id), None)
+            
+            if resolved_id is None:
+                self.logger.error(f"Unable to resolve sample ID '{sample_id}'")
+                raise ValueError(f"Unable to resolve sample ID '{sample_id}'")
+
             try:
-                label = self._get_label(sample_id, dataset)
+                label = self._get_label(resolved_id, dataset)
                 label_mapping[sample_id] = 1 if label.lower() == 'case' else 0
             except ValueError as e:
                 self.logger.error(f"Error retrieving label for sample '{sample_id}': {e}")
