@@ -147,6 +147,7 @@ shapExplanations*
 *Labels
 projects/
 mlruns/
+mlartifacts/
 
 # neptune.ai
 .neptune
