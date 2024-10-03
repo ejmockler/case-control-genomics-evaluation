@@ -24,9 +24,9 @@ class GMTConfig(BaseModel):
 class TrackingConfig(BaseModel):
     name: str
     entity: str
-    project: str
+    experiment_name: str
     plot_all_sample_importances: bool = False
-
+    tracking_uri: str = "http://localhost:5000"
 class TableMetadata(BaseModel):
     name: str
     path: str
@@ -83,8 +83,9 @@ config = Config(
     tracking=TrackingConfig(
         name="NUP variants (rare-binned, rsID only)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        project="highReg-l1-NUPs60-aals-rsID-rareBinned-0.0025MAF",
+        experiment_name="highReg-l1-NUPs60-aals-rsID-rareBinned-0.0025MAF",
         plot_all_sample_importances=False,
+        tracking_uri="http://127.0.0.1:5000/",
     ),
     crossval_tables=SampleTableConfig(
         tables=[

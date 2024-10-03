@@ -6,6 +6,7 @@ from sklearn.linear_model import LogisticRegression, ElasticNet
 from sklearn.metrics import roc_auc_score
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import SVC
+from sklearn_rvm import EMRVC
 from xgboost import XGBClassifier
 
 from skopt.space import Categorical, Integer, Real
@@ -33,12 +34,11 @@ stack = {
     #     "C": Real(1e-6, 1, prior="log-uniform"),
     #     #   "l1_ratio": Real(1e-6, 1, prior="log-uniform"),
     # },
-    ElasticNet(l1_ratio=0.5): {"alpha": Real(3, 10, prior="log-uniform")},
     LogisticRegression(
         penalty="l1",
         solver="saga",
     ): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
-    # BernoulliNB(): {"alpha": Real(1e-6, 1, prior="log-uniform")},
+    BernoulliNB(): {"alpha": Real(1e-6, 1, prior="log-uniform")},
     # AdaBoostClassifier(): {
     #     "n_estimators": Integer(25, 75),
     #     "learning_rate": Real(1e-3, 1, prior="log-uniform"),

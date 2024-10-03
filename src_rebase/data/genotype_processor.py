@@ -132,11 +132,37 @@ class GenotypeProcessor:
         # Convert to Spark DataFrame
         spark_df = flat_table.select(
             flat_table.variant_id,
-            sample_id = flat_table.s,
-            GT_processed = flat_table.GT_processed
+            F.col('s').alias('sample_id'),
+            flat_table.GT_processed
         ).to_spark()
 
         return spark_df
+
+    def embed_variants(self, spark_df: SparkDataFrame) -> SparkDataFrame:
+        """
+        Pivot the Spark DataFrame to create a feature matrix with samples as rows
+        and variant_ids as columns.
+
+        Args:
+            spark_df (SparkDataFrame): Spark DataFrame with columns ['variant_id', 'sample_id', 'GT_processed'].
+
+        Returns:
+            SparkDataFrame: Pivoted Spark DataFrame with samples as rows and variant_ids as columns.
+        """
+        self.logger.info("Embedding variants into feature matrix.")
+
+        try:
+            # Pivot the DataFrame: rows=sample_id, columns=variant_id, values=GT_processed
+            pivoted_df = spark_df.groupBy("sample_id") \
+                .pivot("variant_id") \
+                .agg(F.first("GT_processed")) \
+                .fillna(0)  # Replace missing values with 0 or an appropriate default
+
+            self.logger.info("Successfully embedded variants into feature matrix.")
+            return pivoted_df
+        except Exception as e:
+            self.logger.error(f"Failed to embed variants: {e}")
+            raise e
 
     def fetch_genotypes(
         self, 
@@ -151,7 +177,7 @@ class GenotypeProcessor:
         :param sample_ids: List of sample IDs to fetch genotypes for.
         :param return_spark: If True, returns a PySpark DataFrame.
                              If False, returns a Hail MatrixTable.
-        :return: Filtered MatrixTable or PySpark DataFrame based on 'return_spark' flag.
+        :return: Filtered MatrixTable or Pivoted PySpark DataFrame based on 'return_spark' flag.
         """
         if isinstance(data, hl.MatrixTable):
             self.logger.info("Processing Hail MatrixTable.")
@@ -176,19 +202,13 @@ class GenotypeProcessor:
                         GT_processed = unkeyed_entries.GT_processed
                     )
 
-                    # Step 5: Rekey the table by 'sample_id' and 'variant_id' to prepare for pivoting
-                    rekeyed_table = selected_table.key_by('sample_id', 'variant_id')
+                    # Step 5: Convert Hail Table to PySpark DataFrame
+                    spark_df = selected_table.to_spark()
 
-                    # Step 6: Convert Hail Table to PySpark DataFrame
-                    spark_df = rekeyed_table.to_spark()
+                    # Step 6: Embed variants to create feature matrix
+                    pivoted_df = self.embed_variants(spark_df)
 
-                    # Step 7: Pivot the DataFrame to have samples as rows and variants as columns
-                    spark_df_pivot = spark_df.groupBy("sample_id") \
-                        .pivot("variant_id") \
-                        .agg(F.first("GT_processed")) \
-                        .fillna(0)  # Replace missing values with 0 or an appropriate default
-
-                    return spark_df_pivot
+                    return pivoted_df
                 except Exception as e:
                     self.logger.error(f"Failed to convert MatrixTable to PySpark DataFrame: {e}")
                     raise e

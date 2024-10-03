@@ -57,7 +57,8 @@ def main():
             sample_processor=sample_processor,
             genotype_processor=genotype_processor,
             data=mt_processed,  # Pass the processed MatrixTable
-            config=config.sampling,
+            samplingConfig=config.sampling,
+            trackingConfig=config.tracking,
             stack=stack
         )
         logger.info("Bootstrapped model evaluations completed.")

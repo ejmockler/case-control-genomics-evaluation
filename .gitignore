@@ -146,6 +146,7 @@ globalFeatureImportance
 shapExplanations*
 *Labels
 projects/
+mlruns/
 
 # neptune.ai
 .neptune
