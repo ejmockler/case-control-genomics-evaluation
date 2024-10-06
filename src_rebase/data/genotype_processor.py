@@ -6,6 +6,9 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import SparkSession
 import pandas as pd
+import numpy as np
+
+from eval.feature_selection import detect_data_threshold
 
 class GenotypeProcessor:
     def __init__(self, config: VCFConfig, gtf_config: GTFConfig):
@@ -39,31 +42,45 @@ class GenotypeProcessor:
         # Align to annotations using the filtered GTF
         mt = self._align_to_annotations(mt, gtf_ht)
         
-        # Create variant_id as a row field
-        mt = mt.annotate_rows(variant_id = hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position))
-        
         return mt
 
     def _preprocess_and_filter(self, mt: hl.MatrixTable) -> hl.MatrixTable:
         """Applies all preprocessing steps and filters in a single pass."""
+        # Annotate entries with processed genotype
         mt = mt.annotate_entries(GT_processed=self._get_processed_gt(mt.GT))
         
+        # Annotate rows with necessary statistics including variance
         mt = mt.annotate_rows(
             maf=hl.agg.mean(mt.GT_processed) / 2,
-            n_unique_genotypes=hl.agg.collect_as_set(mt.GT_processed).length(),
-            has_missing=hl.agg.any(hl.is_missing(mt.GT_processed))
+            stdev=hl.agg.stats(mt.GT_processed).stdev,
+            has_missing=hl.agg.any(hl.is_missing(mt.GT_processed)),
+            variant_id = hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position)
         )
-
+        
+        # Collect stdev values for threshold detection
+        self.logger.info("Collecting standard deviation values for threshold detection.")
+        stdev_rows = mt.rows().select('stdev').collect()  # Adjust limit as needed
+        stdevs = np.array([row['stdev'] for row in stdev_rows if row['stdev'] is not None])
+        
+        if len(stdevs) == 0:
+            raise ValueError("No variance values collected. Please check your data.")
+        
+        # Detect threshold using KDE with Dip Test
+        self.logger.info("Detecting stdev threshold using KDE with Dip Test.")
+        threshold = detect_data_threshold(stdevs, bandwidth='silverman', plot=False)  # Set plot=True for visualization
+        self.config.min_variance = threshold
+        self.logger.info(f"Detected stdev threshold: {threshold:.4f}")
+        
+        # Apply row filters based on detected variance threshold and other criteria
         mt = mt.filter_rows(
-            (mt.n_unique_genotypes > 1) &  # Drop invariant variants
+            (mt.stdev >= threshold) &  # Apply detected variance threshold
             (mt.locus.contig.matches(self._get_contig_pattern())) &  # Filter biologically useful contigs
             hl.all(lambda a: hl.len(a) == 1, mt.alleles) &  # Filter to only include SNPs
-            (hl.len(mt.alleles) == 2) &  # Ensure there are exactly two alleles
             (mt.maf >= self.config.min_allele_frequency) &  # Apply MAF filter
             (mt.maf <= self.config.max_allele_frequency) &
             (~mt.has_missing)  # Drop variants with any missing values
         )
-
+        
         self._log_filtering_results(mt)
         return mt
 
@@ -129,11 +146,10 @@ class GenotypeProcessor:
         # Now, flatten this to a table
         flat_table = row_entry_table.entries()
 
-        # Convert to Spark DataFrame
         spark_df = flat_table.select(
-            flat_table.variant_id,
-            F.col('s').alias('sample_id'),
-            flat_table.GT_processed
+            variant_id=flat_table.variant_id,
+            sample_id=flat_table.s,
+            GT_processed=flat_table.GT_processed
         ).to_spark()
 
         return spark_df
@@ -152,6 +168,10 @@ class GenotypeProcessor:
         self.logger.info("Embedding variants into feature matrix.")
 
         try:
+            # Set the pivotMaxValues configuration
+            spark = SparkSession.builder.getOrCreate()
+            spark.conf.set("spark.sql.pivotMaxValues", 100000)
+
             # Pivot the DataFrame: rows=sample_id, columns=variant_id, values=GT_processed
             pivoted_df = spark_df.groupBy("sample_id") \
                 .pivot("variant_id") \
@@ -183,7 +203,14 @@ class GenotypeProcessor:
             self.logger.info("Processing Hail MatrixTable.")
             # Step 1: Filter the MatrixTable to include only specified samples
             filtered_mt = data.filter_cols(hl.literal(sample_ids).contains(data.s))
-            self.logger.info(f"Filtered MatrixTable to include {len(sample_ids)} samples.")
+            
+            # Verify the filtering by checking the sample count
+            filtered_sample_count = filtered_mt.count_cols()
+            self.logger.info(f"Filtered MatrixTable to include {filtered_sample_count} samples out of {len(sample_ids)} requested.")
+            
+            # Additional check to ensure all requested samples are present
+            if filtered_sample_count != len(sample_ids):
+                self.logger.warning(f"Not all requested samples were found in the data. Expected {len(sample_ids)}, but got {filtered_sample_count}.")
 
             if return_spark:
                 self.logger.info("Converting filtered MatrixTable to PySpark DataFrame.")
@@ -218,7 +245,8 @@ class GenotypeProcessor:
 
         elif isinstance(data, SparkDataFrame):
             if return_spark:
-                self.logger.info("Returning the provided Spark DataFrame.")
                 return data.filter(F.col("sample_id").isin(sample_ids))
         else:
             raise TypeError("Input data must be either a Hail MatrixTable or a Spark DataFrame.")
+
+  

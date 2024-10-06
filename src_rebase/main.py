@@ -13,8 +13,17 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    # Initialize Hail
-    hl.init(default_reference='GRCh38')
+    # Initialize Hail with increased Spark memory settings
+    hl.init(
+        default_reference='GRCh38',
+        spark_conf={
+            'spark.driver.memory': '12g',      # Increase driver memory to 12 GB
+            'spark.executor.memory': '12g',    # Increase executor memory to 12 GB
+            'spark.sql.execution.arrow.enabled': 'true',  # Enable Arrow for optimized conversion
+            'spark.executor.cores': '4',       # Allocate more cores per executor if applicable
+            'spark.executor.instances': '2'    # Increase the number of executors if needed
+        }
+    )
 
     try:
         # Load VCF Data

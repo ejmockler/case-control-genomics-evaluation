@@ -141,6 +141,7 @@ env*
 *.json
 *.gmt
 *.zip
+*.params
 sampleResults
 globalFeatureImportance
 shapExplanations*

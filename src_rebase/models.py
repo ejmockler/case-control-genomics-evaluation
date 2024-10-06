@@ -1,25 +1,24 @@
 import numpy as np
+import pandas as pd
 import torch
 import pyro
 import pyro.distributions as dist
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
+from pyro.optim import ClippedAdam, Adam
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.ensemble import (
-    AdaBoostClassifier,
-    RandomForestClassifier,
-)
-from sklearn.linear_model import LogisticRegression, ElasticNet
-from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import SVC
-from sklearn_rvm import EMRVC
-import torch
-from xgboost import XGBClassifier
 
-from skopt.space import Categorical, Integer, Real
-import pandas as pd
+from skopt.space import Integer, Real
 
+class RadialBasisSVC(SVC):
+    def __init__(self, **kwargs):
+        super().__init__(kernel="rbf", **kwargs)
+
+class LinearSVC(SVC):
+    def __init__(self, **kwargs):
+        super().__init__(kernel="linear", **kwargs)
 
 class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
     def __init__(self, num_iterations=1000, lr=0.01, verbose=False):
@@ -38,46 +37,14 @@ class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
         X_tensor = torch.tensor(X.values if isinstance(X, pd.DataFrame) else X, dtype=torch.float32)
         y_tensor = torch.tensor(y.values if hasattr(y, 'values') else y, dtype=torch.float32)
 
-        # Define the model
-        def model(X, y):
-            tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
-            with pyro.plate('features', D):
-                lam = pyro.sample('lam', dist.HalfCauchy(scale=torch.ones(1)))
-            sigma = lam * tau_0
-            beta = pyro.sample('beta', dist.Normal(loc=torch.zeros(D), scale=sigma).to_event(1))
-            intercept = pyro.sample('intercept', dist.Normal(0., 10.))
-            logits = intercept + X.matmul(beta)
-            with pyro.plate('data', N):
-                pyro.sample('obs', dist.Bernoulli(logits=logits), obs=y)
-
-        # Define the guide (variational distribution)
-        def guide(X, y):
-            # Global variables
-            tau_loc = pyro.param('tau_loc', torch.tensor(0.0))
-            tau_scale = pyro.param('tau_scale', torch.tensor(1.0), constraint=dist.constraints.positive)
-            tau_0 = pyro.sample('tau_0', dist.LogNormal(tau_loc, tau_scale))
-
-            # Feature-specific variables
-            lam_loc = pyro.param('lam_loc', torch.zeros(D))
-            lam_scale = pyro.param('lam_scale', torch.ones(D), constraint=dist.constraints.positive)
-            with pyro.plate('features', D):
-                lam = pyro.sample('lam', dist.LogNormal(lam_loc, lam_scale))
-
-            # Beta coefficients
-            beta_loc = pyro.param('beta_loc', torch.zeros(D))
-            beta_scale = pyro.param('beta_scale', torch.ones(D), constraint=dist.constraints.positive)
-            beta = pyro.sample('beta', dist.Normal(beta_loc, beta_scale).to_event(1))
-
-            # Intercept
-            intercept_loc = pyro.param('intercept_loc', torch.tensor(0.0))
-            intercept_scale = pyro.param('intercept_scale', torch.tensor(1.0), constraint=dist.constraints.positive)
-            intercept = pyro.sample('intercept', dist.Normal(intercept_loc, intercept_scale))
+        # Define the model and guide
+        # Similar to the BayesianFeatureSelector but focusing on prediction
 
         # Use ClippedAdam optimizer for stability
         optimizer = ClippedAdam({'lr': self.lr})
 
         # Set up the inference algorithm
-        svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
+        svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
 
         # Clear the parameter store
         pyro.clear_param_store()
@@ -119,44 +86,46 @@ class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
             setattr(self, key, value)
         return self
 
+    def model(self, X, y):
+        N, D = X.shape
+        tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
+        with pyro.plate('features', D):
+            lam = pyro.sample('lam', dist.HalfCauchy(scale=torch.ones(D)))
+        sigma = lam * tau_0
+        beta = pyro.sample('beta', dist.Normal(loc=torch.zeros(D), scale=sigma).to_event(1))
+        intercept = pyro.sample('intercept', dist.Normal(0., 10.))
+        logits = intercept + X.matmul(beta)
+        with pyro.plate('data', N):
+            pyro.sample('obs', dist.Bernoulli(logits=logits), obs=y)
 
-class RadialBasisSVC(SVC):
-    def __init__(self, **kwargs):
-        super().__init__(kernel="rbf", **kwargs)
+    def guide(self, X, y):
+        N, D = X.shape
+        # Global variables
+        tau_loc = pyro.param('tau_loc', torch.tensor(0.0))
+        tau_scale = pyro.param('tau_scale', torch.tensor(1.0), constraint=dist.constraints.positive)
+        tau_0 = pyro.sample('tau_0', dist.LogNormal(tau_loc, tau_scale))
 
-class LinearSVC(SVC):
-    def __init__(self, **kwargs):
-        super().__init__(kernel="linear", **kwargs)
+        # Feature-specific variables
+        lam_loc = pyro.param('lam_loc', torch.zeros(D))
+        lam_scale = pyro.param('lam_scale', torch.ones(D), constraint=dist.constraints.positive)
+        with pyro.plate('features', D):
+            lam = pyro.sample('lam', dist.LogNormal(lam_loc, lam_scale))
+
+        # Beta coefficients
+        beta_loc = pyro.param('beta_loc', torch.zeros(D))
+        beta_scale = pyro.param('beta_scale', torch.ones(D), constraint=dist.constraints.positive)
+        beta = pyro.sample('beta', dist.Normal(beta_loc, beta_scale).to_event(1))
+
+        # Intercept
+        intercept_loc = pyro.param('intercept_loc', torch.tensor(0.0))
+        intercept_scale = pyro.param('intercept_scale', torch.tensor(1.0), constraint=dist.constraints.positive)
+        intercept = pyro.sample('intercept', dist.Normal(intercept_loc, intercept_scale))
 
 stack = {
-    # LinearSVC(probability=True, kernel="linear"): {
-    #     "tol": Real(1e-6, 1e-3, prior="log-uniform"),
-    #     "C": Real(1e-3, 10, prior="log-uniform"),
-    # },
-    # RadialBasisSVC(probability=True, kernel="rbf"): {
-    #     "tol": Real(1e-6, 1e-3, prior="log-uniform"),
-    #     "C": Real(1e-3, 10, prior="log-uniform"),
-    #     "gamma": Categorical(["scale", "auto"]),
-    # },
-    # LogisticRegression(penalty="l1", solver="saga", l1_ratio=1): {
-    #     "C": Real(1e-6, 1, prior="log-uniform"),
-    #     #   "l1_ratio": Real(1e-6, 1, prior="log-uniform"),
-    # },
     LogisticRegression(
         penalty="l1",
         solver="saga",
     ): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
     BernoulliNB(): {"alpha": Real(1e-6, 1, prior="log-uniform")},
     SparseBayesianLogisticRegression(): {"num_iterations": Integer(100, 1000), "lr": Real(1e-6, 1e-1, prior="log-uniform")},
-    # AdaBoostClassifier(): {
-    #     "n_estimators": Integer(25, 75),
-    #     "learning_rate": Real(1e-3, 1, prior="log-uniform"),
-    # },
-    # XGBClassifier(): {
-    #     "learning_rate": Real(1e-3, 1, prior="log-uniform"),
-    #     "n_estimators": Integer(10, 100),
-    # },
-    # RandomForestClassifier(n_jobs=-1): {
-    #     "n_estimators": Integer(10, 100),
-    # },
 }

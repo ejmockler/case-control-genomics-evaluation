@@ -28,7 +28,7 @@ from sklearn.preprocessing import MinMaxScaler
 from config import SamplingConfig, TrackingConfig
 from data.genotype_processor import GenotypeProcessor
 from data.sample_processor import SampleProcessor
-
+from eval.feature_selection import BayesianFeatureSelector
 # Initialize Ray at the module level
 ray.init(ignore_reinit_error=True)
 
@@ -84,34 +84,34 @@ def calculate_metrics(y_true, y_pred):
 def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig):
     """Log metrics, artifacts, and visualizations to MLflow."""
     signature = infer_signature(X_test, y_pred_test)
-    with mlflow.start_run():
-        mlflow.set_tag("model", model.__class__.__name__)
-        mlflow.log_params(model.get_params())
-        
-        # Log train and test aggregate metrics
-        for dataset in ['train', 'test']:
-            for metric_name, metric_value in metrics['aggregate'][dataset].items():
-                mlflow.log_metric(f"{dataset}/{metric_name}", metric_value)
-        
-        # Combine predictions and sample-wise metrics for train and test
-        train_sample_metrics = df_y_pred_train.copy()
-        test_sample_metrics = df_y_pred_test.copy()
-        
-        for metric_name, metric_values in metrics['sample_wise']['train'].items():
-            train_sample_metrics[f'metric_{metric_name}'] = metric_values.values
-        
-        for metric_name, metric_values in metrics['sample_wise']['test'].items():
-            test_sample_metrics[f'metric_{metric_name}'] = metric_values.values
-        
-        # Log combined sample data as tables
-        mlflow.log_table(data=train_sample_metrics, artifact_file="train_sample_metrics.json")
-        mlflow.log_table(data=test_sample_metrics, artifact_file="test_sample_metrics.json")
-        
-        mlflow.sklearn.log_model(model, artifact_path="model", signature=signature)
-        if model_coefficient_df is not None:
-            mlflow.log_table(data=model_coefficient_df, artifact_file="feature_importances.json")
+    
+    mlflow.log_params(best_params)
+    
+    # Log train and test aggregate metrics
+    for dataset in ['train', 'test']:
+        for metric_name, metric_value in metrics['aggregate'][dataset].items():
+            mlflow.log_metric(f"{dataset}/{metric_name}", metric_value)
+    
+    # Combine predictions and sample-wise metrics for train and test
+    train_sample_metrics = df_y_pred_train.copy()
+    test_sample_metrics = df_y_pred_test.copy()
+    
+    for metric_name, metric_values in metrics['sample_wise']['train'].items():
+        train_sample_metrics[f'{metric_name}'] = metric_values.values
+    
+    for metric_name, metric_values in metrics['sample_wise']['test'].items():
+        test_sample_metrics[f'{metric_name}'] = metric_values.values
+    
+    # Log combined sample data as tables
+    mlflow.log_table(data=train_sample_metrics, artifact_file="train_sample_metrics.json")
+    mlflow.log_table(data=test_sample_metrics, artifact_file="test_sample_metrics.json")
+    
+    mlflow.sklearn.log_model(model, artifact_path="model", signature=signature)
+    if model_coefficient_df is not None:
+        mlflow.log_table(data=model_coefficient_df, artifact_file="feature_importances.json")
 
-        create_and_log_visualizations(y_test, y_pred_test, trackingConfig)
+    create_and_log_visualizations(y_test, y_pred_test, trackingConfig)
+
 
 def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, trackingConfig: TrackingConfig, n_iter=10):
     """Perform Bayesian hyperparameter optimization for a model."""
@@ -132,6 +132,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, track
             scoring='roc_auc'
         )
         
+
         search.fit(X_train, y_train)
         
         y_pred_train = search.predict_proba(X_train)[:, 1]
@@ -159,11 +160,18 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, track
         feature_labels = X_train.columns
         model_coefficient_df = get_feature_importances(search.best_estimator_['classifier'], feature_labels)
 
+        # Set up MLflow tracking
         mlflow.set_tracking_uri(trackingConfig.tracking_uri)
         mlflow.set_experiment(trackingConfig.experiment_name)
-        log_mlflow_metrics(metrics, best_params, search.best_estimator_['classifier'], X_test, y_test, y_pred_test, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig)
 
-        return metrics, best_params
+        # Start a run for this model evaluation
+        with mlflow.start_run(run_name=f"Model_{model.__class__.__name__}", nested=True) as run:
+            mlflow.log_params(best_params)
+            mlflow.set_tag("model", model.__class__.__name__)
+            
+            log_mlflow_metrics(metrics, best_params, search.best_estimator_['classifier'], X_test, y_test, y_pred_test, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig)
+
+        return metrics, best_params, run.info.run_id
     except Exception as e:
         raise e
 
@@ -180,8 +188,9 @@ def prepare_data(sample_processor, genotype_processor, data, train_samples, test
 
     logger.info("Converting Spark DataFrame to Pandas DataFrame for ML processing.")
     try:
-        X_train = train_genotypes.toPandas().set_index('sample_id')
-        X_test = test_genotypes.toPandas().set_index('sample_id')
+        # Convert to pandas and pivot the data
+        X_train = train_genotypes.toPandas().pivot(index='sample_id', columns='variant_id', values='GT_processed')
+        X_test = test_genotypes.toPandas().pivot(index='sample_id', columns='variant_id', values='GT_processed')
         
         y_train = sample_processor.get_labels(train_sample_ids)
         y_test = sample_processor.get_labels(test_sample_ids)
@@ -192,8 +201,9 @@ def prepare_data(sample_processor, genotype_processor, data, train_samples, test
 
         return X_train, X_test, y_train, y_test
     except Exception as e:
-        logger.error(f"Failed to convert Spark DataFrame to Pandas DataFrame: {e}")
+        logger.error(f"Failed to prepare data: {e}")
         raise e
+
 
 def bootstrap_models(
     sample_processor: SampleProcessor,
@@ -206,80 +216,108 @@ def bootstrap_models(
 ) -> pd.DataFrame:
     """
     Perform bootstrapping of models based on the configuration.
-
-    Args:
-        sample_processor (SampleProcessor): Instance of SampleProcessor.
-        genotype_processor (GenotypeProcessor): Instance of GenotypeProcessor.
-        data (Union[hl.MatrixTable, SparkDataFrame]): The processed dataset.
-        samplingConfig (SamplingConfig): Configuration object containing bootstrap_iterations and other settings.
-        trackingConfig (TrackingConfig): Configuration object containing tracking parameters.
-        stack (Dict): Dictionary of models and their hyperparameter distributions.
-        random_state (int): Seed for random number generation.
-
-    Returns:
-        pd.DataFrame: Aggregated performance metrics across all iterations and models.
     """
     logger = logging.getLogger(__name__)
     logger.info("Starting bootstrapping of models.")
 
     results = []
 
+    # Convert data to Spark DataFrame if it's a MatrixTable and cache it
+    if isinstance(data, hl.MatrixTable):
+        logger.info("Converting MatrixTable to Spark DataFrame and caching.")
+        full_dataset = genotype_processor.to_spark_df(data).cache()
+    elif isinstance(data, SparkDataFrame):
+        logger.info("Caching input Spark DataFrame.")
+        full_dataset = data.cache()
+    else:
+        raise TypeError("Input data must be either a Hail MatrixTable or a Spark DataFrame.")
+
+    # Trigger an action to materialize the cache
+    logger.info(f"Cached full dataset with {full_dataset.count()} rows.")
+
+    # Set up MLflow tracking
+    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
+    mlflow.set_experiment(trackingConfig.experiment_name)
+
     for iteration in range(samplingConfig.bootstrap_iterations):
-        logger.info(f"Bootstrapping iteration {iteration + 1}/{samplingConfig.bootstrap_iterations}")
+        with mlflow.start_run(run_name=f"Bootstrap_Iteration_{iteration}") as parent_run:
+            logger.info(f"Bootstrapping iteration {iteration + 1}/{samplingConfig.bootstrap_iterations}")
 
-        # Adjust random_state to ensure different splits for each iteration
-        current_random_state = random_state + iteration
+            mlflow.log_param("iteration", iteration)
+            mlflow.log_param("random_state", random_state + iteration)
 
-        # Draw a new train-test split for each bootstrap iteration
-        train_test_sample_ids = sample_processor.draw_train_test_split(
-            test_size=samplingConfig.test_size,
-            random_state=current_random_state
-        )
-
-        train_samples = train_test_sample_ids['train']['samples']
-        test_samples = train_test_sample_ids['test']['samples']
-
-        logger.info(f"Number of training samples: {len(train_samples)}")
-        logger.info(f"Number of testing samples: {len(test_samples)}")
-
-        X_train, X_test, y_train, y_test = prepare_data(sample_processor, genotype_processor, data, train_samples, test_samples)
-
-        if X_train is None:
-            continue  # Skip this iteration if data preparation failed
-
-        # Feature Selection Step
-        logger.info("Performing feature selection using Sparse Bayesian Regression.")
-
-        # Initialize the feature selector
-        feature_selector = SparseBayesianLogisticRegression(num_iterations=1000, lr=0.01)
-        feature_selector.fit(X_train, y_train)
-
-        # Extract selected features
-        beta_mean = feature_selector.beta_loc_
-        # Define a threshold or use a criterion to select features
-        # For example, select features where the absolute mean coefficient is greater than a threshold
-        threshold = 0.1  # Adjust based on your data
-        selected_features = X_train.columns[np.abs(beta_mean) > threshold]
-        logger.info(f"Number of selected features: {len(selected_features)}")
-
-        # Subset the training and test data
-        X_train_selected = X_train[selected_features]
-        X_test_selected = X_test[selected_features]
-
-        # Iterate over each model in the stack and evaluate
-        for model, search_spaces in stack.items():
-            logger.info(f"Evaluating model: {model.__class__.__name__}")
-
-            evaluate_model(
-                model=model,
-                search_spaces=search_spaces,
-                X_train=X_train_selected,
-                y_train=y_train,
-                X_test=X_test_selected,
-                y_test=y_test,
-                trackingConfig=trackingConfig,
-                n_iter=10  # Adjust based on your needs
+            train_test_sample_ids = sample_processor.draw_train_test_split(
+                test_size=samplingConfig.test_size,
+                random_state=random_state + iteration
             )
+
+            train_samples = train_test_sample_ids['train']['samples']
+            test_samples = train_test_sample_ids['test']['samples']
+
+            logger.info(f"Number of training samples: {len(train_samples)}")
+            logger.info(f"Number of testing samples: {len(test_samples)}")
+
+            # Use prepare_data function to get X_train, X_test, y_train, y_test
+            X_train, X_test, y_train, y_test = prepare_data(
+                sample_processor, 
+                genotype_processor, 
+                full_dataset, 
+                train_samples, 
+                test_samples
+            )
+
+            # Feature Selection Step
+            logger.info("Performing feature selection using Bayesian Feature Selector.")
+            max_attempts = 5
+            attempt = 0
+            selected_features = []
+
+            while len(selected_features) == 0 and attempt < max_attempts:
+                feature_selector = BayesianFeatureSelector(
+                    num_iterations=1000,
+                    lr=0.01,
+                    confidence_level=0.95,
+                    num_samples=1000,
+                    batch_size=128,
+                    verbose=True
+                )
+                feature_selector.fit(X_train, y_train)
+                selected_features = feature_selector.selected_features_
+                
+                if len(selected_features) == 0:
+                    logger.warning(f"No features selected on attempt {attempt + 1}. Retrying...")
+                    attempt += 1
+
+            if len(selected_features) == 0:
+                logger.error("Failed to select features after maximum attempts. Proceeding with all features.")
+                selected_features = X_train.columns.tolist()
+            logger.info(f"Number of selected features: {len(selected_features)}")
+
+            X_train_selected = X_train[selected_features]
+            X_test_selected = X_test[selected_features]
+
+            # Iterate over each model in the stack and evaluate
+            for model, search_spaces in stack.items():
+                model_name = model.__class__.__name__
+                logger.info(f"Evaluating model: {model_name}")
+
+                metrics, best_params, child_run_id = evaluate_model(
+                    model=model,
+                    search_spaces=search_spaces,
+                    X_train=X_train_selected,
+                    y_train=y_train,
+                    X_test=X_test_selected,
+                    y_test=y_test,
+                    trackingConfig=trackingConfig,
+                    n_iter=10
+                )
+
+                mlflow.log_metric(f"{model_name}_test_auc", metrics['aggregate']['test']['auc'])
+                mlflow.log_metric(f"{model_name}_test_f1", metrics['aggregate']['test']['f1'])
+                mlflow.log_param(f"{model_name}_run_id", child_run_id)
+
+    # Unpersist the cached dataset
+    full_dataset.unpersist()
 
     logger.info("Completed bootstrapping of models.")
     return pd.DataFrame()  # Return an empty DataFrame or collect results as needed
@@ -306,7 +344,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('True Positive Rate')
         ax.set_title(f'ROC Curve\n{trackingConfig.name}')
 
-    log_plot(plot_roc, "roc_curve.png")
+    log_plot(plot_roc, "plots/roc_curve.png")
 
     # Precision-Recall Curve
     def plot_pr(ax):
@@ -316,7 +354,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('Precision')
         ax.set_title(f'Precision-Recall Curve\n{trackingConfig.name}')
 
-    log_plot(plot_pr, "pr_curve.png")
+    log_plot(plot_pr, "plots/pr_curve.png")
 
     # Distribution of Predictions
     def plot_dist(ax):
@@ -325,7 +363,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('Count')
         ax.set_title(f'Distribution of Predictions\n{trackingConfig.name}')
 
-    log_plot(plot_dist, "pred_distribution.png")
+    log_plot(plot_dist, "plots/pred_distribution.png")
 
     # Confusion Matrix
     def plot_cm(ax):
@@ -336,4 +374,4 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('Actual')
         ax.set_title(f'Confusion Matrix\n{trackingConfig.name}')
 
-    log_plot(plot_cm, "confusion_matrix.png")
+    log_plot(plot_cm, "plots/confusion_matrix.png")
