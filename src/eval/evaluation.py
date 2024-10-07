@@ -1,17 +1,14 @@
-import os
 import logging
-from typing import Dict, Union, List
-from ray.data import Dataset
+from typing import Dict
 
 import hail as hl
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import pandas as pd
-import ray
 import seaborn as sns
+from joblib import Parallel, delayed
 from mlflow.models import infer_signature
-from pyspark.sql import SparkSession, DataFrame as SparkDataFrame
 from skopt import BayesSearchCV
 from sklearn.metrics import (
     confusion_matrix,
@@ -25,7 +22,6 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
-from joblib import Parallel, delayed
 
 from config import SamplingConfig, TrackingConfig
 from data.genotype_processor import GenotypeProcessor
@@ -308,45 +304,58 @@ def process_iteration(
     return iteration_results
 
 
-import numpy as np
-import pandas as pd
-
-def pivot_full_dataset(data: hl.MatrixTable) -> pd.DataFrame:
+def pivot_full_dataset(data: hl.MatrixTable, chunk_size: int = 5000) -> pd.DataFrame:
     """
     Pivot the full genotype dataset to create a feature matrix with samples as rows and variants as columns.
+    Process the data in chunks to manage memory usage.
 
     Args:
         data (hl.MatrixTable): The input genotype data as a Hail MatrixTable.
+        chunk_size (int): Number of variants to process in each chunk.
 
     Returns:
         pd.DataFrame: Pivoted genotype data as pandas DataFrame.
     """
     logger = logging.getLogger(__name__)
-    
-    logger.info("Starting to pivot Hail MatrixTable.")
-    
-    # Create a variant_id field
+    logger.info("Starting to pivot Hail MatrixTable in chunks.")
+
+    # Create a variant_id field and prepare the data
     data = data.entries()
-
-    # Step 3: Select and rename fields without altering key fields directly
-    # It's crucial to remove keys before selecting fields to avoid key conflicts
     unkeyed_entries = data.key_by()
-
-    # Step 4: Annotate or select fields as needed
     data = unkeyed_entries.select(
-        variant_id = unkeyed_entries.variant_id,
-        sample_id = unkeyed_entries.s,
-        GT_processed = unkeyed_entries.GT_processed
+        variant_id=unkeyed_entries.variant_id,
+        sample_id=unkeyed_entries.s,
+        GT_processed=unkeyed_entries.GT_processed
     )
+
+    # Get all variant IDs
+    variant_ids = data.variant_id.collect()
     
-    # Convert to pandas DataFrame
-    pandas_df = data.select('sample_id', 'variant_id', 'GT_processed').to_pandas()
-    
-    # Pivot the DataFrame
-    pivoted = pandas_df.pivot(index='sample_id', columns='variant_id', values='GT_processed')
+    # Initialize an empty list to store chunk DataFrames
+    chunk_dfs = []
+
+    # Process data in chunks
+    for i in range(0, len(variant_ids), chunk_size):
+        chunk_variant_ids = variant_ids[i:i+chunk_size]
+        
+        # Filter data for current chunk of variants
+        chunk_data = data.filter(hl.literal(chunk_variant_ids).contains(data.variant_id))
+        
+        # Convert chunk to pandas DataFrame
+        chunk_df = chunk_data.select('sample_id', 'variant_id', 'GT_processed').to_pandas()
+        
+        # Pivot the chunk
+        pivoted_chunk = chunk_df.pivot(index='sample_id', columns='variant_id', values='GT_processed')
+        
+        chunk_dfs.append(pivoted_chunk)
+        
+        logger.info(f"Processed chunk {i//chunk_size + 1} of {len(variant_ids)//chunk_size + 1}")
+
+    # Combine all chunks
+    pivoted_df = pd.concat(chunk_dfs, axis=1)
     
     # Reset the index to make 'sample_id' a regular column
-    pivoted_df = pivoted.reset_index()
+    pivoted_df = pivoted_df.reset_index()
 
     # Efficiently convert Int32Dtype or int32 columns to int16
     int_columns = pivoted_df.select_dtypes(include=['Int32', 'int32']).columns
@@ -413,10 +422,6 @@ def bootstrap_models(
             })
 
     return pd.DataFrame.from_records(records)
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import roc_curve, precision_recall_curve, confusion_matrix
 
 def create_and_log_visualizations(y_true, y_pred, trackingConfig):
     """Create and log visualizations directly to MLflow."""
