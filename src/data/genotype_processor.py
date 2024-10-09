@@ -158,7 +158,54 @@ class GenotypeProcessor:
 
         return spark_df
 
-    def embed_variants(self, spark_df: SparkDataFrame) -> SparkDataFrame:
+    def fetch_genotypes(
+        self, 
+        data: Union[hl.MatrixTable, SparkDataFrame, RayDataset],
+        sample_ids: List[str]
+    ) -> SparkDataFrame:
+        """
+        Fetch genotypes for the specified sample IDs.
+
+        Args:
+            data (Union[hl.MatrixTable, SparkDataFrame, RayDataset]): Input data.
+            sample_ids (List[str]): List of sample IDs to fetch.
+
+        Returns:
+            SparkDataFrame: Genotype data as Spark DataFrame.
+        """
+        if isinstance(data, hl.MatrixTable):
+            return self._fetch_from_matrix_table(data, sample_ids)
+        elif isinstance(data, SparkDataFrame):
+            return data.filter(data.sample_id.isin(sample_ids))
+        elif isinstance(data, RayDataset):
+            return ray.data.from_spark(data.filter(lambda row: row["sample_id"] in sample_ids).to_spark())
+        else:
+            raise TypeError("Input data must be either a Hail MatrixTable, Spark DataFrame, or Ray Dataset.")
+
+    def _fetch_from_matrix_table(self, mt: hl.MatrixTable, sample_ids: List[str]) -> SparkDataFrame:
+        self.logger.info("Processing Hail MatrixTable.")
+        filtered_mt = mt.filter_cols(hl.literal(sample_ids).contains(mt.s))
+        
+        filtered_sample_count = filtered_mt.count_cols()
+        self.logger.info(f"Filtered MatrixTable to include {filtered_sample_count} samples out of {len(sample_ids)} requested.")
+        
+        if filtered_sample_count != len(sample_ids):
+            self.logger.warning(f"Not all requested samples were found in the data. Expected {len(sample_ids)}, but got {filtered_sample_count}.")
+
+        self.logger.info("Converting filtered MatrixTable to PySpark DataFrame.")
+        try:
+            entries_table = filtered_mt.entries().key_by()
+            selected_table = entries_table.select(
+                variant_id = entries_table.variant_id,
+                sample_id = entries_table.s,
+                GT_processed = entries_table.GT_processed
+            )
+            return selected_table.to_spark()
+        except Exception as e:
+            self.logger.error(f"Failed to convert MatrixTable to PySpark DataFrame: {e}")
+            raise e
+
+    def pivot_genotypes(self, spark_df: SparkDataFrame) -> SparkDataFrame:
         """
         Pivot the Spark DataFrame to create a feature matrix with samples as rows
         and variant_ids as columns.
@@ -169,110 +216,18 @@ class GenotypeProcessor:
         Returns:
             SparkDataFrame: Pivoted Spark DataFrame with samples as rows and variant_ids as columns.
         """
-        self.logger.info("Embedding variants into feature matrix.")
+        self.logger.info("Pivoting genotypes into feature matrix.")
 
         try:
-            # Set the pivotMaxValues configuration
             spark = SparkSession.builder.getOrCreate()
             spark.conf.set("spark.sql.pivotMaxValues", 100000)
 
-            # Pivot the DataFrame: rows=sample_id, columns=variant_id, values=GT_processed
             pivoted_df = spark_df.groupBy("sample_id") \
                 .pivot("variant_id") \
-                .agg(F.first("GT_processed")) \
+                .agg(F.first("GT_processed"))
 
-            self.logger.info("Successfully embedded variants into feature matrix.")
+            self.logger.info("Successfully pivoted genotypes into feature matrix.")
             return pivoted_df
         except Exception as e:
-            self.logger.error(f"Failed to embed variants: {e}")
-            raise e
-
-    def fetch_genotypes(
-        self, 
-        data: Union[hl.MatrixTable, SparkDataFrame, RayDataset],
-        sample_ids: List[str], 
-        return_spark: bool = False,
-        return_ray: bool = False
-    ) -> Union[SparkDataFrame, RayDataset, pd.DataFrame]:
-        """
-        Fetch genotypes for the specified sample IDs.
-
-        Args:
-            data (Union[hl.MatrixTable, SparkDataFrame, ray.data.Dataset]): Input data.
-            sample_ids (List[str]): List of sample IDs to fetch.
-            return_spark (bool, optional): Whether to return a Spark DataFrame. Defaults to False.
-            return_ray (bool, optional): Whether to return a Ray Dataset. Defaults to False.
-
-        Returns:
-            Union[SparkDataFrame, ray.data.Dataset, pd.DataFrame]: Genotype data as Spark DataFrame, Ray Dataset, or pandas DataFrame.
-        """
-        if isinstance(data, hl.MatrixTable):
-            df = self._fetch_from_matrix_table(data, sample_ids)
-        elif isinstance(data, SparkDataFrame):
-            df = data.filter(data.sample_id.isin(sample_ids))
-        elif isinstance(data, RayDataset):
-            df = data.filter(lambda row: row["sample_id"] in sample_ids)
-        else:
-            raise TypeError("Input data must be either a Hail MatrixTable, Spark DataFrame, or Ray Dataset.")
-        
-        if return_ray:
-            if isinstance(df, SparkDataFrame):
-                ray_ds = ray.data.from_spark(df)
-                return ray_ds
-            elif isinstance(df, RayDataset):
-                return df
-            else:
-                pandas_df = df.toPandas()
-                ray_ds = ray.data.from_pandas(pandas_df)
-                return ray_ds
-        
-        if return_spark:
-            if isinstance(df, RayDataset):
-                sparkContext = SparkContext.getOrCreate()
-                spark_df = df.to_spark(sparkContext)
-                return spark_df
-            return df
-        else:
-            pandas_df = df.toPandas() if not isinstance(df, pd.DataFrame) else df
-            pandas_df.set_index("sample_id", inplace=True)
-            return pandas_df
-
-    def _fetch_from_matrix_table(self, mt: hl.MatrixTable, sample_ids: List[str]) -> SparkDataFrame:
-        self.logger.info("Processing Hail MatrixTable.")
-        # Step 1: Filter the MatrixTable to include only specified samples
-        filtered_mt = mt.filter_cols(hl.literal(sample_ids).contains(mt.s))
-        
-        # Verify the filtering by checking the sample count
-        filtered_sample_count = filtered_mt.count_cols()
-        self.logger.info(f"Filtered MatrixTable to include {filtered_sample_count} samples out of {len(sample_ids)} requested.")
-        
-        # Additional check to ensure all requested samples are present
-        if filtered_sample_count != len(sample_ids):
-            self.logger.warning(f"Not all requested samples were found in the data. Expected {len(sample_ids)}, but got {filtered_sample_count}.")
-
-        self.logger.info("Converting filtered MatrixTable to PySpark DataFrame.")
-        try:
-            # Step 2: Access entry fields
-            entries_table = filtered_mt.entries()
-
-            # Step 3: Select and rename fields without altering key fields directly
-            # It's crucial to remove keys before selecting fields to avoid key conflicts
-            unkeyed_entries = entries_table.key_by()
-
-            # Step 4: Annotate or select fields as needed
-            selected_table = unkeyed_entries.select(
-                variant_id = unkeyed_entries.variant_id,
-                sample_id = unkeyed_entries.s,
-                GT_processed = unkeyed_entries.GT_processed
-            )
-
-            # Step 5: Convert Hail Table to PySpark DataFrame
-            spark_df = selected_table.to_spark()
-
-            # Step 6: Embed variants to create feature matrix
-            pivoted_df = self.embed_variants(spark_df)
-
-            return pivoted_df
-        except Exception as e:
-            self.logger.error(f"Failed to convert MatrixTable to PySpark DataFrame: {e}")
+            self.logger.error(f"Failed to pivot genotypes: {e}")
             raise e

@@ -1,5 +1,6 @@
 import logging
 from typing import Dict
+from functools import partial
 
 import hail as hl
 import matplotlib.pyplot as plt
@@ -22,6 +23,7 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
+from tqdm import tqdm
 
 from config import SamplingConfig, TrackingConfig
 from data.genotype_processor import GenotypeProcessor
@@ -77,11 +79,11 @@ def calculate_metrics(y_true, y_pred):
     
     return metrics
 
-def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig):
+def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test, y_train, y_pred_train, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig):
     """Log metrics, artifacts, and visualizations to MLflow."""
     signature = infer_signature(X_test, y_pred_test)
     
-    mlflow.log_params(best_params)
+    mlflow.log_params(model.get_params())
     
     # Log train and test aggregate metrics
     for dataset in ['train', 'test']:
@@ -107,9 +109,10 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
         mlflow.log_table(data=model_coefficient_df, artifact_file="feature_importances.json")
 
     create_and_log_visualizations(y_test, y_pred_test, trackingConfig)
+    create_and_log_visualizations(y_train, y_pred_train, trackingConfig, set="train")
 
 
-def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, trackingConfig: TrackingConfig, n_iter=10):
+def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, trackingConfig: TrackingConfig, n_iter=10, is_worker=True):
     """Perform Bayesian hyperparameter optimization for a model."""
     try:
         pipeline = Pipeline([
@@ -124,7 +127,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, track
             search_spaces,
             n_iter=n_iter,
             cv=3,
-            n_jobs=-1,
+            n_jobs=1 if is_worker else -1,
             scoring='roc_auc'
         )
         
@@ -160,35 +163,38 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, track
         mlflow.set_experiment(trackingConfig.experiment_name)
 
         # Start a run for this model evaluation
-        with mlflow.start_run(run_name=f"Model_{model.__class__.__name__}", nested=True) as run:
-            mlflow.log_params(best_params)
+        with mlflow.start_run(run_name=f"{model.__class__.__name__}", nested=True) as run:
+            mlflow.log_params(model.get_params())
             mlflow.set_tag("model", model.__class__.__name__)
             
-            log_mlflow_metrics(metrics, best_params, search.best_estimator_['classifier'], X_test, y_test, y_pred_test, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig)
+            log_mlflow_metrics(metrics, best_params, search.best_estimator_['classifier'], X_test, y_test, y_pred_test, y_train, y_pred_train, df_y_pred_train, df_y_pred_test, model_coefficient_df, trackingConfig)
 
-        return metrics, best_params, run.info.run_id
+        return metrics, y_pred_test, y_pred_train, best_params, run.info.run_id
     except Exception as e:
         raise e
 
-def prepare_data(sample_processor, genotype_processor, full_dataset: pd.DataFrame, train_samples, test_samples):
+def prepare_data(parquet_path: str, sample_processor, train_samples, test_samples):
     """
-    Prepare data for a single bootstrap iteration.
+    Prepare data for a single bootstrap iteration by reading from Parquet.
     """
-    train_sample_ids = list(train_samples.values())
-    test_sample_ids = list(test_samples.values())
-    all_sample_ids = train_sample_ids + test_sample_ids
+    logger = logging.getLogger(__name__)
+    logger.info(f"Reading data from Parquet at {parquet_path}")
 
-    # Filter the full dataset for required samples
-    sampled_data = full_dataset[full_dataset['sample_id'].isin(all_sample_ids)]
-    sampled_data.set_index("sample_id", inplace=True)
-
+    # Load only the necessary rows (samples) to reduce memory usage
+    all_sample_ids = train_samples + test_samples
+    sampled_data = pd.read_parquet(parquet_path, filters=[('sample_id', 'in', all_sample_ids)])
+    
+    # Set sample_id as index if it's not already
+    if 'sample_id' in sampled_data.columns:
+        sampled_data.set_index('sample_id', inplace=True)
+    
     # Split into train and test sets
-    X_train = sampled_data.loc[train_sample_ids]
-    X_test = sampled_data.loc[test_sample_ids]
+    X_train = sampled_data.loc[train_samples]
+    X_test = sampled_data.loc[test_samples]
 
     # Get labels
-    y_train = sample_processor.get_labels(train_sample_ids)
-    y_test = sample_processor.get_labels(test_sample_ids)
+    y_train = sample_processor.get_labels(train_samples)
+    y_test = sample_processor.get_labels(test_samples)
 
     # Ensure that the indices align
     y_train = y_train.loc[X_train.index]
@@ -199,7 +205,7 @@ def prepare_data(sample_processor, genotype_processor, full_dataset: pd.DataFram
 
 def process_iteration(
     iteration: int,
-    full_dataset: pd.DataFrame,
+    parquet_path: str,
     sample_processor: SampleProcessor,
     genotype_processor: GenotypeProcessor,
     samplingConfig: SamplingConfig,
@@ -222,16 +228,15 @@ def process_iteration(
         random_state=random_state
     )
 
-    train_samples = train_test_sample_ids['train']['samples']
-    test_samples = train_test_sample_ids['test']['samples']
+    train_samples = list(train_test_sample_ids['train']['samples'].values())
+    test_samples = list(train_test_sample_ids['test']['samples'].values())
     
-    # Prepare data using the pandas DataFrame
+    # Prepare data by reading from Parquet
     X_train, X_test, y_train, y_test = prepare_data(
-        sample_processor,
-        genotype_processor,
-        full_dataset,
-        train_samples,
-        test_samples
+        parquet_path=parquet_path,
+        sample_processor=sample_processor,
+        train_samples=train_samples,
+        test_samples=test_samples
     )
 
     with mlflow.start_run(run_name=f"Bootstrap_Iteration_{iteration}", nested=True) as parent_run:
@@ -247,11 +252,15 @@ def process_iteration(
         while len(selected_features) == 0 and attempt < max_attempts:
             feature_selector = BayesianFeatureSelector(
                 num_iterations=1000,
-                lr=0.01,
-                confidence_level=0.95,
+                lr=1e-6,
+                confidence_level=0.25,
                 num_samples=5000,
-                batch_size=128,
-                verbose=True
+                patience=800,
+                fallback_percentile=95,
+                validation_split=0.2,
+                batch_size=512,
+                verbose=True,
+                checkpoint_path=f"/tmp/checkpoint_{iteration}.params",
             )
             feature_selector.fit(X_train, y_train)
             selected_features = feature_selector.selected_features_
@@ -278,7 +287,7 @@ def process_iteration(
             model_name = model.__class__.__name__
             logger.info(f"Evaluating model: {model_name}")
 
-            metrics, best_params, child_run_id = evaluate_model(
+            metrics, y_pred_test, y_pred_train, best_params, child_run_id = evaluate_model(
                 model=model,
                 search_spaces=search_spaces,
                 X_train=X_train_selected,
@@ -303,71 +312,6 @@ def process_iteration(
 
     return iteration_results
 
-
-def pivot_full_dataset(data: hl.MatrixTable, chunk_size: int = 5000) -> pd.DataFrame:
-    """
-    Pivot the full genotype dataset to create a feature matrix with samples as rows and variants as columns.
-    Process the data in chunks to manage memory usage.
-
-    Args:
-        data (hl.MatrixTable): The input genotype data as a Hail MatrixTable.
-        chunk_size (int): Number of variants to process in each chunk.
-
-    Returns:
-        pd.DataFrame: Pivoted genotype data as pandas DataFrame.
-    """
-    logger = logging.getLogger(__name__)
-    logger.info("Starting to pivot Hail MatrixTable in chunks.")
-
-    # Create a variant_id field and prepare the data
-    data = data.entries()
-    unkeyed_entries = data.key_by()
-    data = unkeyed_entries.select(
-        variant_id=unkeyed_entries.variant_id,
-        sample_id=unkeyed_entries.s,
-        GT_processed=unkeyed_entries.GT_processed
-    )
-
-    # Get all variant IDs
-    variant_ids = data.variant_id.collect()
-    
-    # Initialize an empty list to store chunk DataFrames
-    chunk_dfs = []
-
-    # Process data in chunks
-    for i in range(0, len(variant_ids), chunk_size):
-        chunk_variant_ids = variant_ids[i:i+chunk_size]
-        
-        # Filter data for current chunk of variants
-        chunk_data = data.filter(hl.literal(chunk_variant_ids).contains(data.variant_id))
-        
-        # Convert chunk to pandas DataFrame
-        chunk_df = chunk_data.select('sample_id', 'variant_id', 'GT_processed').to_pandas()
-        
-        # Pivot the chunk
-        pivoted_chunk = chunk_df.pivot(index='sample_id', columns='variant_id', values='GT_processed')
-        
-        chunk_dfs.append(pivoted_chunk)
-        
-        logger.info(f"Processed chunk {i//chunk_size + 1} of {len(variant_ids)//chunk_size + 1}")
-
-    # Combine all chunks
-    pivoted_df = pd.concat(chunk_dfs, axis=1)
-    
-    # Reset the index to make 'sample_id' a regular column
-    pivoted_df = pivoted_df.reset_index()
-
-    # Efficiently convert Int32Dtype or int32 columns to int16
-    int_columns = pivoted_df.select_dtypes(include=['Int32', 'int32']).columns
-    pivoted_df[int_columns] = pivoted_df[int_columns].astype('int16')
-
-    # Convert 'sample_id' column to standard Python string type
-    pivoted_df['sample_id'] = pivoted_df['sample_id'].astype(str)
-
-    logger.info("Completed pivoting to pandas DataFrame.")
-    
-    return pivoted_df
-
 def bootstrap_models(
     sample_processor: SampleProcessor,
     genotype_processor: GenotypeProcessor,
@@ -378,38 +322,44 @@ def bootstrap_models(
     random_state=42
 ) -> pd.DataFrame:
     """
-    Perform bootstrapping of models based on the configuration using joblib for parallelization.
+    Perform bootstrapping of models based on the configuration using Joblib with Loky backend.
     """
+    
     logger = logging.getLogger(__name__)
     logger.info("Starting bootstrapping of models.")
 
     # Pivot the Hail MatrixTable
-    pivoted_df = pivot_full_dataset(data)
+    spark_df = genotype_processor.to_spark_df(data)
+    pivoted_df = genotype_processor.pivot_genotypes(spark_df)
 
-    # Define a wrapper function for process_iteration that unpacks arguments
-    def process_iteration_wrapper(iteration):
-        return process_iteration(
-            iteration=iteration,
-            full_dataset=pivoted_df,
-            sample_processor=sample_processor,
-            genotype_processor=genotype_processor,
-            samplingConfig=samplingConfig,
-            trackingConfig=trackingConfig,
-            stack=stack,
-            random_state=random_state + iteration
-        )
+    # Persist pivoted_df as Parquet
+    parquet_path = f"data/{trackingConfig.experiment_name}.parquet"
+    logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
+    pivoted_df.write.parquet(parquet_path, mode="overwrite")
 
-    # Use joblib to parallelize the iterations
-    all_results = Parallel(n_jobs=-1, verbose=10)(
-        delayed(process_iteration_wrapper)(iteration)
-        for iteration in range(samplingConfig.bootstrap_iterations)
+    # Prepare arguments for parallel processing
+    iterations = range(samplingConfig.bootstrap_iterations)
+    process_func = partial(
+        process_iteration,
+        parquet_path=parquet_path,
+        sample_processor=sample_processor,
+        genotype_processor=genotype_processor,
+        samplingConfig=samplingConfig,
+        trackingConfig=trackingConfig,
+        stack=stack,
+        random_state=random_state
+    )
+
+    # Use Joblib with Loky backend for parallel processing
+    results = Parallel(n_jobs=-1, backend="loky", verbose=10)(
+        delayed(process_func)(i) for i in tqdm(iterations, desc="Bootstrapping Progress")
     )
 
     logger.info("Completed bootstrapping of models.")
 
     # Convert results to DataFrame
     records = []
-    for result in all_results:
+    for result in results:
         iteration = result["iteration"]
         for model in result["models"]:
             records.append({
@@ -423,7 +373,7 @@ def bootstrap_models(
 
     return pd.DataFrame.from_records(records)
 
-def create_and_log_visualizations(y_true, y_pred, trackingConfig):
+def create_and_log_visualizations(y_true, y_pred, trackingConfig, set="test"):
     """Create and log visualizations directly to MLflow."""
     
     def log_plot(plot_func, artifact_name):
@@ -441,7 +391,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('True Positive Rate')
         ax.set_title(f'ROC Curve\n{trackingConfig.name}')
 
-    log_plot(plot_roc, "plots/roc_curve.png")
+    log_plot(plot_roc, f"plots/{set}/roc_curve.png")
 
     # Precision-Recall Curve
     def plot_pr(ax):
@@ -451,7 +401,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('Precision')
         ax.set_title(f'Precision-Recall Curve\n{trackingConfig.name}')
 
-    log_plot(plot_pr, "plots/pr_curve.png")
+    log_plot(plot_pr, f"plots/{set}/pr_curve.png")
 
     # Distribution of Predictions
     def plot_dist(ax):
@@ -460,7 +410,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('Count')
         ax.set_title(f'Distribution of Predictions\n{trackingConfig.name}')
 
-    log_plot(plot_dist, "plots/pred_distribution.png")
+    log_plot(plot_dist, f"plots/{set}/pred_distribution.png")
 
     # Confusion Matrix
     def plot_cm(ax):
@@ -471,4 +421,4 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig):
         ax.set_ylabel('Actual')
         ax.set_title(f'Confusion Matrix\n{trackingConfig.name}')
 
-    log_plot(plot_cm, "plots/confusion_matrix.png")
+    log_plot(plot_cm, f"plots/{set}/confusion_matrix.png")

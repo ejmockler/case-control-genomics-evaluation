@@ -66,7 +66,7 @@ class Config(BaseModel):
 
 config = Config(
     vcf=VCFConfig(
-        path="../adhoc analysis/whole_genome_merged_no_vqsr_no_annotation_KarenRegions_MICROGLIAL_ANNOTATED.sorted.vcf.gz",
+        path="../adhoc analysis/mock.vcf.gz",
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.025,
@@ -78,10 +78,10 @@ config = Config(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
         filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
     ),
-    gmt=GMTConfig(
-        path="../adhoc analysis/microglial_associated_genes.gmt",
-        filter="",
-    ),
+    # gmt=GMTConfig(
+    #     path="../adhoc analysis/microglial_associated_genes.gmt",
+    #     filter="",
+    # ),
     tracking=TrackingConfig(
         name="NUP variants (rare-binned, rsID only)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
