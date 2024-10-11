@@ -734,7 +734,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
     subtitle += f"Cases: {num_cases}, Controls: {num_controls}"
     if table_name != "crossval":
         subtitle = f"Evaluated on: {table_name}\n{subtitle}"
-    subtitle = "\n{subtitle}"
+    subtitle = f"\n{subtitle}"
 
     # ROC Curve
     def plot_roc(ax):
