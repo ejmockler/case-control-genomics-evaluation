@@ -1,138 +1,167 @@
-from typing import List, Optional, Dict, Union
+from typing import List, Optional, Dict
 from pydantic import BaseModel
 
 
-class VcfLikeConfig(BaseModel):
+class VCFConfig(BaseModel):
     path: str
-    sheet: Optional[str] = None
-    index_column: List[str]
-    gene_multi_index_level: int
-    aggregate_genes_by: Optional[str] = None
-    compound_sample_id_delimiter: str
-    compound_sample_id_start_index: int
-    compound_sample_meta_id_start_index: int
     binarize: bool = False
     zygosity: bool = True
     min_allele_frequency: float = 0.0025
     max_allele_frequency: float = 1.0
     max_variants: Optional[int] = None
-    frequency_match_reference: Optional[str] = None
-    filters: Dict = {}
+    min_variance: float = 0.01
+    filter: str = ""
 
+class GTFConfig(BaseModel):
+    path: str
+    gene_name_field: str = "gene_name"
+    filter: str = ""
+
+class GMTConfig(BaseModel):
+    # requires GTF annotations with a defined gene_name field
+    path: str
+    filter: str = ""
 
 class TrackingConfig(BaseModel):
     name: str
     entity: str
-    project: str
-    plot_all_sample_importances: bool = True
-    remote: bool = False
-
-
-class ClinicalTableConfig(BaseModel):
-    path: str
-    id_column: str
-    subject_id_column: str
-    label_column: str
-    control_labels: List[str]
-    case_labels: List[str]
-    control_alias: str
-    case_alias: str
-    filters: str
-
-
-class ExternalTableMetadata(BaseModel):
-    set_type: str
+    experiment_name: str
+    plot_all_sample_importances: bool = False
+    tracking_uri: str = "http://localhost:5000"
+    
+class TableMetadata(BaseModel):
+    name: str
     path: str
     label: str
     id_column: str
-    filters: str
+    filter: str
+    # Change strata_columns to a mapping from standard strata to table-specific column names
+    strata_mapping: Optional[Dict[str, str]] = None  # e.g., {"sex": "Sex Call", "age": "Age"}
 
-
-class ExternalTablesConfig(BaseModel):
-    holdout_set_names: List[str]
-    metadata: List[ExternalTableMetadata]
-
+class SampleTableConfig(BaseModel):
+    tables: List[TableMetadata]
 
 class SamplingConfig(BaseModel):
     bootstrap_iterations: int = 60
     cross_val_iterations: int = 10
-    last_iteration: int = 0
+    test_size: float = 0.2
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
-
+    feature_confidence_level: float = 0.95
+    # Specify which strata to use for sampling
+    strata: Optional[List[str]] = ["sex"]  # Allowed values: "sex", "age"
 
 class ModelConfig(BaseModel):
     hyperparameter_optimization: bool = True
     calculate_shapely_explanations: bool = False
 
-
 class Config(BaseModel):
-    vcf_like: VcfLikeConfig
+    vcf: VCFConfig
+    gtf: GTFConfig
+    gmt: Optional[GMTConfig] = None  # Add GMTConfig as optional
     tracking: TrackingConfig
-    clinical_table: ClinicalTableConfig
-    external_tables: ExternalTablesConfig
+    crossval_tables: SampleTableConfig
+    holdout_tables: SampleTableConfig
     sampling: SamplingConfig
     model: ModelConfig
 
-
 config = Config(
-    vcf_like=VcfLikeConfig(
-        path="../adhoc analysis/Variant_report_NUPs_fixed_2022-03-28.xlsx",
-        sheet="all cases vs all controls",
-        index_column=["chrom", "position", "rsID", "Gene"],
-        gene_multi_index_level=3,
-        aggregate_genes_by=None,
-        compound_sample_id_delimiter="__",
-        compound_sample_id_start_index=1,
-        compound_sample_meta_id_start_index=1,
+    vcf=VCFConfig(
+        path="../adhoc analysis/mock.vcf.gz",
         binarize=False,
         zygosity=True,
-        min_allele_frequency=0.0025,
+        min_allele_frequency=0.005,
         max_allele_frequency=1.0,
         max_variants=None,
-        frequency_match_reference=None,
-        filters={},
+        filter="",
     ),
+    gtf=GTFConfig(
+        path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
+        filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
+    ),
+    # gmt=GMTConfig(
+    #     path="../adhoc analysis/microglial_associated_genes.gmt",
+    #     filter="",
+    # ),
     tracking=TrackingConfig(
-        name="NUP variants (rare-binned, rsID only)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
+        name="Microglial variants, MAF >= 0.5% (rare-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        project="highReg-l1-NUPs60-aals-rsID-rareBinned-0.0025MAF",
-        plot_all_sample_importances=True,
-        remote=False,
+        experiment_name="microglial60-als-rareBinned-0.005MAF",
+        plot_all_sample_importances=False,
+        tracking_uri="http://127.0.0.1:5000/",
     ),
-    clinical_table=ClinicalTableConfig(
-        path="../adhoc analysis/ACWM.xlsx",
-        id_column="ExternalSampleId",
-        subject_id_column="ExternalSubjectId",
-        label_column="Subject Group",
-        control_labels=["Non-Neurological Control"],
-        case_labels=["ALS Spectrum MND"],
-        control_alias="control",
-        case_alias="case",
-        filters="pct_european>=0.85",
-    ),
-    externa_tables=ExternalTablesConfig(
-        holdout_set_names=[
-            "AnswerALS Cases vs. Controls (Ethnically-Variable)",
-            "Other Neurological Cases vs. Controls (Ethnically-Variable)",
-        ],
-        metadata=[
-            ExternalTableMetadata(
-                set_type="crossval",
+    crossval_tables=SampleTableConfig(
+        tables=[
+            TableMetadata(
+                name="AnswerALS cases, EUR",
+                path="../adhoc analysis/ACWM.xlsx",
+                label="case",
+                id_column="ExternalSampleId",
+                filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`>=0.85",
+                strata_mapping={
+                    "sex": "Sex Call",
+                    # "age": "Age"  # Add if available
+                },
+            ),
+            TableMetadata(
+                name="AnswerALS non-neurological controls, EUR",
+                path="../adhoc analysis/ACWM.xlsx",
+                label="control",
+                id_column="ExternalSampleId",
+                filter="`Subject Group`=='Non-Neurological Control' & `pct_european`>=0.85",
+                strata_mapping={
+                    "sex": "Sex Call",
+                    # "age": "Age"  # Add if available
+                },
+            ),
+            TableMetadata(
+                name="1000 Genomes EUR",
                 path="../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
                 label="control",
                 id_column="Sample name",
-                filters="`Superpopulation code`=='EUR'",
+                filter="`Superpopulation code`=='EUR'",
+                strata_mapping={
+                    "sex": "Sex",
+                    # "age": "Age"  # Include if available
+                },
             ),
-            # ... Include other ExternalTableMetadata instances here
-        ],
+        ]
+    ),
+    holdout_tables=SampleTableConfig(
+        # TODO option to define comparison tables other than crossval
+        tables=[
+            TableMetadata(
+                name="1000 Genomes ethnically-variable, non-EUR",
+                path="../adhoc analysis/igsr-1000 genomes phase 3 release.tsv",
+                label="control",
+                id_column="Sample name",
+                filter="`Superpopulation code`!='EUR'",
+                strata_mapping={
+                    "sex": "Sex",
+                    # "age": "Age"  # Include if available
+                },
+            ),
+            TableMetadata(
+                name="AnswerALS cases, ethnically-variable, non-EUR",
+                path="../adhoc analysis/ACWM.xlsx",
+                label="case",
+                id_column="ExternalSampleId",
+                filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
+                strata_mapping={
+                    "sex": "Sex Call",
+                    # "age": "Age"  # Add if available
+                },
+            ),
+        ]
     ),
     sampling=SamplingConfig(
-        bootstrap_iterations=60,
+        bootstrap_iterations=1,
         cross_val_iterations=10,
-        last_iteration=0,
+        feature_confidence_level=0.95,
+        test_size=0.2,
         sequestered_ids=[],
         shuffle_labels=False,
+        strata=["sex"],  # Define which strata to use
     ),
     model=ModelConfig(
         hyperparameter_optimization=True,

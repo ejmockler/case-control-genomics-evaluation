@@ -160,6 +160,7 @@ mlartifacts/
 *.gz
 *.tbi
 *.bed
+*.parquet
 
 # os
 .DS_Store
