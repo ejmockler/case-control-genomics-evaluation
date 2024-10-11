@@ -9,6 +9,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import BernoulliNB
 from sklearn.svm import SVC
+from lightgbm import LGBMClassifier
 
 from skopt.space import Integer, Real
 
@@ -128,4 +129,7 @@ stack = {
     ): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
     BernoulliNB(): {"alpha": Real(1e-6, 1, prior="log-uniform")},
     SparseBayesianLogisticRegression(): {"num_iterations": Integer(100, 1000), "lr": Real(1e-6, 1e-1, prior="log-uniform")},
+    RadialBasisSVC(): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
+    LinearSVC(): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
+    LGBMClassifier(): {"learning_rate": Real(1e-3, 1e-1, prior="log-uniform"), "max_depth": Integer(3, 10), "n_estimators": Integer(100, 1000)},
 }
