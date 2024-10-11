@@ -47,6 +47,7 @@ class SamplingConfig(BaseModel):
     test_size: float = 0.2
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
+    feature_confidence_level: float = 0.95
     # Specify which strata to use for sampling
     strata: Optional[List[str]] = ["sex"]  # Allowed values: "sex", "age"
 
@@ -156,6 +157,7 @@ config = Config(
     sampling=SamplingConfig(
         bootstrap_iterations=1,
         cross_val_iterations=10,
+        feature_confidence_level=0.95,
         test_size=0.2,
         sequestered_ids=[],
         shuffle_labels=False,
