@@ -1,6 +1,8 @@
 import logging
 from typing import Optional, Tuple
 import os
+from dataclasses import dataclass
+import pandas as pd
 
 # Enable fallback for CPU since Cauchy is not supported on MPS
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
@@ -14,7 +16,6 @@ from pyro.infer import SVI, Trace_ELBO, Predictive
 from pyro.optim import AdamW
 from sklearn.base import BaseEstimator, TransformerMixin
 from torch.utils.data import DataLoader, TensorDataset
-from torch.distributions import kl_divergence
 import mlflow
 from tqdm import tqdm
 import time
@@ -22,6 +23,14 @@ from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks, peak_prominences, peak_widths
 from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
+
+
+@dataclass
+class FeatureSelectionResult:
+    selected_features: pd.Index
+    num_variants: int
+    total_variants: int
+    confidence_level: float
 
 
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
@@ -44,7 +53,6 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         - batch_size: Size of mini-batches for training.
         - verbose: If True, prints training progress.
         - patience: Number of epochs with no improvement before early stopping.
-        - fallback_percentile: Percentile for fallback feature selection.
         - validation_split: Fraction of data to use for validation.
         - checkpoint_path: Path to save model checkpoints.
         """
@@ -56,7 +64,6 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.batch_size = batch_size
         self.verbose = verbose
         self.patience = patience
-        self.fallback_percentile = fallback_percentile
         self.validation_split = validation_split
         self.checkpoint_path = checkpoint_path
         

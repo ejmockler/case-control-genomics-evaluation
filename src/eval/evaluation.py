@@ -31,7 +31,7 @@ from mlflow.tracking import MlflowClient
 from config import SamplingConfig, TrackingConfig
 from data.genotype_processor import GenotypeProcessor
 from data.sample_processor import SampleProcessor
-from eval.feature_selection import BayesianFeatureSelector
+from eval.feature_selection import BayesianFeatureSelector, FeatureSelectionResult
 
 def get_feature_importances(model, feature_labels):
     """Get feature importances from fitted model."""
@@ -135,7 +135,7 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
     if model_coefficient_df is not None:
         mlflow.log_table(data=model_coefficient_df, artifact_file=sanitize_mlflow_name("feature_importances.json"))
 
-def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, genotype_processor: GenotypeProcessor, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=10, is_worker=True):
+def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=10, is_worker=True, num_variants: int = None, total_variants: int = None, confidence_level: float = None):
     """Perform Bayesian hyperparameter optimization for a model and evaluate on holdout samples."""
     try:
         pipeline = Pipeline([
@@ -208,20 +208,26 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, genot
                 trackingConfig
             )
 
-            # Updated calls with sanitized table_name
+            # Pass the feature selection metrics to the visualization function
             create_and_log_visualizations(
                 y_test,
                 y_pred_test,
                 trackingConfig,
                 set_type="test",
-                table_name="crossval"  # Default table name for cross-validation
+                table_name="crossval",  # Default table name for cross-validation
+                num_variants=num_variants,
+                total_variants=total_variants,
+                confidence_level=confidence_level
             )
             create_and_log_visualizations(
                 y_train,
                 y_pred_train,
                 trackingConfig,
                 set_type="train",
-                table_name="crossval"  # Default table name for cross-validation
+                table_name="crossval",  # Default table name for cross-validation
+                num_variants=num_variants,
+                total_variants=total_variants,
+                confidence_level=confidence_level
             )
 
             # --- Holdout Evaluation ---
@@ -284,13 +290,16 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, genot
                     artifact_file=sanitize_mlflow_name(f"holdout/{table_name}_sample_metrics.json")
                 )
 
-                # Log holdout visualizations with actual table_name
+                # Log holdout visualizations with actual table_name and feature selection metrics
                 create_and_log_visualizations(
                     y_holdout,
                     y_pred_holdout,
                     trackingConfig,
                     set_type="holdout",
-                    table_name=table_name  # Actual holdout table name
+                    table_name=table_name,  # Actual holdout table name
+                    num_variants=num_variants,
+                    total_variants=total_variants,
+                    confidence_level=confidence_level
                 )
 
             logger.info("Completed holdout evaluation.")
@@ -333,6 +342,139 @@ def prepare_data(parquet_path: str, sample_processor, train_samples, test_sample
     y_test = y_test.loc[X_test.index]
 
     return X_train, X_test, y_train, y_test
+
+def process_iteration(
+    iteration: int,
+    parquet_path: str,
+    sample_processor: SampleProcessor,
+    genotype_processor: GenotypeProcessor,
+    samplingConfig: SamplingConfig,
+    trackingConfig: TrackingConfig,
+    stack: Dict,
+    selected_features: pd.Index,
+    num_variants: int,
+    total_variants: int,
+    confidence_level: float,
+    random_state: int,
+) -> Dict:
+    """
+    Process a single bootstrap iteration using the selected features and feature selection metrics.
+    """
+    logger = logging.getLogger(f"bootstrap_iteration_{iteration}")
+    logger.info(f"Bootstrapping iteration {iteration + 1}/{samplingConfig.bootstrap_iterations}")
+
+    # Set up MLflow tracking
+    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
+    mlflow.set_experiment(trackingConfig.experiment_name)
+    
+    train_test_sample_ids = sample_processor.draw_train_test_split(
+        test_size=samplingConfig.test_size,
+        random_state=random_state + iteration
+    )
+
+    train_samples = list(train_test_sample_ids['train']['samples'].values())
+    test_samples = list(train_test_sample_ids['test']['samples'].values())
+    
+    # Prepare data by reading from Parquet with selected features
+    X_train, X_test, y_train, y_test = prepare_data(
+        parquet_path=parquet_path,
+        sample_processor=sample_processor,
+        train_samples=train_samples,
+        test_samples=test_samples,
+        selected_features=selected_features.tolist()
+    )
+
+    with mlflow.start_run(run_name=f"Bootstrap_{iteration}", nested=True) as parent_run:
+        mlflow.log_param("iteration", iteration)
+        mlflow.log_param("random_state", random_state + iteration)
+        mlflow.log_param("num_selected_features", len(selected_features))
+        mlflow.log_param("total_features", total_variants)
+        mlflow.log_param("confidence_level", confidence_level)
+
+        iteration_results = {
+            "iteration": iteration,
+            "models": []
+        }
+
+        # Iterate over each model in the stack and evaluate
+        for model, search_spaces in stack.items():
+            model_name = model.__class__.__name__
+            logger.info(f"Evaluating model: {model_name}")
+
+            metrics, y_pred_test, y_pred_train, best_params, child_run_id = evaluate_model(
+                model=model,
+                search_spaces=search_spaces,
+                X_train=X_train,
+                y_train=y_train,
+                X_test=X_test,
+                y_test=y_test,
+                trackingConfig=trackingConfig,
+                sample_processor=sample_processor,
+                n_iter=10,
+                is_worker=True,
+                num_variants=num_variants,
+                total_variants=total_variants,
+                confidence_level=confidence_level
+            )
+
+            mlflow.log_metric(f"{model_name}_test_auc", metrics['aggregate']['test']['auc'])
+            mlflow.log_metric(f"{model_name}_test_f1", metrics['aggregate']['test']['f1'])
+            mlflow.log_param(f"{model_name}_run_id", child_run_id)
+
+            iteration_results["models"].append({
+                "model_name": model_name,
+                "test_auc": metrics['aggregate']['test']['auc'],
+                "test_f1": metrics['aggregate']['test']['f1'],
+                "best_params": best_params,
+                "run_id": child_run_id
+            })
+
+    return iteration_results
+
+def parallel_feature_selection(
+    parquet_path: str,
+    sample_processor: SampleProcessor,
+    samplingConfig: SamplingConfig,
+    num_iterations: int = 1,
+    total_variants: int = None,
+    random_state: int = 42,
+    trackingConfig: TrackingConfig = None
+) -> FeatureSelectionResult:
+    """
+    Run feature selection in parallel over multiple splits and collect overlapping features.
+
+    Returns:
+        FeatureSelectionResult: Encapsulates selected features and related metrics.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("Starting parallel feature selection.")
+
+    # Perform feature selection iterations
+    selected_features_list = Parallel(n_jobs=1, backend="loky", verbose=10)(
+        delayed(feature_selection_iteration)(i, parquet_path, sample_processor, samplingConfig, random_state, trackingConfig)
+        for i in range(num_iterations)
+    )
+
+    logger.info("Completed parallel feature selection.")
+
+    # Combine selected features from all iterations
+    feature_counts = pd.Series(np.concatenate(selected_features_list)).value_counts()
+
+    # Determine overlapping features using a statistical threshold
+    threshold = np.ceil(num_iterations * 0.25)  # e.g., features selected in at least 25% of iterations
+    overlapping_features = feature_counts[feature_counts >= threshold].index
+
+    num_variants = len(overlapping_features)
+    confidence_level = samplingConfig.feature_confidence_level  # Assuming this is defined in your config
+
+    logger.info(f"{num_variants} of {total_variants} variants selected at {confidence_level*100:.2f}% credible interval.")
+
+    return FeatureSelectionResult(
+        selected_features=overlapping_features,
+        num_variants=num_variants,
+        total_variants=total_variants,
+        confidence_level=samplingConfig.feature_confidence_level
+    )
 
 def feature_selection_iteration(
     iteration: int,
@@ -385,7 +527,6 @@ def feature_selection_iteration(
                     confidence_level=0.0005,
                     num_samples=2000,
                     patience=800,
-                    fallback_percentile=95,
                     validation_split=0.2,
                     batch_size=512,
                     verbose=True,
@@ -427,130 +568,6 @@ def feature_selection_iteration(
             mlflow.log_text(str(e), artifact_file="errors/feature_selection_error.txt")
             # Re-raise the exception to be handled by the calling function
             raise e
-
-def parallel_feature_selection(
-    parquet_path: str,
-    sample_processor: SampleProcessor,
-    samplingConfig: SamplingConfig,
-    num_iterations: int = 1,
-    random_state: int = 42,
-    trackingConfig: TrackingConfig = None
-) -> pd.Index:
-    """
-    Run feature selection in parallel over multiple splits and collect overlapping features.
-    """
-    logger = logging.getLogger(__name__)
-    logger.info("Starting parallel feature selection.")
-
-    # Prepare arguments for parallel processing
-    iterations = range(num_iterations)
-    process_func = partial(
-        feature_selection_iteration,
-        parquet_path=parquet_path,
-        sample_processor=sample_processor,
-        samplingConfig=samplingConfig,
-        random_state=random_state,
-        trackingConfig=trackingConfig
-    )
-
-    # Use Joblib for parallel processing
-    selected_features_list = Parallel(n_jobs=1, backend="loky", verbose=10)(
-        delayed(process_func)(i) for i in tqdm(iterations, desc="Feature Selection Progress")
-    )
-
-    logger.info("Completed parallel feature selection.")
-
-    # Combine selected features from all iterations
-    feature_counts = pd.Series(np.concatenate(selected_features_list)).value_counts()
-
-    # Determine overlapping features using a statistical threshold
-    # For soft overlap, select features that appear in at least a certain fraction of iterations
-    threshold = num_iterations * 0.5  # e.g., features selected in at least 50% of iterations
-    overlapping_features = feature_counts[feature_counts >= threshold].index
-
-    logger.info(f"Number of overlapping features selected: {len(overlapping_features)}")
-
-    return overlapping_features
-
-def process_iteration(
-    iteration: int,
-    parquet_path: str,
-    sample_processor: SampleProcessor,
-    genotype_processor: GenotypeProcessor,
-    samplingConfig: SamplingConfig,
-    trackingConfig: TrackingConfig,
-    stack: Dict,
-    selected_features: pd.Index,
-    random_state: int,
-) -> Dict:
-    """
-    Process a single bootstrap iteration using the selected features.
-    """
-    logger = logging.getLogger(f"bootstrap_iteration_{iteration}")
-    logger.info(f"Bootstrapping iteration {iteration + 1}/{samplingConfig.bootstrap_iterations}")
-
-    # Set up MLflow tracking
-    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
-    mlflow.set_experiment(trackingConfig.experiment_name)
-    
-    train_test_sample_ids = sample_processor.draw_train_test_split(
-        test_size=samplingConfig.test_size,
-        random_state=random_state + iteration
-    )
-
-    train_samples = list(train_test_sample_ids['train']['samples'].values())
-    test_samples = list(train_test_sample_ids['test']['samples'].values())
-    
-    # Prepare data by reading from Parquet with selected features
-    X_train, X_test, y_train, y_test = prepare_data(
-        parquet_path=parquet_path,
-        sample_processor=sample_processor,
-        train_samples=train_samples,
-        test_samples=test_samples,
-        selected_features=selected_features.tolist()
-    )
-
-    with mlflow.start_run(run_name=f"Bootstrap_{iteration}", nested=True) as parent_run:
-        mlflow.log_param("iteration", iteration)
-        mlflow.log_param("random_state", random_state + iteration)
-        mlflow.log_param("num_selected_features", len(selected_features))
-
-        iteration_results = {
-            "iteration": iteration,
-            "models": []
-        }
-
-        # Iterate over each model in the stack and evaluate
-        for model, search_spaces in stack.items():
-            model_name = model.__class__.__name__
-            logger.info(f"Evaluating model: {model_name}")
-
-            metrics, y_pred_test, y_pred_train, best_params, child_run_id = evaluate_model(
-                model=model,
-                search_spaces=search_spaces,
-                X_train=X_train,
-                y_train=y_train,
-                X_test=X_test,
-                y_test=y_test,
-                trackingConfig=trackingConfig,
-                genotype_processor=genotype_processor,
-                sample_processor=sample_processor,
-                n_iter=10
-            )
-
-            mlflow.log_metric(f"{model_name}_test_auc", metrics['aggregate']['test']['auc'])
-            mlflow.log_metric(f"{model_name}_test_f1", metrics['aggregate']['test']['f1'])
-            mlflow.log_param(f"{model_name}_run_id", child_run_id)
-
-            iteration_results["models"].append({
-                "model_name": model_name,
-                "test_auc": metrics['aggregate']['test']['auc'],
-                "test_f1": metrics['aggregate']['test']['f1'],
-                "best_params": best_params,
-                "run_id": child_run_id
-            })
-
-    return iteration_results
 
 def bootstrap_models(
     sample_processor: SampleProcessor,
@@ -599,18 +616,26 @@ def bootstrap_models(
     logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
     pivoted_df.write.parquet(parquet_path, mode="overwrite")
 
+    total_variant_count = len(pivoted_df.columns)
+
     # Force execution of Hail operations and close the Hail context
     hl.stop()
 
-    # Run parallel feature selection
-    selected_features = parallel_feature_selection(
+    # Feature Selection Step
+    feature_selection_result = parallel_feature_selection(
         parquet_path=parquet_path,
         sample_processor=sample_processor,
         samplingConfig=samplingConfig,
         num_iterations=1,  # Number of parallel feature selection iterations
+        total_variants=total_variant_count,
         random_state=random_state,
         trackingConfig=trackingConfig
     )
+
+    selected_features = feature_selection_result.selected_features
+    num_variants = feature_selection_result.num_variants
+    total_variants = feature_selection_result.total_variants
+    confidence_level = feature_selection_result.confidence_level
 
     # Prepare arguments for parallel processing of bootstrap iterations
     iterations = range(samplingConfig.bootstrap_iterations)
@@ -623,6 +648,9 @@ def bootstrap_models(
         trackingConfig=trackingConfig,
         stack=stack,
         selected_features=selected_features,
+        num_variants=num_variants,
+        total_variants=total_variants,
+        confidence_level=confidence_level,
         random_state=random_state
     )
 
@@ -649,8 +677,20 @@ def bootstrap_models(
 
     return pd.DataFrame.from_records(records)
 
-def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test", table_name="crossval"):
-    """Create and log visualizations directly to MLflow."""
+def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, confidence_level=None):
+    """
+    Create and log visualizations directly to MLflow.
+    
+    Args:
+        y_true (array-like): True labels.
+        y_pred (array-like): Predicted probabilities.
+        trackingConfig (TrackingConfig): Configuration for tracking.
+        set_type (str, optional): Type of dataset ('test', 'train', 'holdout'). Defaults to "test".
+        table_name (str, optional): Name of the table. Defaults to "crossval".
+        num_variants (int, optional): Number of selected features. Defaults to None.
+        total_variants (int, optional): Total number of features before selection. Defaults to None.
+        confidence_level (float, optional): Confidence level used in feature selection. Defaults to None.
+    """
     logger = logging.getLogger(__name__)
     
     # Sanitize set_type and table_name once
@@ -658,7 +698,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
     sanitized_table_name = sanitize_mlflow_name(table_name) if table_name != "crossval" else ""
     
     # Construct base paths
-    base_metrics_path = f"metrics/{sanitized_set_type}"
+    base_metrics_path = f"{sanitized_set_type}"
     base_plots_path = f"plots/{sanitized_set_type}"
     
     if sanitized_table_name:
@@ -674,7 +714,14 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
         plt.close(fig)
         return result
 
-    # Log number of cases and controls
+    # Construct the subtitle with feature selection info if available
+    if num_variants is not None and total_variants is not None and confidence_level is not None:
+        subtitle = (f"{num_variants} of {total_variants} variants selected at "
+                    f"{confidence_level*100:.0f}% credible interval\n")
+    else:
+        subtitle = ""
+    
+    # Existing subtitle information
     num_cases = np.sum(y_true != 0)
     num_controls = np.sum(y_true == 0)
     metrics = {
@@ -683,10 +730,11 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
     }
     mlflow.log_metrics(metrics)
 
-    # Create a subtitle with case/control counts and table name if applicable
-    subtitle = f"Cases: {num_cases}, Controls: {num_controls}"
+    # Append to the subtitle
+    subtitle += f"Cases: {num_cases}, Controls: {num_controls}"
     if table_name != "crossval":
         subtitle = f"Evaluated on: {table_name}\n{subtitle}"
+    subtitle = f"\n{subtitle}"
 
     # ROC Curve
     def plot_roc(ax):
