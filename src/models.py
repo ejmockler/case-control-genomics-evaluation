@@ -50,43 +50,6 @@ class RadialBasisSVC(SVC):
             random_state=random_state
         )
 
-class LinearSVC(SVC):
-    def __init__(
-        self,
-        C=1.0,
-        kernel="linear",
-        degree=3,
-        gamma="scale",
-        coef0=0.0,
-        shrinking=True,
-        probability=False,
-        tol=1e-3,
-        cache_size=200,
-        class_weight=None,
-        verbose=False,
-        max_iter=-1,
-        decision_function_shape="ovr",
-        break_ties=False,
-        random_state=None
-    ):
-        super().__init__(
-            C=C,
-            kernel=kernel,
-            degree=degree,
-            gamma=gamma,
-            coef0=coef0,
-            shrinking=shrinking,
-            probability=probability,
-            tol=tol,
-            cache_size=cache_size,
-            class_weight=class_weight,
-            verbose=verbose,
-            max_iter=max_iter,
-            decision_function_shape=decision_function_shape,
-            break_ties=break_ties,
-            random_state=random_state
-        )
-
 class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
     def __init__(self, num_iterations=1000, lr=0.01, verbose=False):
         self.num_iterations = num_iterations
@@ -195,7 +158,6 @@ stack = {
     ): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
     BernoulliNB(): {"alpha": Real(1e-6, 1, prior="log-uniform")},
     SparseBayesianLogisticRegression(): {"num_iterations": Integer(100, 1000), "lr": Real(1e-6, 1e-1, prior="log-uniform")},
-    RadialBasisSVC(): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
-    LinearSVC(): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
+    RadialBasisSVC(probability=True): {"C": Real(1e-14, 1e-7, prior="log-uniform")},
     LGBMClassifier(): {"learning_rate": Real(1e-3, 1e-1, prior="log-uniform"), "max_depth": Integer(3, 10), "n_estimators": Integer(100, 1000)},
 }

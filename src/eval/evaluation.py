@@ -68,15 +68,20 @@ def calculate_metrics(y_true, y_pred):
     # Calculate aggregate metrics
     if len(np.unique(y_true)) > 1:
         auc = roc_auc_score(y_true, y_pred)
+        precision = precision_score(y_true, y_pred_binary, average='binary')
+        recall = recall_score(y_true, y_pred_binary, average='binary')
+    
     else:
         auc = None
+        precision = None
+        recall = None
     
     aggregate_metrics = {
         "auc": auc,
         "mcc": matthews_corrcoef(y_true, y_pred_binary),
         "f1": f1_score(y_true, y_pred_binary),
-        "precision": precision_score(y_true, y_pred_binary, average='binary'),
-        "recall": recall_score(y_true, y_pred_binary, average='binary')
+        "precision": precision,
+        "recall": recall
     }
     
     # Combine sample-wise and aggregate metrics
@@ -746,6 +751,16 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
         ax.set_title(f'ROC Curve\n{trackingConfig.name}\n{subtitle}')
         ax.legend()
         return fpr, tpr, thresholds
+    
+    # Precision-Recall Curve
+    def plot_pr(ax):
+        precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
+        ax.plot(recall, precision, label='Precision-Recall Curve')
+        ax.set_xlabel('Recall')
+        ax.set_ylabel('Precision')
+        ax.set_title(f'Precision-Recall Curve\n{trackingConfig.name}\n{subtitle}')
+        ax.legend()
+        return precision, recall, thresholds
 
     if len(np.unique(y_true)) > 1:
         roc_result = log_plot(plot_roc, "roc_curve.png")
@@ -762,33 +777,23 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
                 f"{base_metrics_path}/roc_tpr_mean": float(np.mean(tpr)),
                 f"{base_metrics_path}/roc_thresholds_mean": float(np.mean(thresholds))
             })
-    else:
-        logger.warning(f"Not enough unique values in y_true to compute ROC curve for {base_metrics_path}")
 
-    # Precision-Recall Curve
-    def plot_pr(ax):
-        precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
-        ax.plot(recall, precision, label='Precision-Recall Curve')
-        ax.set_xlabel('Recall')
-        ax.set_ylabel('Precision')
-        ax.set_title(f'Precision-Recall Curve\n{trackingConfig.name}\n{subtitle}')
-        ax.legend()
-        return precision, recall, thresholds
-    
-    pr_result = log_plot(plot_pr, "pr_curve.png")
-    if pr_result:
-        precision, recall, thresholds = pr_result
-        pr_df = pd.DataFrame({
-            'precision': precision,
-            'recall': recall,
-            'thresholds': np.append(thresholds, np.nan)  # Add NaN to match length of precision/recall
-        })
-        mlflow.log_table(pr_df, f"{base_metrics_path}/pr_curve.json")
-        mlflow.log_metrics({
-            f"{base_metrics_path}/pr_precision_mean": float(np.mean(precision)),
-            f"{base_metrics_path}/pr_recall_mean": float(np.mean(recall)),
-            f"{base_metrics_path}/pr_thresholds_mean": float(np.mean(thresholds))
-        })
+            pr_result = log_plot(plot_pr, "pr_curve.png")
+            if pr_result:
+                precision, recall, thresholds = pr_result
+                pr_df = pd.DataFrame({
+                    'precision': precision,
+                    'recall': recall,
+                    'thresholds': np.append(thresholds, np.nan)  # Add NaN to match length of precision/recall
+                })
+                mlflow.log_table(pr_df, f"{base_metrics_path}/pr_curve.json")
+                mlflow.log_metrics({
+                    f"{base_metrics_path}/pr_precision_mean": float(np.mean(precision)),
+                    f"{base_metrics_path}/pr_recall_mean": float(np.mean(recall)),
+                    f"{base_metrics_path}/pr_thresholds_mean": float(np.mean(thresholds))
+                })
+    else:
+        logger.warning(f"Not enough unique values in y_true to compute ROC & precision-recall for {base_metrics_path}")
 
     # Distribution of Predictions
     def plot_dist(ax):
