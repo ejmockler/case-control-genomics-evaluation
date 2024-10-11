@@ -14,6 +14,11 @@ def main():
     # Initialize Hail
     hl.init(
         default_reference='GRCh38',
+        spark_conf={
+            'spark.driver.memory': '8g',
+            'spark.executor.memory': '8g',
+            'spark.executor.cores': '4',
+        }
     )
 
     try:
@@ -36,7 +41,7 @@ def main():
             gmt_df = gmt_loader.load_data()
             logger.info("GMT data loaded successfully.")
         else:
-            logger.warning("No GMT configuration found. Skipping GMT-based filtering.")
+            logger.warning("No GMT configuration found. Skipping gene set filtering.")
             gmt_df = None
 
         # Initialize GenotypeProcessor
@@ -66,15 +71,15 @@ def main():
         # Log the aggregated results
         logger.info("Aggregated Bootstrapping Results:")
         for index, row in results_df.iterrows():
-            logger.info(f"Iteration {row['iteration']}: Model {row['model']} achieved AUC {row['best_auc']} with params {row['best_params']}")
+            logger.info(f"Iteration {row['iteration']}: Model {row['model_name']} achieved AUC {row['test_auc']} with params {row['best_params']}")
 
-        # Optionally, save the results to a CSV file
-        if hasattr(config, 'output') and hasattr(config.output, 'results_csv'):
-            results_file = config.output.results_csv
-            logger.info(f"Saving results to {results_file}")
-            results_df.to_csv(results_file, index=False)
-        else:
-            logger.warning("Output path for results CSV not found in configuration. Skipping saving results.")
+        # # Optionally, save the results to a CSV file
+        # if hasattr(config, 'output') and hasattr(config.output, 'results_csv'):
+        #     results_file = config.output.results_csv
+        #     logger.info(f"Saving results to {results_file}")
+        #     results_df.to_csv(results_file, index=False)
+        # else:
+        #     logger.warning("Output path for results CSV not found in configuration. Skipping saving results.")
 
     except Exception as e:
         logger.error(f"An error occurred during data processing: {e}")

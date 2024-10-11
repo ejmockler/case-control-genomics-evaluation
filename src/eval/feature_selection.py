@@ -2,6 +2,9 @@ import logging
 from typing import Optional, Tuple
 import os
 
+# Enable fallback for CPU since Cauchy is not supported on MPS
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
 import numpy as np
 import pandas as pd
 import torch
@@ -19,44 +22,6 @@ from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks, peak_prominences, peak_widths
 from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
-
-
-# Enable fallback for CPU since Cauchy is not supported on MPS
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-
-
-class ExtendedTrace_ELBO_With_KL(Trace_ELBO):
-    """
-    Custom ELBO that includes a KL divergence term to a reference distribution.
-    This helps in regularizing the posterior to stay close to the reference,
-    which can capture feature correlations.
-    """
-    def __init__(self, ref_dist=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.ref_dist = ref_dist  # Reference distribution for KL divergence
-
-    def loss(self, model, guide, *args, **kwargs):
-        """
-        Computes the loss as the standard ELBO plus the KL divergence to the reference distribution.
-        """
-        # Compute the standard ELBO loss
-        elbo_loss = super().loss(model, guide, *args, **kwargs)
-        kl_divergence_value = 0.0
-        try:
-            # Retrieve the variational parameters for beta
-            beta_loc = pyro.param("beta_loc")
-            beta_scale_diag = pyro.param("beta_scale_diag")
-            beta_cov = torch.diag(beta_scale_diag ** 2)
-            posterior_dist = dist.MultivariateNormal(beta_loc, covariance_matrix=beta_cov)
-            
-            if self.ref_dist is not None:
-                # Compute KL divergence between posterior and reference distribution
-                kl_divergence_value = kl_divergence(posterior_dist, self.ref_dist).sum()
-        except KeyError:
-            # Parameters might not be initialized yet
-            pass
-        # Total loss is ELBO loss plus KL divergence
-        return elbo_loss + kl_divergence_value
 
 
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
@@ -82,8 +47,8 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         - fallback_percentile: Percentile for fallback feature selection.
         - validation_split: Fraction of data to use for validation.
         - checkpoint_path: Path to save model checkpoints.
-        - ref_dist: Reference distribution for the KL divergence term.
         """
+        self.logger = logging.getLogger(__name__)
         self.num_iterations = num_iterations
         self.lr = lr
         self.confidence_level = confidence_level
@@ -94,8 +59,16 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.fallback_percentile = fallback_percentile
         self.validation_split = validation_split
         self.checkpoint_path = checkpoint_path
-        self.ref_dist = ref_dist
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Set the device based on availability
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+        
+        self.logger.info(f"Using device: {self.device}")
 
     def fit(self, X, y):
         """
@@ -114,18 +87,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         y_tensor = torch.tensor(y.values if hasattr(y, 'values') else y, 
                                 dtype=torch.float32, device=self.device)
 
-        if self.ref_dist is None:
-            # Compute the empirical covariance matrix directly from X_tensor
-            cov_tensor = torch.cov(X_tensor.T)
-            
-            # Regularize the covariance matrix by adding a small value to the diagonal
-            epsilon = 1e-6
-            cov_tensor += epsilon * torch.eye(cov_tensor.shape[0], device=self.device)
-
-            # Define the reference distribution as a Multivariate Normal
-            self.ref_dist = dist.MultivariateNormal(loc=torch.zeros(X_tensor.shape[1], device=self.device), 
-                                                    covariance_matrix=cov_tensor)
-
+       
         # Split data into training and validation sets
         split_idx = int(X_tensor.size(0) * (1 - self.validation_split))
         X_train, X_val = X_tensor[:split_idx], X_tensor[split_idx:]
@@ -139,104 +101,65 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
 
         # Define the Bayesian model
         def model(X_batch, y_batch):
-            """
-            Bayesian logistic regression model with sparsity-inducing priors.
-
-            Parameters:
-            - X_batch: Batch of input features.
-            - y_batch: Batch of target values.
-            """
-            B, D = X_batch.size(0), X_batch.size(1)  # Number of features
-
-            # Global sparsity parameter (scalar)
-            tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=torch.tensor(1.0, device=self.device)))
+            B, D = X_batch.size(0), X_batch.size(1)
             
-            # Local sparsity parameters for each feature
-            with pyro.plate('features', D):
-                lam = pyro.sample('lam', dist.HalfCauchy(scale=torch.ones(D, device=self.device)))
+            # Global sparsity parameter
+            tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
+            
+            # Local sparsity parameters
+            lam = pyro.sample('lam', dist.HalfCauchy(scale=torch.ones(D, device=self.device)).to_event(1))
             
             # Scale for beta coefficients
             sigma = lam * tau_0  # Shape: [D]
             
-            # Construct a diagonal covariance matrix for beta
-            beta_cov = torch.diag(sigma ** 2)  # Shape: [D, D]
-            
             # Sample beta coefficients with sparsity
-            beta = pyro.sample('beta', dist.MultivariateNormal(
-                loc=torch.zeros(D, device=self.device), 
-                covariance_matrix=beta_cov
-            ))  # Shape: [D]
+            beta = pyro.sample('beta', dist.Normal(
+                loc=torch.zeros(D, device=self.device),
+                scale=sigma
+            ).to_event(1))  # Event dimension is now 1
             
             # Sample intercept
             intercept = pyro.sample('intercept', dist.Normal(0., 10.))
             
-            # Check if there is an extra dimension in beta (i.e., multiple posterior samples)
-            if beta.dim() == 2:  # beta.shape: (num_samples, D)
-                # Expand X_batch to match beta's sample dimension
-                X_batch = X_batch.unsqueeze(0)  # X_batch shape: (1, batch_size, D)
-                intercept = intercept.unsqueeze(-1).unsqueeze(-1)  # intercept shape: (num_samples, 1, 1)
-                
-                # Compute logits: shape (num_samples, batch_size)
-                logits = intercept + (X_batch * beta.unsqueeze(1)).sum(-1)
-                
-                # Expand y_batch to match the sample dimension: shape (1, batch_size)
-                y_batch = y_batch.unsqueeze(0)
-                
-                # Handle observation likelihood with multiple samples
-                with pyro.plate('data', size=B):
-                    pyro.sample('obs', dist.Bernoulli(logits=logits).to_event(1), obs=y_batch)
-            else:
-                # Single sample case: beta.shape: (D,)
-                logits = intercept + X_batch.matmul(beta)  # shape: (batch_size,)
+            # Compute logits
+            logits = intercept + X_batch.matmul(beta)
+            
+            # Observation likelihood
+            with pyro.plate('data', B):
+                pyro.sample('obs', dist.Bernoulli(logits=logits), obs=y_batch)
 
-                # Handle observation likelihood for single sample
-                with pyro.plate('data', size=B):
-                    pyro.sample('obs', dist.Bernoulli(logits=logits).to_event(1), obs=y_batch)
 
 
         # Define the guide (variational distribution)
         def guide(X_batch, y_batch):
-            """
-            Guide function for variational inference.
-
-            Parameters:
-            - X_batch: Batch of input features.
-            - y_batch: Batch of target values.
-            """
             D = X_batch.size(1)
-
+            
             # Variational parameters for tau_0
             tau_loc = pyro.param('tau_loc', torch.tensor(0.0, device=self.device))
-            tau_scale = pyro.param('tau_scale', torch.tensor(1.0, device=self.device), 
-                                   constraint=dist.constraints.positive)
+            tau_scale = pyro.param('tau_scale', torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
             tau_0 = pyro.sample('tau_0', dist.LogNormal(tau_loc, tau_scale))
             
             # Variational parameters for lam
             lam_loc = pyro.param('lam_loc', torch.zeros(D, device=self.device))
-            lam_scale = pyro.param('lam_scale', torch.ones(D, device=self.device), 
-                                   constraint=dist.constraints.positive)
-            with pyro.plate('features', D):
-                lam = pyro.sample('lam', dist.LogNormal(lam_loc, lam_scale))
+            lam_scale = pyro.param('lam_scale', torch.ones(D, device=self.device), constraint=dist.constraints.positive)
+            lam = pyro.sample('lam', dist.LogNormal(lam_loc, lam_scale).to_event(1))
             
-            # Variational parameters for beta
+            # Variational parameters for beta (mean-field approximation)
             beta_loc = pyro.param('beta_loc', torch.zeros(D, device=self.device))
-            beta_scale_diag = pyro.param('beta_scale_diag', torch.ones(D, device=self.device), 
-                                        constraint=dist.constraints.positive)
-            beta_cov = torch.diag(beta_scale_diag ** 2)  # Shape: [D, D]
-            pyro.sample('beta', dist.MultivariateNormal(beta_loc, covariance_matrix=beta_cov))
+            beta_scale = pyro.param('beta_scale', torch.ones(D, device=self.device), constraint=dist.constraints.positive)
+            beta = pyro.sample('beta', dist.Normal(beta_loc, beta_scale).to_event(1))  # Event dimension is now 1
             
             # Variational parameters for intercept
             intercept_loc = pyro.param('intercept_loc', torch.tensor(0.0, device=self.device))
-            intercept_scale = pyro.param('intercept_scale', torch.tensor(1.0, device=self.device), 
-                                         constraint=dist.constraints.positive)
+            intercept_scale = pyro.param('intercept_scale', torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
             pyro.sample('intercept', dist.Normal(intercept_loc, intercept_scale))
+
+
 
         # Initialize the optimizer
         optimizer = AdamW({"lr": self.lr})
-        # Initialize the custom ELBO with KL divergence
-        elbo = ExtendedTrace_ELBO_With_KL(ref_dist=self.ref_dist)
         # Set up the SVI object
-        svi = SVI(model, guide, optimizer, loss=elbo)
+        svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
         # Clear previous parameter store
         pyro.clear_param_store()
 
@@ -462,7 +385,7 @@ def detect_data_threshold(
     plot: bool = False,
     logger: Optional[logging.Logger] = None,
     fallback_percentile: float = 95,
-    max_modes: int = 5
+    max_modes: int = 100
 ) -> float:
     if logger is None:
         logger = logging.getLogger(__name__)

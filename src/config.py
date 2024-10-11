@@ -69,7 +69,7 @@ config = Config(
         path="../adhoc analysis/mock.vcf.gz",
         binarize=False,
         zygosity=True,
-        min_allele_frequency=0.025,
+        min_allele_frequency=0.005,
         max_allele_frequency=1.0,
         max_variants=None,
         filter="",
@@ -83,9 +83,9 @@ config = Config(
     #     filter="",
     # ),
     tracking=TrackingConfig(
-        name="NUP variants (rare-binned, rsID only)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
+        name="Microglial variants, MAF >= 0.5% (rare-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        experiment_name="highReg-l1-NUPs60-aals-rsID-rareBinned-0.0025MAF",
+        experiment_name="microglial60-als-rareBinned-0.005MAF",
         plot_all_sample_importances=False,
         tracking_uri="http://127.0.0.1:5000/",
     ),
@@ -154,7 +154,7 @@ config = Config(
         ]
     ),
     sampling=SamplingConfig(
-        bootstrap_iterations=60,
+        bootstrap_iterations=1,
         cross_val_iterations=10,
         test_size=0.2,
         sequestered_ids=[],
