@@ -13,6 +13,7 @@ from joblib import Parallel, delayed
 from mlflow.models import infer_signature
 from skopt import BayesSearchCV
 from sklearn.metrics import (
+    average_precision_score,
     confusion_matrix,
     precision_recall_curve,
     roc_auc_score,
@@ -115,7 +116,7 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
     """Log metrics, artifacts, and visualizations to MLflow."""
     signature = infer_signature(X_test, y_pred_test)
     
-    # mlflow.log_params(best_params)
+    mlflow.log_params(model.get_params())
     
     # Log train and test aggregate metrics
     for dataset in ['train', 'test']:
@@ -140,7 +141,7 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
     if model_coefficient_df is not None:
         mlflow.log_table(data=model_coefficient_df, artifact_file=sanitize_mlflow_name("feature_importances.json"))
 
-def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=10, is_worker=True, num_variants: int = None, total_variants: int = None, confidence_level: float = None):
+def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=15, is_worker=True, num_variants: int = None, total_variants: int = None, confidence_level: float = None):
     """Perform Bayesian hyperparameter optimization for a model and evaluate on holdout samples."""
     try:
         pipeline = Pipeline([
@@ -154,7 +155,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
             pipeline,
             search_spaces,
             n_iter=n_iter,
-            cv=3,
+            cv=5,
             n_jobs=1 if is_worker else -1,
             scoring='roc_auc'
         )
@@ -195,7 +196,6 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
 
         # Start a run for this model evaluation
         with mlflow.start_run(run_name=f"{model.__class__.__name__}", nested=True) as run:
-            mlflow.log_params(model.get_params())
             mlflow.set_tag("model", model.__class__.__name__)
             
             log_mlflow_metrics(
@@ -256,7 +256,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
 
                 # Fetch genotypes for these samples
                 _, X_holdout, _, y_holdout = prepare_data(
-                    parquet_path=f"data/{trackingConfig.experiment_name}.parquet",
+                    parquet_path=f"/tmp/{trackingConfig.experiment_name}.parquet",
                     sample_processor=sample_processor,
                     train_samples=[],
                     test_samples=holdout_sample_ids,
@@ -617,7 +617,7 @@ def bootstrap_models(
     pivoted_df = genotype_processor.pivot_genotypes(spark_df)
 
     # Persist pivoted_df as Parquet
-    parquet_path = f"data/{trackingConfig.experiment_name}.parquet"
+    parquet_path = f"/tmp/{trackingConfig.experiment_name}.parquet"
     logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
     pivoted_df.write.parquet(parquet_path, mode="overwrite")
 
@@ -710,12 +710,37 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
         base_metrics_path += f"/{sanitized_table_name}"
         base_plots_path += f"/{sanitized_table_name}"
     
-    def log_plot(plot_func, artifact_name):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        result = plot_func(ax)
-        fig.tight_layout()
+    def log_plot(plot_func, artifact_name, square=False):
+        """
+        Helper function to create, log, and close a plot.
+        
+        Args:
+            plot_func (callable): Function that takes a Figure and Axes object and plots on it.
+            artifact_name (str): Name of the artifact file to log.
+            square (bool, optional): Whether to enforce a square aspect ratio. Defaults to False.
+        
+        Returns:
+            Any: Result returned by the plot_func.
+        """
+        if square:
+            fig_size = (8, 8)  # Smaller figure size for square plots
+        else:
+            fig_size = (10, 6)  # Default size for non-square plots
+
+        # Create figure and axes with constrained_layout to handle layout automatically
+        fig, ax = plt.subplots(figsize=fig_size, constrained_layout=True)
+
+        result = plot_func(fig, ax)
+
+        if square:
+            # Maintain square aspect ratio where meaningful
+            ax.set_aspect('equal')
+
         artifact_path = f"{base_plots_path}/{artifact_name}"
-        mlflow.log_figure(fig, artifact_path)
+        try:
+            mlflow.log_figure(fig, artifact_path)
+        except np.linalg.LinAlgError as e:
+            logger.error(f"Failed to log figure {artifact_name} due to: {e}")
         plt.close(fig)
         return result
 
@@ -742,30 +767,42 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
     subtitle = f"\n{subtitle}"
 
     # ROC Curve
-    def plot_roc(ax):
+    def plot_roc(fig, ax):
         fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-        ax.plot(fpr, tpr, label='ROC Curve')
-        ax.plot([0, 1], [0, 1], linestyle='--', label='Random Guess')
+        auc_score = roc_auc_score(y_true, y_pred)
+        ax.plot(fpr, tpr, label=f'ROC (AUC={auc_score:.3f})')
+        ax.plot([0, 1], [0, 1], linestyle='--', label='Random Guess (AUC=0.5)')
         ax.set_xlabel('False Positive Rate')
         ax.set_ylabel('True Positive Rate')
-        ax.set_title(f'ROC Curve\n{trackingConfig.name}\n{subtitle}')
         ax.legend()
-        return fpr, tpr, thresholds
+
+        # Set the title at the figure level
+        fig.suptitle(f'ROC Curve\n{trackingConfig.name}\n{subtitle}')
+        return fpr, tpr, thresholds, auc_score
     
     # Precision-Recall Curve
-    def plot_pr(ax):
+    def plot_pr(fig, ax):
         precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
-        ax.plot(recall, precision, label='Precision-Recall Curve')
+        avg_score = average_precision_score(y_true, y_pred)
+        ax.plot(recall, precision, label=f'Precision-Recall (AP={avg_score:.3f})')
+        no_skill = len(y_true[y_true == 1]) / len(y_true)
+        ax.plot([0, 1], [no_skill, no_skill], linestyle='--', label=f'No Skill (Precision={no_skill:.3f})')
         ax.set_xlabel('Recall')
         ax.set_ylabel('Precision')
-        ax.set_title(f'Precision-Recall Curve\n{trackingConfig.name}\n{subtitle}')
         ax.legend()
-        return precision, recall, thresholds
+        ax.set_aspect('equal')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # Set the title at the figure level
+        fig.suptitle(f'Precision-Recall Curve\n{trackingConfig.name}\n{subtitle}')
+        return precision, recall, thresholds, avg_score
 
     if len(np.unique(y_true)) > 1:
-        roc_result = log_plot(plot_roc, "roc_curve.png")
+        # Plot ROC Curve with square aspect ratio
+        roc_result = log_plot(plot_roc, "roc_curve.svg", square=True)
         if roc_result:
-            fpr, tpr, thresholds = roc_result
+            fpr, tpr, thresholds, auc_score = roc_result
             roc_df = pd.DataFrame({
                 'fpr': fpr,
                 'tpr': tpr,
@@ -773,14 +810,16 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
             })
             mlflow.log_table(roc_df, f"{base_metrics_path}/roc_curve.json")
             mlflow.log_metrics({
+                f"{base_metrics_path}/roc_auc": auc_score,
                 f"{base_metrics_path}/roc_fpr_mean": float(np.mean(fpr)),
                 f"{base_metrics_path}/roc_tpr_mean": float(np.mean(tpr)),
                 f"{base_metrics_path}/roc_thresholds_mean": float(np.mean(thresholds))
             })
 
-            pr_result = log_plot(plot_pr, "pr_curve.png")
+            # Plot Precision-Recall Curve with square aspect ratio
+            pr_result = log_plot(plot_pr, "pr_curve.svg", square=True)
             if pr_result:
-                precision, recall, thresholds = pr_result
+                precision, recall, thresholds, avg_score = pr_result
                 pr_df = pd.DataFrame({
                     'precision': precision,
                     'recall': recall,
@@ -788,33 +827,44 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
                 })
                 mlflow.log_table(pr_df, f"{base_metrics_path}/pr_curve.json")
                 mlflow.log_metrics({
+                    f"{base_metrics_path}/pr_auc": avg_score,
                     f"{base_metrics_path}/pr_precision_mean": float(np.mean(precision)),
                     f"{base_metrics_path}/pr_recall_mean": float(np.mean(recall)),
-                    f"{base_metrics_path}/pr_thresholds_mean": float(np.mean(thresholds))
+                    f"{base_metrics_path}/pr_thresholds_mean": float(np.mean(thresholds)),
                 })
     else:
         logger.warning(f"Not enough unique values in y_true to compute ROC & precision-recall for {base_metrics_path}")
 
     # Distribution of Predictions
-    def plot_dist(ax):
-        sns.histplot(y_pred, kde=True, ax=ax)
+    def plot_dist(fig, ax):
+        # Plot the histogram
+        sns.histplot(y_pred, ax=ax, bins=100, kde=True,
+                  line_kws={'color': 'crimson', 'lw': 5, 'ls': ':'})
+    
         ax.set_xlabel('Predicted Probability')
         ax.set_ylabel('Count')
-        ax.set_title(f'Distribution of Predictions\n{trackingConfig.name}\n{subtitle}')
-    
-    log_plot(plot_dist, "pred_distribution.png")
+        ax.set_aspect('auto')  # Use default aspect ratio for histograms
+
+        # Set the title at the figure level
+        fig.suptitle(f'Distribution of Predictions\n{trackingConfig.name}\n{subtitle}')
+
+    # Plot Distribution with default aspect ratio
+    log_plot(plot_dist, "pred_distribution.svg", square=False)
 
     # Confusion Matrix
-    def plot_cm(ax):
+    def plot_cm(fig, ax):
         y_pred_binary = (y_pred > 0.5).astype(int)
         cm = confusion_matrix(y_true, y_pred_binary)
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
         ax.set_xlabel('Predicted')
         ax.set_ylabel('Actual')
-        ax.set_title(f'Confusion Matrix\n{trackingConfig.name}\n{subtitle}')
+
+        # Set the title at the figure level
+        fig.suptitle(f'Confusion Matrix\n{trackingConfig.name}\n{subtitle}')
         return cm
 
-    cm_result = log_plot(plot_cm, "confusion_matrix.png")
+    # Plot Confusion Matrix with square aspect ratio
+    cm_result = log_plot(plot_cm, "confusion_matrix.svg", square=True)
     if cm_result is not None:
         if cm_result.size == 4:
             tn, fp, fn, tp = cm_result.ravel()
@@ -833,3 +883,4 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
             })
         else:
             logger.warning(f"Confusion matrix has unexpected shape: {cm_result.shape}")
+    plt.close('all')
