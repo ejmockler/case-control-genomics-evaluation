@@ -29,6 +29,7 @@ from tqdm import tqdm
 from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 from skopt.plots import plot_convergence
+import jax.numpy as jnp
 
 from config import SamplingConfig, TrackingConfig
 from data.genotype_processor import GenotypeProcessor
@@ -130,7 +131,7 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
     if model_coefficient_df is not None:
         mlflow.log_table(data=model_coefficient_df, artifact_file=sanitize_mlflow_name("feature_importances.json"))
 
-def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=15, is_worker=True, num_variants: int = None, total_variants: int = None, confidence_level: float = None, iteration: int = 0):
+def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=15, is_worker=True, num_variants: int = None, total_variants: int = None, credible_interval: float = None, iteration: int = 0):
     """Perform Bayesian hyperparameter optimization for a model and evaluate on holdout samples."""
     logger = logging.getLogger(__name__)
     
@@ -168,11 +169,11 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 scoring='roc_auc'
             )
             
-            search.fit(X_train, y_train)
+            search.fit(jnp.array(X_train.values), jnp.array(y_train.values))
                     
             # Use the fitted pipeline for predictions
-            y_pred_train = search.predict_proba(X_train)[:, 1]
-            y_pred_test = search.predict_proba(X_test)[:, 1]
+            y_pred_train = search.predict_proba(jnp.array(X_train.values))[:, 1]
+            y_pred_test = search.predict_proba(jnp.array(X_test.values))[:, 1]
 
             df_y_pred_train = y_train.to_frame(name='label').assign(y_pred=y_pred_train).reset_index()
             df_y_pred_test = y_test.to_frame(name='label').assign(y_pred=y_pred_test).reset_index()
@@ -201,7 +202,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
             
             mlflow.set_tag("model", model.__class__.__name__)
 
-            plot_and_log_convergence('ROC AUC', search, y_train, trackingConfig, num_variants, total_variants, confidence_level)
+            plot_and_log_convergence('ROC AUC', search, y_train, trackingConfig, num_variants, total_variants, credible_interval)
             
             log_mlflow_metrics(
                 metrics,
@@ -228,7 +229,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 table_name="crossval",  # Default table name for cross-validation
                 num_variants=num_variants,
                 total_variants=total_variants,
-                confidence_level=confidence_level
+                credible_interval=credible_interval
             )
             create_and_log_visualizations(
                 model.__class__.__name__,
@@ -239,7 +240,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 table_name="crossval",  # Default table name for cross-validation
                 num_variants=num_variants,
                 total_variants=total_variants,
-                confidence_level=confidence_level
+                credible_interval=credible_interval
             )
 
             # --- Holdout Evaluation ---
@@ -278,7 +279,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 X_holdout_scaled = search.best_estimator_.named_steps['scaler'].transform(X_holdout)
 
                 # Make predictions using the classifier directly (as scaling is already done)
-                y_pred_holdout = search.best_estimator_.named_steps['classifier'].predict_proba(X_holdout_scaled)[:, 1]
+                y_pred_holdout = search.best_estimator_.named_steps['classifier'].predict_proba(jnp.array(X_holdout_scaled))[:, 1]
 
                 # Calculate metrics
                 holdout_metrics = calculate_metrics(y_holdout, y_pred_holdout)
@@ -311,7 +312,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                     table_name=table_name,  # Actual holdout table name
                     num_variants=num_variants,
                     total_variants=total_variants,
-                    confidence_level=confidence_level
+                    credible_interval=credible_interval
                 )
 
             logger.info("Completed holdout evaluation.")
@@ -365,7 +366,7 @@ def process_iteration(
     selected_features: pd.Index,
     num_variants: int,
     total_variants: int,
-    confidence_level: float,
+    credible_interval: float,
     random_state: int,
 ) -> Dict:
     """
@@ -400,7 +401,7 @@ def process_iteration(
         mlflow.log_param("random_state", random_state + iteration)
         mlflow.log_param("num_selected_features", len(selected_features))
         mlflow.log_param("total_features", total_variants)
-        mlflow.log_param("confidence_level", confidence_level)
+        mlflow.log_param("credible_interval", credible_interval)
 
         iteration_results = {
             "iteration": iteration,
@@ -425,7 +426,7 @@ def process_iteration(
                 is_worker=True,
                 num_variants=num_variants,
                 total_variants=total_variants,
-                confidence_level=confidence_level,
+                credible_interval=credible_interval,
                 iteration=iteration
             )
 
@@ -484,15 +485,15 @@ def parallel_feature_selection(
     overlapping_features = feature_counts[feature_counts >= threshold].index
 
     num_variants = len(overlapping_features)
-    confidence_level = samplingConfig.feature_confidence_level  # Assuming this is defined in your config
+    credible_interval = samplingConfig.feature_credible_interval  # Assuming this is defined in your config
 
-    logger.info(f"{num_variants} of {total_variants} variants selected at {confidence_level*100:.2f}% credible interval.")
+    logger.info(f"{num_variants} of {total_variants} variants ({credible_interval*100:.2f}% credible interval).")
 
     return FeatureSelectionResult(
         selected_features=overlapping_features,
         num_variants=num_variants,
         total_variants=total_variants,
-        confidence_level=samplingConfig.feature_confidence_level
+        credible_interval=samplingConfig.feature_credible_interval
     )
 
 def feature_selection_iteration(
@@ -546,9 +547,9 @@ def feature_selection_iteration(
 
             while len(selected_features) == 0 and attempt < max_attempts:
                 feature_selector = BayesianFeatureSelector(
-                    num_iterations=10,
+                    num_iterations=100,
                     lr=1e-2,
-                    confidence_level=samplingConfig.feature_confidence_level,
+                    credible_interval=samplingConfig.feature_credible_interval,
                     num_samples=2000,
                     patience=800,
                     validation_split=0.2,
@@ -658,7 +659,7 @@ def bootstrap_models(
     selected_features = feature_selection_result.selected_features
     num_variants = feature_selection_result.num_variants
     total_variants = feature_selection_result.total_variants
-    confidence_level = feature_selection_result.confidence_level
+    credible_interval = feature_selection_result.credible_interval
 
     # Prepare arguments for parallel processing of bootstrap iterations
     iterations = range(samplingConfig.bootstrap_iterations)
@@ -673,7 +674,7 @@ def bootstrap_models(
         selected_features=selected_features,
         num_variants=num_variants,
         total_variants=total_variants,
-        confidence_level=confidence_level,
+        credible_interval=credible_interval,
         random_state=random_state
     )
 
@@ -700,7 +701,7 @@ def bootstrap_models(
 
     return pd.DataFrame.from_records(records)
 
-def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, confidence_level=None):
+def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, credible_interval=None):
     """
     Create and log visualizations directly to MLflow.
     
@@ -713,7 +714,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         table_name (str, optional): Name of the table. Defaults to "crossval".
         num_variants (int, optional): Number of selected features. Defaults to None.
         total_variants (int, optional): Total number of features before selection. Defaults to None.
-        confidence_level (float, optional): Confidence level used in feature selection. Defaults to None.
+        credible_interval (float, optional): Confidence level used in feature selection. Defaults to None.
     """
     logger = logging.getLogger(__name__)
     
@@ -764,9 +765,9 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         return result
 
     # Construct the subtitle with feature selection info if available
-    if num_variants is not None and total_variants is not None and confidence_level is not None:
-        subtitle = (f"{num_variants} of {total_variants} variants selected at "
-                    f"{confidence_level*100:.0f}% credible interval\n")
+    if num_variants is not None and total_variants is not None and credible_interval is not None:
+        subtitle = (f"{num_variants} of {total_variants} variants "
+                    f"({credible_interval*100:.0f}% credible interval)\n")
     else:
         subtitle = ""
     
@@ -784,7 +785,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
     if table_name != "crossval":
         subtitle = f"Evaluated on: {table_name}\n{subtitle}"
     else:
-        subtitle = f"Evaluated on: {set_type} set\n{subtitle}"
+        subtitle = f"Evaluated on: {set_type} split\n{subtitle}"
     subtitle = f"\n{subtitle}"
 
     # ROC Curve
@@ -907,7 +908,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
             logger.warning(f"Confusion matrix has unexpected shape: {cm_result.shape}")
     plt.close('all')
 
-def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_variants=None, total_variants=None, confidence_level=None):
+def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_variants=None, total_variants=None, credible_interval=None):
     """
     Plot hyperparameter convergence using skopt's plot_convergence and log it to MLflow.
 
@@ -917,15 +918,15 @@ def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_var
         trackingConfig (TrackingConfig): Configuration for tracking.
         num_variants (int, optional): Number of selected features. Defaults to None.
         total_variants (int, optional): Total number of features before selection. Defaults to None.
-        confidence_level (float, optional): Confidence level used in feature selection. Defaults to None.
+        credible_interval (float, optional): Confidence level used in feature selection. Defaults to None.
     """
     logger = logging.getLogger(__name__)
     model_name = search.best_estimator_['classifier'].__class__.__name__
 
     # Construct the subtitle with feature selection info if available
-    if num_variants is not None and total_variants is not None and confidence_level is not None:
-        subtitle = (f"{num_variants} of {total_variants} variants selected at "
-                    f"{confidence_level*100:.0f}% credible interval\n")
+    if num_variants is not None and total_variants is not None and credible_interval is not None:
+        subtitle = (f"{num_variants} of {total_variants} variants "
+                    f"({credible_interval*100:.0f}% credible interval)\n")
     else:
         subtitle = ""
 

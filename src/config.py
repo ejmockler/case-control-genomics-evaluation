@@ -47,7 +47,7 @@ class SamplingConfig(BaseModel):
     test_size: float = 0.2
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
-    feature_confidence_level: float = 0.95
+    feature_credible_interval: float = 0.95
     # Specify which strata to use for sampling
     strata: Optional[List[str]] = ["sex"]  # Allowed values: "sex", "age"
 
@@ -67,7 +67,7 @@ class Config(BaseModel):
 
 config = Config(
     vcf=VCFConfig(
-        path="../adhoc analysis/mock.vcf.gz",
+        path="../adhoc analysis/whole_genome_merged_no_vqsr_no_annotation_KarenRegions_MICROGLIAL_ANNOTATED.sorted.vcf.gz",
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.005,
@@ -79,14 +79,14 @@ config = Config(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
         filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
     ),
-    # gmt=GMTConfig(
-    #     path="../adhoc analysis/microglial_associated_genes.gmt",
-    #     filter="",
-    # ),
+    gmt=GMTConfig(
+        path="../adhoc analysis/microglial_associated_genes.gmt",
+        filter="",
+    ),
     tracking=TrackingConfig(
-        name="Microglial & myeloid variants, MAF >= 0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
+        name="Microglial & myeloid variants, MAF>=0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        experiment_name="dbg",
+        experiment_name="microglial60-als-rareBinned-0.75CI-0.005MAF",
         plot_all_sample_importances=False,
         tracking_uri="http://127.0.0.1:5000/",
     ),
@@ -157,7 +157,7 @@ config = Config(
     sampling=SamplingConfig(
         bootstrap_iterations=60,
         cross_val_iterations=10,
-        feature_confidence_level=0.05,
+        feature_credible_interval=0.75,
         test_size=0.2,
         sequestered_ids=[],
         shuffle_labels=False,

@@ -7,8 +7,6 @@ from typing import List, Union, Optional
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import SparkSession
-from ray.data import Dataset as RayDataset
-import ray
 import pandas as pd
 import numpy as np
 
@@ -163,14 +161,14 @@ class GenotypeProcessor:
 
     def fetch_genotypes(
         self, 
-        data: Union[hl.MatrixTable, SparkDataFrame, RayDataset],
+        data: Union[hl.MatrixTable, SparkDataFrame],
         sample_ids: List[str]
     ) -> SparkDataFrame:
         """
         Fetch genotypes for the specified sample IDs.
 
         Args:
-            data (Union[hl.MatrixTable, SparkDataFrame, RayDataset]): Input data.
+            data (Union[hl.MatrixTable, SparkDataFrame]): Input data.
             sample_ids (List[str]): List of sample IDs to fetch.
 
         Returns:
@@ -180,10 +178,8 @@ class GenotypeProcessor:
             return self._fetch_from_matrix_table(data, sample_ids)
         elif isinstance(data, SparkDataFrame):
             return data.filter(data.sample_id.isin(sample_ids))
-        elif isinstance(data, RayDataset):
-            return ray.data.from_spark(data.filter(lambda row: row["sample_id"] in sample_ids).to_spark())
         else:
-            raise TypeError("Input data must be either a Hail MatrixTable, Spark DataFrame, or Ray Dataset.")
+            raise TypeError("Input data must be either a Hail MatrixTable or Spark DataFrame")
 
     def _fetch_from_matrix_table(self, mt: hl.MatrixTable, sample_ids: List[str]) -> SparkDataFrame:
         self.logger.info("Processing Hail MatrixTable.")

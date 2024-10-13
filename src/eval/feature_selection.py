@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from numpyro.infer import SVI, Trace_ELBO, Predictive
+from numpyro.infer import SVI, TraceMeanField_ELBO, Predictive
 from numpyro.optim import Adam
 from numpyro.infer.autoguide import AutoLowRankMultivariateNormal
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -28,24 +28,44 @@ class FeatureSelectionResult:
     selected_features: pd.Index
     num_variants: int
     total_variants: int
-    confidence_level: float
+    credible_interval: float
+
+import os
+import logging
+import time
+from typing import Union
+
+import numpy as np
+import pandas as pd
+import jax
+import jax.numpy as jnp
+from sklearn.base import BaseEstimator, TransformerMixin
+from tqdm import tqdm
+import mlflow
+from numpyro import distributions as dist
+import numpyro
+from numpyro.infer import SVI, TraceMeanField_ELBO, Predictive
+from numpyro.optim import Adam
+from numpyro.infer.autoguide import AutoLowRankMultivariateNormal, AutoNormal
 
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
     """
     Bayesian Feature Selector using Sparse Bayesian Learning (SBL) with NumPyro.
     Each instance must have a unique identifier to prevent sample site name collisions.
+    Supports both independent Normal and MultivariateNormal distributions for feature weights.
     """
-    def __init__(self, unique_id: str, num_iterations=1000, lr=1e-4, confidence_level=0.95, num_samples=1000,
-                 batch_size=512, verbose=False, patience=800,
-                 validation_split=0.2, checkpoint_path="checkpoint.npz"):
+    def __init__(self, unique_id: str, covariance_type: str = 'independent', num_iterations=1000, lr=1e-4,
+                 credible_interval=0.95, num_samples=1000, batch_size=512, verbose=False,
+                 patience=800, validation_split=0.2, checkpoint_path="checkpoint.npz"):
         """
         Initializes the BayesianFeatureSelector with the given hyperparameters.
         
         Parameters:
         - unique_id: A unique string identifier for the model instance.
+        - covariance_type: Type of covariance for feature weights ('independent' or 'multivariate').
         - num_iterations: Number of training iterations.
         - lr: Learning rate for the optimizer.
-        - confidence_level: Confidence level for credible intervals.
+        - credible_interval: Confidence level for credible intervals.
         - num_samples: Number of posterior samples to draw.
         - batch_size: Size of mini-batches for training.
         - verbose: If True, prints training progress.
@@ -57,38 +77,22 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.logger = logging.getLogger(__name__)
         self.num_iterations = num_iterations
         self.lr = lr
-        self.confidence_level = confidence_level
+        self.credible_interval = credible_interval
         self.num_samples = num_samples
         self.batch_size = batch_size
         self.verbose = verbose
         self.patience = patience
         self.validation_split = validation_split
-        # Append unique_id to checkpoint_path to ensure uniqueness
         self.checkpoint_path = f"{os.path.splitext(checkpoint_path)[0]}_{unique_id}.npz"
         
-        # Set the device based on availability (handled by JAX)
+        # Validate covariance_type
+        if covariance_type not in ['independent', 'multivariate']:
+            raise ValueError("covariance_type must be either 'independent' or 'multivariate'")
+        self.covariance_type = covariance_type
+        
         self.logger.info("NumPyro uses JAX's device backend automatically.")
     
-    def model(self, X, y=None):
-        """
-        Defines the probabilistic model for Bayesian feature selection.
-        
-        Parameters:
-        - X: Feature matrix.
-        - y: Target vector.
-        """
-        D = X.shape[1]
-        tau_0 = numpyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
-        lam = numpyro.sample('lam', dist.HalfCauchy(scale=1.0).expand([D]).to_event(1))
-        c2 = numpyro.sample('c2', dist.InverseGamma(concentration=0.5, rate=0.5).expand([D]).to_event(1))
-        sigma = tau_0 * lam * jnp.sqrt(c2)
-        beta = numpyro.sample('beta', dist.Normal(jnp.zeros(D), sigma).to_event(1))
-        intercept = numpyro.sample('intercept', dist.Normal(0., 10.))
-        logits = intercept + jnp.dot(X, beta)
-        with numpyro.plate('data', X.shape[0]):
-            numpyro.sample('obs', dist.Bernoulli(logits=logits), obs=y)
-    
-    def fit(self, X, y):
+    def fit(self, X: Union[np.ndarray, pd.DataFrame], y: Union[np.ndarray, pd.Series, pd.DataFrame]):
         """
         Fits the Bayesian Feature Selector to the data.
 
@@ -107,10 +111,41 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             X_np = jnp.array(X)
             feature_names = np.arange(X_np.shape[1])
         
-        if isinstance(y, pd.Series) or isinstance(y, pd.DataFrame):
+        if isinstance(y, (pd.Series, pd.DataFrame)):
             y_np = jnp.array(y.values).flatten()
         else:
             y_np = jnp.array(y).flatten()
+
+        def model(X, y=None):
+            """
+            Defines the probabilistic model for Bayesian feature selection.
+            
+            Parameters:
+            - X: Feature matrix.
+            - y: Target vector.
+            """
+            D = X.shape[1]
+            tau_0 = numpyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
+            lam = numpyro.sample('lam', dist.HalfCauchy(scale=1.0).expand([D]).to_event(1))
+            c2 = numpyro.sample('c2', dist.InverseGamma(concentration=0.5, rate=0.5).expand([D]).to_event(1))
+            sigma = tau_0 * lam * jnp.sqrt(c2)
+            
+            if self.covariance_type == 'independent':
+                # Independent Normal distributions for each beta
+                beta = numpyro.sample('beta', dist.Normal(jnp.zeros(D), sigma).to_event(1))
+            elif self.covariance_type == 'multivariate':
+                # Multivariate Normal with diagonal covariance
+                # Alternatively, for full covariance, you can define a covariance matrix.
+                # Here, we'll use a diagonal covariance for simplicity.
+                cov_matrix = jnp.diag(sigma ** 2)
+                beta = numpyro.sample('beta', dist.MultivariateNormal(loc=jnp.zeros(D), covariance_matrix=cov_matrix))
+            else:
+                raise ValueError(f"Unsupported covariance_type: {self.covariance_type}")
+            
+            intercept = numpyro.sample('intercept', dist.Normal(0., 10.))
+            logits = intercept + X @ beta
+            with numpyro.plate('data', X.shape[0]):
+                numpyro.sample('obs', dist.Bernoulli(logits=logits), obs=y)
         
         # Split data into training and validation sets
         split_idx = int(X_np.shape[0] * (1 - self.validation_split))
@@ -125,14 +160,22 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         optimizer = Adam(self.lr)
         
         # Initialize the guide (variational distribution)
-        guide = AutoLowRankMultivariateNormal(self.model)
-        
-        # Initialize SVI
-        svi = SVI(self.model, guide, optimizer, loss=Trace_ELBO())
-        
+        # For multivariate covariance, AutoLowRankMultivariateNormal is suitable.
+        # For independent normals, a different guide might be more efficient
+        if self.covariance_type == 'multivariate':
+            guide = AutoLowRankMultivariateNormal(model)
+        else:
+            guide = AutoNormal(model)
+
         # Initialize SVI state with a unique random key for each instance
         seed = int.from_bytes(os.urandom(4), 'little')
-        svi_state = svi.init(rng_key=jax.random.PRNGKey(seed), X=X_train, y=y_train)
+        
+        # Initialize SVI
+        svi = SVI(model, guide, optimizer, loss=TraceMeanField_ELBO())
+        
+        # Initialize SVI state with the first batch
+        initial_batch_X, initial_batch_y = train_batches[0]
+        svi_state = svi.init(rng_key=jax.random.PRNGKey(seed), X=initial_batch_X, y=initial_batch_y)
         
         # Initialize early stopping variables
         best_val_loss = float("inf")
@@ -156,10 +199,10 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             # Validation loss
             val_loss = 0.0
             for batch_X_val, batch_y_val in val_batches:
-                loss = svi.evaluate_loss(svi_state.params, batch_X_val, batch_y_val)
-                val_loss += jax.device_get(loss)
+                batch_val_loss = svi.evaluate(svi_state, X=batch_X_val, y=batch_y_val)
+                val_loss += jax.device_get(batch_val_loss)
             avg_val_loss = val_loss / (X_val.shape[0] or 1)
-            
+
             # Log metrics using MLflow
             self.log_metrics(epoch, avg_train_loss, avg_val_loss)
             
@@ -182,9 +225,9 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 patience_counter = 0
-                # Save guide parameters
-                params = guide.get_posterior_params(svi_state.params)
-                np.savez(self.checkpoint_path, **{k: jax.device_get(v) for k, v in params.items()})
+                # Save the optimized parameters
+                optimized_params = svi.get_params(svi_state)
+                np.savez(self.checkpoint_path, **{k: jax.device_get(v) for k, v in optimized_params.items()})
                 if self.verbose:
                     print(f"Epoch {epoch}: Validation loss improved to {best_val_loss:.4f}. Checkpoint saved.")
             else:
@@ -200,11 +243,11 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         if os.path.exists(self.checkpoint_path):
             checkpoint = np.load(self.checkpoint_path)
             loaded_params = {k: jnp.array(v) for k, v in checkpoint.items()}
-            svi_state = svi.set_params(svi_state, loaded_params)
+        else:
+            loaded_params = svi.get_params(svi_state)
         
-        # Extract posterior samples using Predictive
-        predictive = Predictive(self.model, guide=guide, num_samples=self.num_samples)
-        # Use a new random key for sampling to ensure randomness
+        # Take posterior samples
+        predictive = Predictive(model, params=loaded_params, num_samples=self.num_samples)
         posterior_samples = predictive(jax.random.PRNGKey(seed + 1), X=X_train, y=y_train)
         beta_samples = posterior_samples['beta']
         
@@ -212,8 +255,8 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         beta_samples_np = np.array(beta_samples)
         
         # Compute credible intervals
-        lower_bound = np.percentile(beta_samples_np, (1 - self.confidence_level) / 2 * 100, axis=0)
-        upper_bound = np.percentile(beta_samples_np, (1 + self.confidence_level) / 2 * 100, axis=0)
+        lower_bound = np.percentile(beta_samples_np, (1 - self.credible_interval) / 2 * 100, axis=0)
+        upper_bound = np.percentile(beta_samples_np, (1 + self.credible_interval) / 2 * 100, axis=0)
         
         # Select features where the credible interval does not include zero
         non_zero = (lower_bound > 0) | (upper_bound < 0)
@@ -229,7 +272,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         
         return self
     
-    def transform(self, X):
+    def transform(self, X: Union[np.ndarray, pd.DataFrame]):
         """
         Transforms the input data by selecting the chosen features.
 
@@ -247,7 +290,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             feature_indices = self.selected_features_
             return X[:, feature_indices]
     
-    def log_metrics(self, epoch, train_loss, val_loss):
+    def log_metrics(self, epoch: int, train_loss: float, val_loss: float):
         """
         Logs training and validation losses to MLflow.
 
@@ -260,7 +303,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         mlflow.log_metric("val_loss", float(val_loss), step=epoch)
     
     @staticmethod
-    def _create_batches(X, y, batch_size, shuffle=False):
+    def _create_batches(X: jnp.ndarray, y: jnp.ndarray, batch_size: int, shuffle: bool = False):
         """
         Creates batches of data manually compatible with JAX arrays.
 
@@ -277,15 +320,28 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         indices = np.arange(num_samples)
         if shuffle:
             np.random.shuffle(indices)
-        
+
         batches = []
         for start_idx in range(0, num_samples, batch_size):
             end_idx = start_idx + batch_size
             batch_indices = indices[start_idx:end_idx]
             batch_X = X[batch_indices]
             batch_y = y[batch_indices]
+            
+            # If the last batch is smaller, pad it to match batch_size
+            current_batch_size = batch_X.shape[0]
+            if current_batch_size < batch_size:
+                pad_size = batch_size - current_batch_size
+                # Randomly select samples to pad
+                pad_indices = np.random.choice(batch_X.shape[0], size=pad_size, replace=True)
+                pad_X = batch_X[pad_indices]
+                pad_y = batch_y[pad_indices]
+                batch_X = jnp.concatenate([batch_X, pad_X], axis=0)
+                batch_y = jnp.concatenate([batch_y, pad_y], axis=0)
+            
             batches.append((batch_X, batch_y))
         return batches
+
     
     @classmethod
     def load_checkpoint(cls, checkpoint_path: str):
@@ -301,6 +357,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         checkpoint = np.load(checkpoint_path, allow_pickle=True)
         params = {k: jnp.array(v) for k, v in checkpoint.items()}
         return params
+
     
 @lru_cache(maxsize=32)
 def estimate_kde_sklearn(data_tuple: Tuple[float, ...], bandwidth: str = 'silverman') -> Tuple[np.ndarray, np.ndarray]:

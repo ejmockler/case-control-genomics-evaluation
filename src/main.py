@@ -15,8 +15,8 @@ def main():
     hl.init(
         default_reference='GRCh38',
         spark_conf={
-            'spark.driver.memory': '8g',
-            'spark.executor.memory': '8g',
+            'spark.driver.memory': '12g',
+            'spark.executor.memory': '12g',
             'spark.executor.cores': '4',
         }
     )
