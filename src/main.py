@@ -57,7 +57,6 @@ def main():
         sample_processor = SampleProcessor(config, sample_ids)
 
         # Perform bootstrapped model evaluations
-        logger.info("Starting bootstrapped model evaluations.")
         results_df = bootstrap_models(
             sample_processor=sample_processor,
             genotype_processor=genotype_processor,
@@ -66,7 +65,6 @@ def main():
             trackingConfig=config.tracking,
             stack=stack
         )
-        logger.info("Bootstrapped model evaluations completed.")
 
         # Log the aggregated results
         logger.info("Aggregated Bootstrapping Results:")

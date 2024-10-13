@@ -1,32 +1,27 @@
+from functools import lru_cache
 import os
 import time
-# Enable fallback for CPU since Cauchy is not supported on MPS
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-
 import logging
 from typing import Optional, Tuple
 from dataclasses import dataclass
-from functools import lru_cache
 
 import numpy as np
 import pandas as pd
-import torch
-import pyro
-import pyro.distributions as dist
-from pyro.contrib import autoname
-from pyro.infer import SVI, TraceMeanField_ELBO, Predictive
-from pyro.optim import ClippedAdam
-from pyro.infer.autoguide import AutoLowRankMultivariateNormal
+import jax
+import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import SVI, Trace_ELBO, Predictive
+from numpyro.optim import Adam
+from numpyro.infer.autoguide import AutoLowRankMultivariateNormal
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import KernelDensity
-from torch.utils.data import DataLoader, TensorDataset
 from scipy.signal import find_peaks, peak_prominences, peak_widths
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import mlflow
 from tqdm import tqdm
-
 
 @dataclass
 class FeatureSelectionResult:
@@ -35,19 +30,19 @@ class FeatureSelectionResult:
     total_variants: int
     confidence_level: float
 
-        
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
     """
-    Bayesian Feature Selector using Sparse Bayesian Learning (SBL) with Pyro.
+    Bayesian Feature Selector using Sparse Bayesian Learning (SBL) with NumPyro.
     Each instance must have a unique identifier to prevent sample site name collisions.
     """
     def __init__(self, unique_id: str, num_iterations=1000, lr=1e-4, confidence_level=0.95, num_samples=1000,
                  batch_size=512, verbose=False, patience=800,
-                 validation_split=0.2, checkpoint_path="checkpoint.params"):
+                 validation_split=0.2, checkpoint_path="checkpoint.npz"):
         """
         Initializes the BayesianFeatureSelector with the given hyperparameters.
         
         Parameters:
+        - unique_id: A unique string identifier for the model instance.
         - num_iterations: Number of training iterations.
         - lr: Learning rate for the optimizer.
         - confidence_level: Confidence level for credible intervals.
@@ -57,7 +52,6 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         - patience: Number of epochs with no improvement before early stopping.
         - validation_split: Fraction of data to use for validation.
         - checkpoint_path: Path to save model checkpoints.
-        - unique_id: A unique string identifier for the model instance.
         """
         self.unique_id = unique_id  # Store the unique identifier
         self.logger = logging.getLogger(__name__)
@@ -70,24 +64,30 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.patience = patience
         self.validation_split = validation_split
         # Append unique_id to checkpoint_path to ensure uniqueness
-        self.checkpoint_path = f"{os.path.splitext(checkpoint_path)[0]}_{unique_id}.params"
+        self.checkpoint_path = f"{os.path.splitext(checkpoint_path)[0]}_{unique_id}.npz"
         
-        # Set the device based on availability
-        # if torch.backends.mps.is_available():
-        #     self.device = torch.device("mps")
-        #     if self.verbose:
-        #         print("Using MPS (GPU) acceleration with CPU fallback.")
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            if self.verbose:
-                print("Using CUDA (GPU) acceleration.")
-        else:
-            self.device = torch.device("cpu")
-            if self.verbose:
-                print("Using CPU.")
+        # Set the device based on availability (handled by JAX)
+        self.logger.info("NumPyro uses JAX's device backend automatically.")
+    
+    def model(self, X, y=None):
+        """
+        Defines the probabilistic model for Bayesian feature selection.
         
-        self.logger.info(f"Using device: {self.device}")
-
+        Parameters:
+        - X: Feature matrix.
+        - y: Target vector.
+        """
+        D = X.shape[1]
+        tau_0 = numpyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
+        lam = numpyro.sample('lam', dist.HalfCauchy(scale=1.0).expand([D]).to_event(1))
+        c2 = numpyro.sample('c2', dist.InverseGamma(concentration=0.5, rate=0.5).expand([D]).to_event(1))
+        sigma = tau_0 * lam * jnp.sqrt(c2)
+        beta = numpyro.sample('beta', dist.Normal(jnp.zeros(D), sigma).to_event(1))
+        intercept = numpyro.sample('intercept', dist.Normal(0., 10.))
+        logits = intercept + jnp.dot(X, beta)
+        with numpyro.plate('data', X.shape[0]):
+            numpyro.sample('obs', dist.Bernoulli(logits=logits), obs=y)
+    
     def fit(self, X, y):
         """
         Fits the Bayesian Feature Selector to the data.
@@ -99,104 +99,70 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         Returns:
         - self: Fitted estimator.
         """
-        # Convert input data to PyTorch tensors and move to the appropriate device
-        X_tensor = torch.tensor(X.values if isinstance(X, pd.DataFrame) else X, 
-                                dtype=torch.float32, device=self.device)
-        y_tensor = torch.tensor(y.values if hasattr(y, 'values') else y, 
-                                dtype=torch.float32, device=self.device)
-
-       
+        # Convert input data to JAX numpy arrays
+        if isinstance(X, pd.DataFrame):
+            X_np = jnp.array(X.values)
+            feature_names = X.columns
+        else:
+            X_np = jnp.array(X)
+            feature_names = np.arange(X_np.shape[1])
+        
+        if isinstance(y, pd.Series) or isinstance(y, pd.DataFrame):
+            y_np = jnp.array(y.values).flatten()
+        else:
+            y_np = jnp.array(y).flatten()
+        
         # Split data into training and validation sets
-        split_idx = int(X_tensor.size(0) * (1 - self.validation_split))
-        X_train, X_val = X_tensor[:split_idx], X_tensor[split_idx:]
-        y_train, y_val = y_tensor[:split_idx], y_tensor[split_idx:]
-
-        # Create DataLoaders for mini-batch processing
-        train_loader = DataLoader(TensorDataset(X_train, y_train), 
-                                  batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(TensorDataset(X_val, y_val), 
-                                batch_size=self.batch_size, shuffle=False)
-
-        # Define the Bayesian model with unique sample site names and improved parameterization
-        def model(X_batch, y_batch):
-            B, D = X_batch.size(0), X_batch.size(1)
-            
-            with autoname.scope(prefix=self.unique_id):
-                # Global shrinkage parameter
-                tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
-                
-                # Local shrinkage parameters
-                with pyro.plate(f'features', D):
-                    lam = pyro.sample('lam', dist.HalfCauchy(scale=1.0))
-                
-                # Auxiliary variables for improved heavy-tailed modeling
-                with pyro.plate(f'features_c2', D):
-                    c2 = pyro.sample('c2', dist.InverseGamma(0.5, 0.5))
-                
-                # Scale for beta coefficients
-                sigma = tau_0 * lam * torch.sqrt(c2)
-                
-                # Sample beta coefficients with sparsity
-                beta = pyro.sample('beta', dist.Normal(
-                    loc=torch.zeros(D, device=self.device),
-                    scale=sigma
-                ).to_event(1))
-                
-                # Sample intercept
-                intercept = pyro.sample('intercept', dist.Normal(0., 10.))
-                
-                # Compute logits
-                if len(beta.shape) == 1:
-                    logits = intercept + X_batch.matmul(beta)
-                else:
-                    logits = intercept[:, None] + torch.matmul(beta, X_batch.T)
-                
-                # Observation likelihood
-                with pyro.plate(f'data', B):
-                    pyro.sample('obs', dist.Bernoulli(logits=logits), obs=y_batch)
-
-        # Use AutoMultivariateNormal guide
-        guide = AutoLowRankMultivariateNormal(model)
-
-        # Initialize the optimizer with adjusted settings
-        optimizer = ClippedAdam({"lr": self.lr, "clip_norm": 5.0})
+        split_idx = int(X_np.shape[0] * (1 - self.validation_split))
+        X_train, X_val = X_np[:split_idx], X_np[split_idx:]
+        y_train, y_val = y_np[:split_idx], y_np[split_idx:]
         
-        # Set up the SVI object with TraceMeanField_ELBO loss
-        svi = SVI(model, guide, optimizer, loss=TraceMeanField_ELBO())
+        # Manually create batches for training and validation
+        train_batches = self._create_batches(X_train, y_train, self.batch_size, shuffle=True)
+        val_batches = self._create_batches(X_val, y_val, self.batch_size, shuffle=False)
         
-        # Clear previous parameter store
-        pyro.clear_param_store()
-
+        # Initialize optimizer
+        optimizer = Adam(self.lr)
+        
+        # Initialize the guide (variational distribution)
+        guide = AutoLowRankMultivariateNormal(self.model)
+        
+        # Initialize SVI
+        svi = SVI(self.model, guide, optimizer, loss=Trace_ELBO())
+        
+        # Initialize SVI state with a unique random key for each instance
+        seed = int.from_bytes(os.urandom(4), 'little')
+        svi_state = svi.init(rng_key=jax.random.PRNGKey(seed), X=X_train, y=y_train)
+        
         # Initialize early stopping variables
         best_val_loss = float("inf")
         patience_counter = 0
-
+        
         # Training loop with optional verbosity
         if self.verbose:
             progress_bar = tqdm(range(1, self.num_iterations + 1), desc="Training", unit="iter")
         else:
             progress_bar = range(1, self.num_iterations + 1)
-
+        
         start_time = time.time()
         for epoch in progress_bar:
             epoch_loss = 0.0
-            # Training: iterate over batches and update parameters
-            for X_batch, y_batch in train_loader:
-                loss = svi.step(X_batch, y_batch)
-                epoch_loss += loss
-
-            # Validation: compute average validation loss
+            for batch_X, batch_y in train_batches:
+                svi_state, loss = svi.update(svi_state, X=batch_X, y=batch_y)
+                epoch_loss += jax.device_get(loss)
+            
+            avg_train_loss = epoch_loss / split_idx
+            
+            # Validation loss
             val_loss = 0.0
-            for X_val_batch, y_val_batch in val_loader:
-                val_loss += svi.evaluate_loss(X_val_batch, y_val_batch)
-            avg_val_loss = val_loss / len(val_loader)
-
-            # Compute average epoch loss
-            avg_epoch_loss = epoch_loss / len(train_loader.dataset)
-
+            for batch_X_val, batch_y_val in val_batches:
+                loss = svi.evaluate_loss(svi_state.params, batch_X_val, batch_y_val)
+                val_loss += jax.device_get(loss)
+            avg_val_loss = val_loss / (X_val.shape[0] or 1)
+            
             # Log metrics using MLflow
-            self.log_metrics(epoch, avg_epoch_loss, avg_val_loss)
-
+            self.log_metrics(epoch, avg_train_loss, avg_val_loss)
+            
             # Update progress bar if verbose
             if self.verbose:
                 if epoch % 10 == 0 or epoch == 1:
@@ -205,19 +171,20 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
                     remaining_iters = self.num_iterations - epoch
                     estimated_remaining_time = remaining_iters * avg_time_per_iter
                     progress_bar.set_postfix({
-                        'train_loss': f"{avg_epoch_loss:.4f}",
+                        'train_loss': f"{avg_train_loss:.4f}",
                         'val_loss': f"{avg_val_loss:.4f}",
                         'ETA': f"{estimated_remaining_time / 60:.2f} min"
                     })
                 else:
-                    progress_bar.set_postfix({'train_loss': f"{avg_epoch_loss:.4f}"})
-
+                    progress_bar.set_postfix({'train_loss': f"{avg_train_loss:.4f}"})
+            
             # Early Stopping Check
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 patience_counter = 0
-                # Save model checkpoint
-                pyro.get_param_store().save(self.checkpoint_path)
+                # Save guide parameters
+                params = guide.get_posterior_params(svi_state.params)
+                np.savez(self.checkpoint_path, **{k: jax.device_get(v) for k, v in params.items()})
                 if self.verbose:
                     print(f"Epoch {epoch}: Validation loss improved to {best_val_loss:.4f}. Checkpoint saved.")
             else:
@@ -228,45 +195,40 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
                     if self.verbose:
                         print("Early stopping triggered.")
                     break
-
+        
         # Load the best parameters
-        pyro.get_param_store().load(self.checkpoint_path)
-
-        # Extract beta samples from the posterior using the prefixed name
-        beta_key = f'{self.unique_id}/beta'
-
-        # Use Predictive for posterior sampling
-        predictive = Predictive(model, guide=guide, num_samples=self.num_samples,
-                                return_sites=[beta_key], parallel=True)
-        posterior_samples = predictive(X_train, y_train)
-        beta_samples = posterior_samples[beta_key].detach().cpu().numpy()
-
-        # Remove the extra dimension from parallel sampling if necessary
-        if beta_samples.ndim == 3:
-            # Shape: [num_samples, 1, D] -> [num_samples, D]
-            beta_samples = beta_samples.squeeze(1)
-        elif beta_samples.ndim == 2 and beta_samples.shape[1] == 1:
-            # Shape: [num_samples, 1] -> [num_samples]
-            beta_samples = beta_samples.squeeze(1)
-
+        if os.path.exists(self.checkpoint_path):
+            checkpoint = np.load(self.checkpoint_path)
+            loaded_params = {k: jnp.array(v) for k, v in checkpoint.items()}
+            svi_state = svi.set_params(svi_state, loaded_params)
+        
+        # Extract posterior samples using Predictive
+        predictive = Predictive(self.model, guide=guide, num_samples=self.num_samples)
+        # Use a new random key for sampling to ensure randomness
+        posterior_samples = predictive(jax.random.PRNGKey(seed + 1), X=X_train, y=y_train)
+        beta_samples = posterior_samples['beta']
+        
+        # Convert JAX arrays to NumPy for percentile calculation
+        beta_samples_np = np.array(beta_samples)
+        
         # Compute credible intervals
-        lower_bound = np.percentile(beta_samples, (1 - self.confidence_level) / 2 * 100, axis=0)
-        upper_bound = np.percentile(beta_samples, (1 + self.confidence_level) / 2 * 100, axis=0)
-
-        # Store credible intervals
-        self.lower_bound_ = lower_bound
-        self.upper_bound_ = upper_bound
-
+        lower_bound = np.percentile(beta_samples_np, (1 - self.confidence_level) / 2 * 100, axis=0)
+        upper_bound = np.percentile(beta_samples_np, (1 + self.confidence_level) / 2 * 100, axis=0)
+        
         # Select features where the credible interval does not include zero
         non_zero = (lower_bound > 0) | (upper_bound < 0)
         
         if isinstance(X, pd.DataFrame):
-            self.selected_features_ = X.columns[non_zero]
+            self.selected_features_ = feature_names[non_zero]
         else:
-            self.selected_features_ = np.arange(X.shape[1])[non_zero]
-
+            self.selected_features_ = np.arange(X_np.shape[1])[non_zero]
+        
+        # Store credible intervals
+        self.lower_bound_ = lower_bound
+        self.upper_bound_ = upper_bound
+        
         return self
-
+    
     def transform(self, X):
         """
         Transforms the input data by selecting the chosen features.
@@ -282,8 +244,9 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         if isinstance(X, pd.DataFrame):
             return X[self.selected_features_]
         else:
-            return X[:, self.selected_features_]
-
+            feature_indices = self.selected_features_
+            return X[:, feature_indices]
+    
     def log_metrics(self, epoch, train_loss, val_loss):
         """
         Logs training and validation losses to MLflow.
@@ -293,9 +256,52 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         - train_loss: Training loss for the epoch.
         - val_loss: Validation loss for the epoch.
         """
-        mlflow.log_metric("train_loss", train_loss, step=epoch)
-        mlflow.log_metric("val_loss", val_loss, step=epoch)
+        mlflow.log_metric("train_loss", float(train_loss), step=epoch)
+        mlflow.log_metric("val_loss", float(val_loss), step=epoch)
+    
+    @staticmethod
+    def _create_batches(X, y, batch_size, shuffle=False):
+        """
+        Creates batches of data manually compatible with JAX arrays.
 
+        Parameters:
+        - X: Feature matrix.
+        - y: Target vector.
+        - batch_size: Size of each batch.
+        - shuffle: Whether to shuffle the data before batching.
+
+        Returns:
+        - List of tuples containing batched X and y.
+        """
+        num_samples = X.shape[0]
+        indices = np.arange(num_samples)
+        if shuffle:
+            np.random.shuffle(indices)
+        
+        batches = []
+        for start_idx in range(0, num_samples, batch_size):
+            end_idx = start_idx + batch_size
+            batch_indices = indices[start_idx:end_idx]
+            batch_X = X[batch_indices]
+            batch_y = y[batch_indices]
+            batches.append((batch_X, batch_y))
+        return batches
+    
+    @classmethod
+    def load_checkpoint(cls, checkpoint_path: str):
+        """
+        Loads model parameters from a checkpoint.
+
+        Parameters:
+        - checkpoint_path: Path to the checkpoint file.
+
+        Returns:
+        - params: Dictionary of model parameters.
+        """
+        checkpoint = np.load(checkpoint_path, allow_pickle=True)
+        params = {k: jnp.array(v) for k, v in checkpoint.items()}
+        return params
+    
 @lru_cache(maxsize=32)
 def estimate_kde_sklearn(data_tuple: Tuple[float, ...], bandwidth: str = 'silverman') -> Tuple[np.ndarray, np.ndarray]:
     data = np.array(data_tuple)

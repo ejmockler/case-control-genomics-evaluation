@@ -145,59 +145,60 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
     process_safe_model = model.__class__(**params)
     
     try:
-        pipeline = Pipeline([
-            ('scaler', MinMaxScaler()),
-            ('classifier', process_safe_model)
-        ])
-        
-        search_spaces = {f'classifier__{key}': value for key, value in search_spaces.items()}
-        
-        search = BayesSearchCV(
-            pipeline,
-            search_spaces,
-            n_iter=n_iter,
-            cv=5,
-            n_jobs=-1,
-            n_points=10,
-            scoring='roc_auc'
-        )
-        
-        search.fit(X_train, y_train)
-                
-        # Use the fitted pipeline for predictions
-        y_pred_train = search.predict_proba(X_train)[:, 1]
-        y_pred_test = search.predict_proba(X_test)[:, 1]
-
-        df_y_pred_train = y_train.to_frame(name='label').assign(y_pred=y_pred_train).reset_index()
-        df_y_pred_test = y_test.to_frame(name='label').assign(y_pred=y_pred_test).reset_index()
-        
-        train_metrics = calculate_metrics(y_train, y_pred_train)
-        test_metrics = calculate_metrics(y_test, y_pred_test)
-        
-        metrics = {
-            'aggregate': {
-                'train': train_metrics['aggregate'],
-                'test': test_metrics['aggregate']
-            },
-            'sample_wise': {
-                'train': train_metrics['sample_wise'],
-                'test': test_metrics['sample_wise']
-            }
-        }
-        
-        best_params = {key.replace('classifier__', ''): value for key, value in search.best_params_.items()}
-
-        # Get feature names from X_train
-        feature_labels = X_train.columns.tolist()
-
-        model_coefficient_df = get_feature_importances(search.best_estimator_['classifier'], feature_labels)
-
         # Set up MLflow tracking
         mlflow.set_tracking_uri(trackingConfig.tracking_uri)
         mlflow.set_experiment(trackingConfig.experiment_name)
 
         # Start a run for this model evaluation
         with mlflow.start_run(run_name=f"{model.__class__.__name__}", nested=True) as run:
+            pipeline = Pipeline([
+                ('scaler', MinMaxScaler()),
+                ('classifier', process_safe_model)
+            ])
+            
+            search_spaces = {f'classifier__{key}': value for key, value in search_spaces.items()}
+            
+            search = BayesSearchCV(
+                pipeline,
+                search_spaces,
+                n_iter=n_iter,
+                cv=5,
+                n_jobs=-1 if not is_worker else 1,
+                n_points=10,
+                scoring='roc_auc'
+            )
+            
+            search.fit(X_train, y_train)
+                    
+            # Use the fitted pipeline for predictions
+            y_pred_train = search.predict_proba(X_train)[:, 1]
+            y_pred_test = search.predict_proba(X_test)[:, 1]
+
+            df_y_pred_train = y_train.to_frame(name='label').assign(y_pred=y_pred_train).reset_index()
+            df_y_pred_test = y_test.to_frame(name='label').assign(y_pred=y_pred_test).reset_index()
+            
+            train_metrics = calculate_metrics(y_train, y_pred_train)
+            test_metrics = calculate_metrics(y_test, y_pred_test)
+            
+            metrics = {
+                'aggregate': {
+                    'train': train_metrics['aggregate'],
+                    'test': test_metrics['aggregate']
+                },
+                'sample_wise': {
+                    'train': train_metrics['sample_wise'],
+                    'test': test_metrics['sample_wise']
+                }
+            }
+            
+            best_params = {key.replace('classifier__', ''): value for key, value in search.best_params_.items()}
+
+            # Get feature names from X_train
+            feature_labels = X_train.columns.tolist()
+
+            model_coefficient_df = get_feature_importances(search.best_estimator_['classifier'], feature_labels)
+
+            
             mlflow.set_tag("model", model.__class__.__name__)
 
             plot_and_log_convergence('ROC AUC', search, y_train, trackingConfig, num_variants, total_variants, confidence_level)
@@ -420,7 +421,7 @@ def process_iteration(
                 y_test=y_test,
                 trackingConfig=trackingConfig,
                 sample_processor=sample_processor,
-                n_iter=15,
+                n_iter=20,
                 is_worker=True,
                 num_variants=num_variants,
                 total_variants=total_variants,
@@ -533,10 +534,12 @@ def feature_selection_iteration(
                 train_samples=train_samples,
                 test_samples=test_samples
             )
+            sample_ids = pd.DataFrame.from_dict({"sample_id": X_train.index.tolist(), "label": y_train.tolist()})
     
             # Feature Selection Step
             logger.info("Performing feature selection using Bayesian Feature Selector.")
             mlflow.log_param("feature_selector", "BayesianFeatureSelector")
+            mlflow.log_table(sample_ids, artifact_file=f"sample_ids_{iteration}.json")
             max_attempts = 5
             attempt = 0
             selected_features = []
@@ -780,6 +783,8 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
     subtitle += f"Cases: {num_cases}, Controls: {num_controls}"
     if table_name != "crossval":
         subtitle = f"Evaluated on: {table_name}\n{subtitle}"
+    else:
+        subtitle = f"Evaluated on: {set_type} set\n{subtitle}"
     subtitle = f"\n{subtitle}"
 
     # ROC Curve
@@ -793,7 +798,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         ax.legend()
 
         # Set the title at the figure level
-        fig.suptitle(f'ROC Curve\n{trackingConfig.name}\n{subtitle}')
+        fig.suptitle(f'ROC Curve for {model_name}\n{trackingConfig.name}\n{subtitle}')
         return fpr, tpr, thresholds, auc_score
     
     # Precision-Recall Curve
@@ -810,7 +815,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         ax.set_ylim(0, 1)
 
         # Set the title at the figure level
-        fig.suptitle(f'Precision-Recall Curve\n{trackingConfig.name}\n{subtitle}')
+        fig.suptitle(f'Precision-Recall Curve for {model_name}\n{trackingConfig.name}\n{subtitle}')
         return display.precision, display.recall, avg_score
 
     if len(np.unique(y_true)) > 1:
@@ -863,7 +868,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         ax.set_xticks(np.arange(0, 1.1, 0.1), minor=True)
 
         # Set the title at the figure level
-        fig.suptitle(f'Distribution of Predictions\n{trackingConfig.name}\n{subtitle}')
+        fig.suptitle(f'Distribution of Predictions for {model_name}\n{trackingConfig.name}\n{subtitle}')
 
     # Plot Distribution with default aspect ratio
     log_plot(plot_dist, "pred_distribution.svg", square=False)
@@ -877,7 +882,7 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         ax.set_ylabel('Actual')
 
         # Set the title at the figure level
-        fig.suptitle(f'Confusion Matrix\n{trackingConfig.name}\n{subtitle}')
+        fig.suptitle(f'Confusion Matrix for {model_name}\n{trackingConfig.name}\n{subtitle}')
         return cm
 
     # Plot Confusion Matrix with square aspect ratio
@@ -915,7 +920,7 @@ def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_var
         confidence_level (float, optional): Confidence level used in feature selection. Defaults to None.
     """
     logger = logging.getLogger(__name__)
-    model_name = search.estimator.__class__.__name__
+    model_name = search.best_estimator_['classifier'].__class__.__name__
 
     # Construct the subtitle with feature selection info if available
     if num_variants is not None and total_variants is not None and confidence_level is not None:
@@ -938,7 +943,9 @@ def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_var
         
         # Plot the convergence using skopt's plot_convergence
         plot_convergence(search.optimizer_results_, ax=ax)
-        
+
+        plt.xticks(np.arange(0, search.n_iter+1, 5))
+
         # Set the title of the plot
         fig.suptitle(title, fontsize=14)
 

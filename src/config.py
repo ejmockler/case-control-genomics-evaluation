@@ -84,7 +84,7 @@ config = Config(
     #     filter="",
     # ),
     tracking=TrackingConfig(
-        name="Microglial variants, MAF >= 0.5% (rare-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
+        name="Microglial & myeloid variants, MAF >= 0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
         experiment_name="dbg",
         plot_all_sample_importances=False,

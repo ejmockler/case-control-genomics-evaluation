@@ -17,10 +17,6 @@ class SampleProcessor:
         self.holdout_data = self._load_and_process_tables(self.config.holdout_tables.tables)
         self.id_mapping = self._create_id_mapping()
 
-        # Verify that all holdout samples are mapped
-        self.verify_holdout_samples()
-
-    
     def _create_id_mapping(self) -> Dict[str, str]:
         mapping = {}
         missing_samples = []
@@ -45,32 +41,7 @@ class SampleProcessor:
                             missing_samples.append(sample_id)
                             self.logger.warning(f"No genotype_id mapping found for sample_id '{sample_id}' in table '{table_name}' of dataset '{dataset_name}'.")
 
-        if missing_samples:
-            self.logger.error(f"Missing genotype mappings for samples: {missing_samples}")
-        else:
-            self.logger.info("All samples have been successfully mapped to genotype IDs.")
-
         return mapping
-
-        if missing_samples:
-            self.logger.error(f"Missing genotype mappings for samples: {missing_samples}")
-        else:
-            self.logger.info("All samples have been successfully mapped to genotype IDs.")
-
-        return mapping
-
-    def verify_holdout_samples(self):
-        """Ensure all holdout samples have labels and are mapped."""
-        missing_samples = []
-        for table_name, table_info in self.holdout_data.items():
-            for sample_id in table_info['data'].index:
-                if sample_id not in self.id_mapping:
-                    missing_samples.append(sample_id)
-        if missing_samples:
-            self.logger.error(f"The following holdout samples are missing in id_mapping: {missing_samples}")
-            # raise ValueError(f"Missing labels for holdout samples: {missing_samples}")
-        else:
-            self.logger.info("All holdout samples have corresponding labels.")
 
     def _load_and_process_tables(self, table_configs: List[TableMetadata]) -> Dict[str, Dict]:
         processed_tables = {}

@@ -12,7 +12,6 @@ from pyro.contrib import autoname
 from pyro.infer.autoguide import AutoMultivariateNormal
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.svm import SVC
-import uuid
 from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import MultinomialNB
@@ -24,6 +23,7 @@ import warnings
 
 # Ignore ConvergenceWarning from hyperparameter optimization
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
 
 class RadialBasisSVC(SVC):
     def __init__(
@@ -61,19 +61,6 @@ class RadialBasisSVC(SVC):
             break_ties=break_ties,
             random_state=random_state
         )
-import uuid
-import numpy as np
-import torch
-import pyro
-import pyro.distributions as dist
-from pyro.infer import SVI, TraceMeanField_ELBO
-from pyro.optim import ClippedAdam
-from pyro.infer.autoguide import AutoMultivariateNormal
-from pyro.contrib.autoname import scope
-from sklearn.base import BaseEstimator, ClassifierMixin
-from tqdm import tqdm
-import os
-
 
 class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
     def __init__(self, num_iterations=1000, lr=1e-3, verbose=False, unique_id=''):
@@ -106,10 +93,11 @@ class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
         optimizer = ClippedAdam({'lr': self.lr, 'clip_norm': 5.0})
 
         # Use AutoMultivariateNormal
-        self.guide = AutoMultivariateNormal(self.model).to(self.device)
+        with autoname.scope(prefix=self.unique_id):
+            self.guide = AutoMultivariateNormal(self.model).to(self.device)
 
-        # Set up the SVI object with TraceMeanField_ELBO
-        svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
+            # Set up the SVI object with TraceMeanField_ELBO
+            svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
 
         # Training loop
         progress_bar = tqdm(range(self.num_iterations), desc="Training", disable=not self.verbose)
@@ -199,6 +187,5 @@ stack = {
     RadialBasisSVC(probability=True): {"C": Real(1e-4, 1e4, prior="log-uniform"), 'gamma': Real(1e-4, 1e-1, prior="log-uniform")},
     lgb.LGBMClassifier(): {"learning_rate": Real(1e-6, 1e-1, prior="log-uniform"), "max_depth": Integer(3, 10), "n_estimators": Integer(100, 1000)},
     KNeighborsClassifier(): {"n_neighbors": Integer(1, 10)},
-    RandomForestClassifier(): {"n_estimators": Integer(100, 1000), "max_depth": Integer(3, 10)},
     MLPClassifier(): {"hidden_layer_sizes": Integer(10, 100), "alpha": Real(1e-4, 1e-1, prior="log-uniform")},
 }
