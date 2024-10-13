@@ -86,7 +86,7 @@ config = Config(
     tracking=TrackingConfig(
         name="Microglial variants, MAF >= 0.5% (rare-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        experiment_name="microglial60-als-rareBinned-0.005MAF",
+        experiment_name="dbg",
         plot_all_sample_importances=False,
         tracking_uri="http://127.0.0.1:5000/",
     ),
@@ -155,9 +155,9 @@ config = Config(
         ]
     ),
     sampling=SamplingConfig(
-        bootstrap_iterations=1,
+        bootstrap_iterations=60,
         cross_val_iterations=10,
-        feature_confidence_level=0.15,
+        feature_confidence_level=0.05,
         test_size=0.2,
         sequestered_ids=[],
         shuffle_labels=False,

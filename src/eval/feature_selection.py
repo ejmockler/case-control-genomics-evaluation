@@ -1,28 +1,31 @@
-import logging
-from typing import Optional, Tuple
 import os
-from dataclasses import dataclass
-import pandas as pd
-
+import time
 # Enable fallback for CPU since Cauchy is not supported on MPS
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
+import logging
+from typing import Optional, Tuple
+from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 import torch
 import pyro
 import pyro.distributions as dist
-from pyro.infer import SVI, Trace_ELBO, Predictive
-from pyro.optim import AdamW
+from pyro.contrib import autoname
+from pyro.infer import SVI, TraceMeanField_ELBO, Predictive
+from pyro.optim import ClippedAdam
+from pyro.infer.autoguide import AutoLowRankMultivariateNormal
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.mixture import GaussianMixture
+from sklearn.neighbors import KernelDensity
 from torch.utils.data import DataLoader, TensorDataset
+from scipy.signal import find_peaks, peak_prominences, peak_widths
+from joblib import Parallel, delayed
+import matplotlib.pyplot as plt
 import mlflow
 from tqdm import tqdm
-import time
-from scipy.stats import gaussian_kde
-from scipy.signal import find_peaks, peak_prominences, peak_widths
-from sklearn.mixture import GaussianMixture
-import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -32,19 +35,18 @@ class FeatureSelectionResult:
     total_variants: int
     confidence_level: float
 
-
+        
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
     """
     Bayesian Feature Selector using Sparse Bayesian Learning (SBL) with Pyro.
-    It leverages a custom ELBO with a KL divergence term to a reference distribution
-    to handle correlated features and induce sparsity for feature selection.
+    Each instance must have a unique identifier to prevent sample site name collisions.
     """
-    def __init__(self, num_iterations=1000, lr=1e-6, confidence_level=0.95, num_samples=1000,
-                 batch_size=512, verbose=False, patience=800, fallback_percentile=95,
-                 validation_split=0.2, checkpoint_path="checkpoint.params", ref_dist=None):
+    def __init__(self, unique_id: str, num_iterations=1000, lr=1e-4, confidence_level=0.95, num_samples=1000,
+                 batch_size=512, verbose=False, patience=800,
+                 validation_split=0.2, checkpoint_path="checkpoint.params"):
         """
         Initializes the BayesianFeatureSelector with the given hyperparameters.
-
+        
         Parameters:
         - num_iterations: Number of training iterations.
         - lr: Learning rate for the optimizer.
@@ -55,7 +57,9 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         - patience: Number of epochs with no improvement before early stopping.
         - validation_split: Fraction of data to use for validation.
         - checkpoint_path: Path to save model checkpoints.
+        - unique_id: A unique string identifier for the model instance.
         """
+        self.unique_id = unique_id  # Store the unique identifier
         self.logger = logging.getLogger(__name__)
         self.num_iterations = num_iterations
         self.lr = lr
@@ -65,15 +69,22 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.verbose = verbose
         self.patience = patience
         self.validation_split = validation_split
-        self.checkpoint_path = checkpoint_path
+        # Append unique_id to checkpoint_path to ensure uniqueness
+        self.checkpoint_path = f"{os.path.splitext(checkpoint_path)[0]}_{unique_id}.params"
         
         # Set the device based on availability
-        if torch.backends.mps.is_available():
-            self.device = torch.device("mps")
-        elif torch.cuda.is_available():
+        # if torch.backends.mps.is_available():
+        #     self.device = torch.device("mps")
+        #     if self.verbose:
+        #         print("Using MPS (GPU) acceleration with CPU fallback.")
+        if torch.cuda.is_available():
             self.device = torch.device("cuda")
+            if self.verbose:
+                print("Using CUDA (GPU) acceleration.")
         else:
             self.device = torch.device("cpu")
+            if self.verbose:
+                print("Using CPU.")
         
         self.logger.info(f"Using device: {self.device}")
 
@@ -106,67 +117,53 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         val_loader = DataLoader(TensorDataset(X_val, y_val), 
                                 batch_size=self.batch_size, shuffle=False)
 
-        # Define the Bayesian model
+        # Define the Bayesian model with unique sample site names and improved parameterization
         def model(X_batch, y_batch):
             B, D = X_batch.size(0), X_batch.size(1)
             
-            # Global sparsity parameter
-            tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
-            
-            # Local sparsity parameters
-            lam = pyro.sample('lam', dist.HalfCauchy(scale=torch.ones(D, device=self.device)).to_event(1))
-            
-            # Scale for beta coefficients
-            sigma = lam * tau_0  # Shape: [D]
-            
-            # Sample beta coefficients with sparsity
-            beta = pyro.sample('beta', dist.Normal(
-                loc=torch.zeros(D, device=self.device),
-                scale=sigma
-            ).to_event(1))  # Event dimension is now 1
-            
-            # Sample intercept
-            intercept = pyro.sample('intercept', dist.Normal(0., 10.))
-            
-            # Compute logits
-            logits = intercept + X_batch.matmul(beta)
-            
-            # Observation likelihood
-            with pyro.plate('data', B):
-                pyro.sample('obs', dist.Bernoulli(logits=logits), obs=y_batch)
+            with autoname.scope(prefix=self.unique_id):
+                # Global shrinkage parameter
+                tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
+                
+                # Local shrinkage parameters
+                with pyro.plate(f'features', D):
+                    lam = pyro.sample('lam', dist.HalfCauchy(scale=1.0))
+                
+                # Auxiliary variables for improved heavy-tailed modeling
+                with pyro.plate(f'features_c2', D):
+                    c2 = pyro.sample('c2', dist.InverseGamma(0.5, 0.5))
+                
+                # Scale for beta coefficients
+                sigma = tau_0 * lam * torch.sqrt(c2)
+                
+                # Sample beta coefficients with sparsity
+                beta = pyro.sample('beta', dist.Normal(
+                    loc=torch.zeros(D, device=self.device),
+                    scale=sigma
+                ).to_event(1))
+                
+                # Sample intercept
+                intercept = pyro.sample('intercept', dist.Normal(0., 10.))
+                
+                # Compute logits
+                if len(beta.shape) == 1:
+                    logits = intercept + X_batch.matmul(beta)
+                else:
+                    logits = intercept[:, None] + torch.matmul(beta, X_batch.T)
+                
+                # Observation likelihood
+                with pyro.plate(f'data', B):
+                    pyro.sample('obs', dist.Bernoulli(logits=logits), obs=y_batch)
 
+        # Use AutoMultivariateNormal guide
+        guide = AutoLowRankMultivariateNormal(model)
 
-
-        # Define the guide (variational distribution)
-        def guide(X_batch, y_batch):
-            D = X_batch.size(1)
-            
-            # Variational parameters for tau_0
-            tau_loc = pyro.param('tau_loc', torch.tensor(0.0, device=self.device))
-            tau_scale = pyro.param('tau_scale', torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
-            tau_0 = pyro.sample('tau_0', dist.LogNormal(tau_loc, tau_scale))
-            
-            # Variational parameters for lam
-            lam_loc = pyro.param('lam_loc', torch.zeros(D, device=self.device))
-            lam_scale = pyro.param('lam_scale', torch.ones(D, device=self.device), constraint=dist.constraints.positive)
-            lam = pyro.sample('lam', dist.LogNormal(lam_loc, lam_scale).to_event(1))
-            
-            # Variational parameters for beta (mean-field approximation)
-            beta_loc = pyro.param('beta_loc', torch.zeros(D, device=self.device))
-            beta_scale = pyro.param('beta_scale', torch.ones(D, device=self.device), constraint=dist.constraints.positive)
-            beta = pyro.sample('beta', dist.Normal(beta_loc, beta_scale).to_event(1))  # Event dimension is now 1
-            
-            # Variational parameters for intercept
-            intercept_loc = pyro.param('intercept_loc', torch.tensor(0.0, device=self.device))
-            intercept_scale = pyro.param('intercept_scale', torch.tensor(1.0, device=self.device), constraint=dist.constraints.positive)
-            pyro.sample('intercept', dist.Normal(intercept_loc, intercept_scale))
-
-
-
-        # Initialize the optimizer
-        optimizer = AdamW({"lr": self.lr})
-        # Set up the SVI object
-        svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
+        # Initialize the optimizer with adjusted settings
+        optimizer = ClippedAdam({"lr": self.lr, "clip_norm": 5.0})
+        
+        # Set up the SVI object with TraceMeanField_ELBO loss
+        svi = SVI(model, guide, optimizer, loss=TraceMeanField_ELBO())
+        
         # Clear previous parameter store
         pyro.clear_param_store()
 
@@ -194,8 +191,11 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
                 val_loss += svi.evaluate_loss(X_val_batch, y_val_batch)
             avg_val_loss = val_loss / len(val_loader)
 
+            # Compute average epoch loss
+            avg_epoch_loss = epoch_loss / len(train_loader.dataset)
+
             # Log metrics using MLflow
-            self.log_metrics(epoch, epoch_loss, avg_val_loss)
+            self.log_metrics(epoch, avg_epoch_loss, avg_val_loss)
 
             # Update progress bar if verbose
             if self.verbose:
@@ -205,12 +205,12 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
                     remaining_iters = self.num_iterations - epoch
                     estimated_remaining_time = remaining_iters * avg_time_per_iter
                     progress_bar.set_postfix({
-                        'train_loss': f"{epoch_loss:.4f}",
+                        'train_loss': f"{avg_epoch_loss:.4f}",
                         'val_loss': f"{avg_val_loss:.4f}",
                         'ETA': f"{estimated_remaining_time / 60:.2f} min"
                     })
                 else:
-                    progress_bar.set_postfix({'train_loss': f"{epoch_loss:.4f}"})
+                    progress_bar.set_postfix({'train_loss': f"{avg_epoch_loss:.4f}"})
 
             # Early Stopping Check
             if avg_val_loss < best_val_loss:
@@ -232,15 +232,22 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         # Load the best parameters
         pyro.get_param_store().load(self.checkpoint_path)
 
+        # Extract beta samples from the posterior using the prefixed name
+        beta_key = f'{self.unique_id}/beta'
+
         # Use Predictive for posterior sampling
         predictive = Predictive(model, guide=guide, num_samples=self.num_samples,
-                                return_sites=["beta", "intercept"])
+                                return_sites=[beta_key], parallel=True)
         posterior_samples = predictive(X_train, y_train)
+        beta_samples = posterior_samples[beta_key].detach().cpu().numpy()
 
-        # Extract beta samples from the posterior
-        beta_samples = posterior_samples['beta'].detach().cpu().numpy()
-        # Remove the extra dimension from parallel sampling
-        beta_samples = np.squeeze(beta_samples, axis=1)
+        # Remove the extra dimension from parallel sampling if necessary
+        if beta_samples.ndim == 3:
+            # Shape: [num_samples, 1, D] -> [num_samples, D]
+            beta_samples = beta_samples.squeeze(1)
+        elif beta_samples.ndim == 2 and beta_samples.shape[1] == 1:
+            # Shape: [num_samples, 1] -> [num_samples]
+            beta_samples = beta_samples.squeeze(1)
 
         # Compute credible intervals
         lower_bound = np.percentile(beta_samples, (1 - self.confidence_level) / 2 * 100, axis=0)
@@ -252,6 +259,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
 
         # Select features where the credible interval does not include zero
         non_zero = (lower_bound > 0) | (upper_bound < 0)
+        
         if isinstance(X, pd.DataFrame):
             self.selected_features_ = X.columns[non_zero]
         else:
@@ -287,32 +295,31 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         """
         mlflow.log_metric("train_loss", train_loss, step=epoch)
         mlflow.log_metric("val_loss", val_loss, step=epoch)
-        
-def estimate_kde(
-    data: np.ndarray,
-    bandwidth: str = 'silverman'
-) -> Tuple[np.ndarray, np.ndarray]:
-    kde = gaussian_kde(data, bw_method=bandwidth)
-    x_grid = np.linspace(min(data), max(data), 1000)
-    kde_values = kde.evaluate(x_grid)
-    return x_grid, kde_values
 
-def estimate_number_of_modes(
-    data: np.ndarray,
-    max_components: int = 100
-) -> int:
-    lowest_bic = np.infty
-    bic = []
-    n_components_range = range(1, max_components + 1)
+@lru_cache(maxsize=32)
+def estimate_kde_sklearn(data_tuple: Tuple[float, ...], bandwidth: str = 'silverman') -> Tuple[np.ndarray, np.ndarray]:
+    data = np.array(data_tuple)
+    if bandwidth == 'silverman':
+        bandwidth = 1.06 * np.std(data) * len(data) ** (-1 / 5.)
+    kde = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
+    kde.fit(data[:, np.newaxis])
+    x_grid = np.linspace(min(data), max(data), 500)[:, np.newaxis]
+    log_density = kde.score_samples(x_grid)
+    kde_values = np.exp(log_density)
+    return x_grid.flatten(), kde_values
+
+def compute_bic(n_components: int, data: np.ndarray) -> float:
+    gmm = GaussianMixture(n_components=n_components, covariance_type='full', random_state=0)
+    gmm.fit(data)
+    return gmm.bic(data)
+
+def estimate_number_of_modes_parallel(data: np.ndarray, max_components: int = 20) -> int:
     data_reshaped = data.reshape(-1, 1)
-    for n_components in n_components_range:
-        gmm = GaussianMixture(n_components=n_components)
-        gmm.fit(data_reshaped)
-        bic_score = gmm.bic(data_reshaped)
-        bic.append(bic_score)
-        if bic_score < lowest_bic:
-            lowest_bic = bic_score
-            best_n_components = n_components
+    n_components_range = range(1, max_components + 1)
+    bic_scores = Parallel(n_jobs=-1)(
+        delayed(compute_bic)(n, data_reshaped) for n in n_components_range
+    )
+    best_n_components = n_components_range[np.argmin(bic_scores)]
     return best_n_components
 
 def detect_peaks_adaptive(
@@ -347,25 +354,17 @@ def detect_peaks_adaptive(
     
     return significant_peaks, significant_properties
 
-def determine_threshold(
-    x_grid: np.ndarray,
-    kde_values: np.ndarray,
-    peaks: np.ndarray
-) -> Optional[float]:
+def determine_threshold_vectorized(x_grid: np.ndarray, kde_values: np.ndarray, peaks: np.ndarray) -> Optional[float]:
     if len(peaks) >= 2:
-        peak_heights = kde_values[peaks]
-        sorted_peaks = peaks[np.argsort(-peak_heights)]
-        first_peak = sorted_peaks[0]
-        second_peak = sorted_peaks[1]
+        sorted_peaks = peaks[np.argsort(-kde_values[peaks])]
+        first_peak, second_peak = sorted_peaks[:2]
         start, end = sorted([first_peak, second_peak])
         valley_region = kde_values[start:end]
-        if len(valley_region) == 0:
+        if valley_region.size == 0:
             return None
         valley_index = np.argmin(valley_region) + start
-        threshold = x_grid[valley_index]
-        return threshold
-    else:
-        return None
+        return x_grid[valley_index]
+    return None
 
 def plot_kde(
     x_grid: np.ndarray,
@@ -392,20 +391,22 @@ def detect_data_threshold(
     plot: bool = False,
     logger: Optional[logging.Logger] = None,
     fallback_percentile: float = 95,
-    max_modes: int = 100
+    max_modes: int = 20
 ) -> float:
     if logger is None:
         logger = logging.getLogger(__name__)
+    logger.setLevel(logging.WARNING)
 
     if len(data) < 2:
         raise ValueError("At least two data points are required.")
 
-    if np.isclose(min(data), max(data)):
+    if np.isclose(data.min(), data.max()):
         raise ValueError("Data values are nearly constant; threshold detection is not meaningful.")
 
-    x_grid, kde_values = estimate_kde(data, bandwidth=bandwidth)
+    data = data.astype(np.float32)
+    x_grid, kde_values = estimate_kde_sklearn(tuple(data), bandwidth=bandwidth)
 
-    num_modes = estimate_number_of_modes(data, max_components=max_modes)
+    num_modes = estimate_number_of_modes_parallel(data, max_components=max_modes)
     logger.info(f"Estimated number of modes: {num_modes}")
 
     if num_modes >= 2:
@@ -413,7 +414,7 @@ def detect_data_threshold(
         peaks, properties = detect_peaks_adaptive(kde_values, x_grid, expected_num_peaks=num_modes)
         logger.info(f"Number of significant peaks detected: {len(peaks)}")
 
-        threshold = determine_threshold(x_grid, kde_values, peaks)
+        threshold = determine_threshold_vectorized(x_grid, kde_values, peaks)
         if threshold is not None:
             logger.info(f"Detected threshold at value: {threshold:.4f}")
         else:
@@ -426,7 +427,6 @@ def detect_data_threshold(
         logger.info(f"Using {fallback_percentile}th percentile as threshold: {threshold:.4f}")
 
     if plot:
-        peaks, _ = detect_peaks_adaptive(kde_values, x_grid, expected_num_peaks=num_modes)
         plot_kde(x_grid, kde_values, peaks, threshold, data)
 
     return threshold

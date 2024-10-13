@@ -55,36 +55,39 @@ class GenotypeProcessor:
         
         # Annotate rows with necessary statistics including variance
         mt = mt.annotate_rows(
-            maf=hl.agg.mean(mt.GT_processed) / 2,
+            maf=hl.if_else(
+                self.config.binarize,
+                hl.agg.mean(mt.GT_processed),        # Proportion of carriers
+                hl.agg.mean(mt.GT_processed) / 2     # Traditional allele frequency
+            ),
             stdev=hl.agg.stats(mt.GT_processed).stdev,
             has_missing=hl.agg.any(hl.is_missing(mt.GT_processed)),
-            variant_id = hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position)
+            variant_id=hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position)
         )
         
         # Collect stdev values for threshold detection
-        self.logger.info("Collecting standard deviation values for threshold detection.")
-        stdev_rows = mt.rows().select('stdev').collect()  # Adjust limit as needed
-        stdevs = np.array([row['stdev'] for row in stdev_rows if row['stdev'] is not None])
+        # self.logger.info("Collecting standard deviation values for threshold detection.")
+        # stdev_rows = mt.rows().select('stdev').collect()
+        # stdevs = np.array([row['stdev'] for row in stdev_rows if row['stdev'] is not None])
         
-        if len(stdevs) == 0:
-            raise ValueError("No variance values collected. Please check your data.")
+        # if len(stdevs) == 0:
+        #     raise ValueError("No variance values collected. Please check your data.")
         
         # Detect threshold using KDE with Dip Test
-        self.logger.info("Detecting stdev threshold using KDE with Dip Test.")
-        threshold = detect_data_threshold(stdevs, bandwidth='silverman', plot=False)  # Set plot=True for visualization
-        self.config.min_variance = threshold
-        self.logger.info(f"Detected stdev threshold: {threshold:.4f}")
+        # self.logger.info("Detecting stdev threshold using KDE with Dip Test.")
+        # threshold = detect_data_threshold(stdevs, bandwidth='silverman', plot=False)  # Set plot=True for visualization
+        # self.config.min_variance = threshold
+        # self.logger.info(f"Detected stdev threshold: {threshold:.4f}")
         
         # Apply row filters based on detected variance threshold and other criteria
         mt = mt.filter_rows(
-            (mt.stdev >= threshold) &  # Apply detected variance threshold
-            (mt.locus.contig.matches(self._get_contig_pattern())) &  # Filter biologically useful contigs
-            hl.all(lambda a: hl.len(a) == 1, mt.alleles) &  # Filter to only include SNPs
-            (mt.maf >= self.config.min_allele_frequency) &  # Apply MAF filter
-            (mt.maf <= self.config.max_allele_frequency) &
-            (~mt.has_missing)  # Drop variants with any missing values
+            (mt.maf > 0) & (mt.maf < 1) &                             # Remove invariant variants
+            (mt.locus.contig.matches(self._get_contig_pattern())) &   # Filter biologically useful contigs
+            hl.all(lambda a: hl.len(a) == 1, mt.alleles) &            # Filter to only include SNPs
+            (mt.maf >= self.config.min_allele_frequency) &            # Apply MAF filter
+            (mt.maf <= self.config.max_allele_frequency) &            # Upper MAF filter
+            (~mt.has_missing)                                         # Drop variants with any missing values
         )
-        
         self._log_filtering_results(mt)
         return mt
 

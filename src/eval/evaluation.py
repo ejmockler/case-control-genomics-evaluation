@@ -9,18 +9,18 @@ import mlflow
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import pyro
 from joblib import Parallel, delayed
 from mlflow.models import infer_signature
 from skopt import BayesSearchCV
 from sklearn.metrics import (
+    PrecisionRecallDisplay,
     average_precision_score,
     confusion_matrix,
-    precision_recall_curve,
     roc_auc_score,
     matthews_corrcoef,
     f1_score,
-    precision_score,
-    recall_score,
+    accuracy_score,
     roc_curve
 )
 from sklearn.pipeline import Pipeline
@@ -28,6 +28,7 @@ from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
+from skopt.plots import plot_convergence
 
 from config import SamplingConfig, TrackingConfig
 from data.genotype_processor import GenotypeProcessor
@@ -66,23 +67,11 @@ def calculate_metrics(y_true, y_pred):
         "accuracy": y_true == y_pred_binary
     }
     
-    # Calculate aggregate metrics
-    if len(np.unique(y_true)) > 1:
-        auc = roc_auc_score(y_true, y_pred)
-        precision = precision_score(y_true, y_pred_binary, average='binary')
-        recall = recall_score(y_true, y_pred_binary, average='binary')
-    
-    else:
-        auc = None
-        precision = None
-        recall = None
-    
     aggregate_metrics = {
-        "auc": auc,
         "mcc": matthews_corrcoef(y_true, y_pred_binary),
         "f1": f1_score(y_true, y_pred_binary),
-        "precision": precision,
-        "recall": recall
+        "case_accuracy": accuracy_score(y_true[y_true != 0], y_pred_binary[y_true != 0]),
+        "control_accuracy": accuracy_score(y_true[y_true == 0], y_pred_binary[y_true == 0])
     }
     
     # Combine sample-wise and aggregate metrics
@@ -141,12 +130,24 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
     if model_coefficient_df is not None:
         mlflow.log_table(data=model_coefficient_df, artifact_file=sanitize_mlflow_name("feature_importances.json"))
 
-def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=15, is_worker=True, num_variants: int = None, total_variants: int = None, confidence_level: float = None):
+def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=15, is_worker=True, num_variants: int = None, total_variants: int = None, confidence_level: float = None, iteration: int = 0):
     """Perform Bayesian hyperparameter optimization for a model and evaluate on holdout samples."""
+    logger = logging.getLogger(__name__)
+    
+    # Retrieve model parameters
+    params = model.get_params()
+    
+    # Check if 'unique_id' is a valid parameter
+    if 'unique_id' in params:
+        params['unique_id'] = f"{iteration}"
+    
+    # Initialize a fresh model instance with updated parameters
+    process_safe_model = model.__class__(**params)
+    
     try:
         pipeline = Pipeline([
             ('scaler', MinMaxScaler()),
-            ('classifier', model)
+            ('classifier', process_safe_model)
         ])
         
         search_spaces = {f'classifier__{key}': value for key, value in search_spaces.items()}
@@ -156,12 +157,13 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
             search_spaces,
             n_iter=n_iter,
             cv=5,
-            n_jobs=1 if is_worker else -1,
+            n_jobs=-1,
+            n_points=10,
             scoring='roc_auc'
         )
         
         search.fit(X_train, y_train)
-        
+                
         # Use the fitted pipeline for predictions
         y_pred_train = search.predict_proba(X_train)[:, 1]
         y_pred_test = search.predict_proba(X_test)[:, 1]
@@ -197,6 +199,8 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
         # Start a run for this model evaluation
         with mlflow.start_run(run_name=f"{model.__class__.__name__}", nested=True) as run:
             mlflow.set_tag("model", model.__class__.__name__)
+
+            plot_and_log_convergence('ROC AUC', search, y_train, trackingConfig, num_variants, total_variants, confidence_level)
             
             log_mlflow_metrics(
                 metrics,
@@ -215,6 +219,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
 
             # Pass the feature selection metrics to the visualization function
             create_and_log_visualizations(
+                model.__class__.__name__,
                 y_test,
                 y_pred_test,
                 trackingConfig,
@@ -225,6 +230,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 confidence_level=confidence_level
             )
             create_and_log_visualizations(
+                model.__class__.__name__,
                 y_train,
                 y_pred_train,
                 trackingConfig,
@@ -236,7 +242,6 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
             )
 
             # --- Holdout Evaluation ---
-            logger = logging.getLogger(__name__)
             logger.info("Starting holdout evaluation.")
 
             holdout_tables = sample_processor.holdout_data
@@ -297,6 +302,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
 
                 # Log holdout visualizations with actual table_name and feature selection metrics
                 create_and_log_visualizations(
+                    model.__class__.__name__,
                     y_holdout,
                     y_pred_holdout,
                     trackingConfig,
@@ -311,7 +317,6 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
 
         return metrics, y_pred_test, y_pred_train, best_params, run.info.run_id
     except Exception as e:
-        logger = logging.getLogger(__name__)
         logger.exception("An error occurred during model evaluation.")
         raise e
 
@@ -415,24 +420,25 @@ def process_iteration(
                 y_test=y_test,
                 trackingConfig=trackingConfig,
                 sample_processor=sample_processor,
-                n_iter=10,
+                n_iter=15,
                 is_worker=True,
                 num_variants=num_variants,
                 total_variants=total_variants,
-                confidence_level=confidence_level
+                confidence_level=confidence_level,
+                iteration=iteration
             )
 
-            mlflow.log_metric(f"{model_name}_test_auc", metrics['aggregate']['test']['auc'])
             mlflow.log_metric(f"{model_name}_test_f1", metrics['aggregate']['test']['f1'])
             mlflow.log_param(f"{model_name}_run_id", child_run_id)
 
             iteration_results["models"].append({
                 "model_name": model_name,
-                "test_auc": metrics['aggregate']['test']['auc'],
                 "test_f1": metrics['aggregate']['test']['f1'],
                 "best_params": best_params,
                 "run_id": child_run_id
             })
+
+        pyro.clear_param_store()
 
     return iteration_results
 
@@ -440,7 +446,7 @@ def parallel_feature_selection(
     parquet_path: str,
     sample_processor: SampleProcessor,
     samplingConfig: SamplingConfig,
-    num_iterations: int = 1,
+    num_iterations: int = 10,
     total_variants: int = None,
     random_state: int = 42,
     trackingConfig: TrackingConfig = None
@@ -455,8 +461,15 @@ def parallel_feature_selection(
     logger.info("Starting parallel feature selection.")
 
     # Perform feature selection iterations
-    selected_features_list = Parallel(n_jobs=1, backend="loky", verbose=10)(
-        delayed(feature_selection_iteration)(i, parquet_path, sample_processor, samplingConfig, random_state, trackingConfig)
+    selected_features_list = Parallel(n_jobs=-1, backend="loky", verbose=10)(
+        delayed(feature_selection_iteration)(
+            i, 
+            parquet_path, 
+            sample_processor, 
+            samplingConfig, 
+            random_state + i,  # Unique seed
+            trackingConfig
+        )
         for i in range(num_iterations)
     )
 
@@ -466,7 +479,7 @@ def parallel_feature_selection(
     feature_counts = pd.Series(np.concatenate(selected_features_list)).value_counts()
 
     # Determine overlapping features using a statistical threshold
-    threshold = np.ceil(num_iterations * 0.25)  # e.g., features selected in at least 25% of iterations
+    threshold = np.floor(num_iterations * 0.2)  # e.g., features selected in at least 20% of iterations
     overlapping_features = feature_counts[feature_counts >= threshold].index
 
     num_variants = len(overlapping_features)
@@ -494,6 +507,9 @@ def feature_selection_iteration(
     """
     logger = logging.getLogger(f"feature_selection_iteration_{iteration}")
     logger.info(f"Feature selection iteration {iteration + 1}")
+
+    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
+    mlflow.set_experiment(trackingConfig.experiment_name)
 
     # Start an MLflow run for this feature selection iteration
     with mlflow.start_run(run_name=f"Feature_Selection_{iteration}", nested=True) as run:
@@ -528,14 +544,15 @@ def feature_selection_iteration(
             while len(selected_features) == 0 and attempt < max_attempts:
                 feature_selector = BayesianFeatureSelector(
                     num_iterations=10,
-                    lr=1e-3,
-                    confidence_level=0.0005,
+                    lr=1e-2,
+                    confidence_level=samplingConfig.feature_confidence_level,
                     num_samples=2000,
                     patience=800,
                     validation_split=0.2,
                     batch_size=512,
                     verbose=True,
-                    checkpoint_path=f"/tmp/feature_selection_checkpoint_{iteration}.params",
+                    checkpoint_path=f"/tmp/feature_selection_checkpoint.params",
+                    unique_id=f"{iteration}"
                 )
                 feature_selector.fit(X_train, y_train)
                 selected_features = feature_selector.selected_features_
@@ -592,8 +609,6 @@ def bootstrap_models(
 
     # Set up MLflow tracking
     mlflow.set_tracking_uri(trackingConfig.tracking_uri)
-    
-    # Initialize MlflowClient with the tracking URI
     client = MlflowClient()
     
     # Try to create the experiment, handle the case where it already exists
@@ -621,7 +636,7 @@ def bootstrap_models(
     logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
     pivoted_df.write.parquet(parquet_path, mode="overwrite")
 
-    total_variant_count = len(pivoted_df.columns)
+    total_variant_count = len(pivoted_df.columns) - 1  # Subtract the sample ID column
 
     # Force execution of Hail operations and close the Hail context
     hl.stop()
@@ -631,7 +646,7 @@ def bootstrap_models(
         parquet_path=parquet_path,
         sample_processor=sample_processor,
         samplingConfig=samplingConfig,
-        num_iterations=1,  # Number of parallel feature selection iterations
+        num_iterations=10,  # Number of parallel feature selection iterations
         total_variants=total_variant_count,
         random_state=random_state,
         trackingConfig=trackingConfig
@@ -682,11 +697,12 @@ def bootstrap_models(
 
     return pd.DataFrame.from_records(records)
 
-def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, confidence_level=None):
+def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, confidence_level=None):
     """
     Create and log visualizations directly to MLflow.
     
     Args:
+        model_name (str): Name of the model.
         y_true (array-like): True labels.
         y_pred (array-like): Predicted probabilities.
         trackingConfig (TrackingConfig): Configuration for tracking.
@@ -782,9 +798,8 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
     
     # Precision-Recall Curve
     def plot_pr(fig, ax):
-        precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
+        display = PrecisionRecallDisplay.from_predictions(y_true, y_pred, ax=ax, name=f'Precision-Recall')
         avg_score = average_precision_score(y_true, y_pred)
-        ax.plot(recall, precision, label=f'Precision-Recall (AP={avg_score:.3f})')
         no_skill = len(y_true[y_true == 1]) / len(y_true)
         ax.plot([0, 1], [no_skill, no_skill], linestyle='--', label=f'No Skill (Precision={no_skill:.3f})')
         ax.set_xlabel('Recall')
@@ -796,7 +811,7 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
 
         # Set the title at the figure level
         fig.suptitle(f'Precision-Recall Curve\n{trackingConfig.name}\n{subtitle}')
-        return precision, recall, thresholds, avg_score
+        return display.precision, display.recall, avg_score
 
     if len(np.unique(y_true)) > 1:
         # Plot ROC Curve with square aspect ratio
@@ -819,18 +834,16 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
             # Plot Precision-Recall Curve with square aspect ratio
             pr_result = log_plot(plot_pr, "pr_curve.svg", square=True)
             if pr_result:
-                precision, recall, thresholds, avg_score = pr_result
+                precision, recall, avg_score = pr_result
                 pr_df = pd.DataFrame({
                     'precision': precision,
                     'recall': recall,
-                    'thresholds': np.append(thresholds, np.nan)  # Add NaN to match length of precision/recall
                 })
                 mlflow.log_table(pr_df, f"{base_metrics_path}/pr_curve.json")
                 mlflow.log_metrics({
                     f"{base_metrics_path}/pr_auc": avg_score,
                     f"{base_metrics_path}/pr_precision_mean": float(np.mean(precision)),
                     f"{base_metrics_path}/pr_recall_mean": float(np.mean(recall)),
-                    f"{base_metrics_path}/pr_thresholds_mean": float(np.mean(thresholds)),
                 })
     else:
         logger.warning(f"Not enough unique values in y_true to compute ROC & precision-recall for {base_metrics_path}")
@@ -844,6 +857,10 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
         ax.set_xlabel('Predicted Probability')
         ax.set_ylabel('Count')
         ax.set_aspect('auto')  # Use default aspect ratio for histograms
+
+        # Set x-ticks every 0.05 and labels every 0.1
+        ax.set_xticks(np.arange(0, 1.05, 0.05))
+        ax.set_xticks(np.arange(0, 1.1, 0.1), minor=True)
 
         # Set the title at the figure level
         fig.suptitle(f'Distribution of Predictions\n{trackingConfig.name}\n{subtitle}')
@@ -884,3 +901,55 @@ def create_and_log_visualizations(y_true, y_pred, trackingConfig, set_type="test
         else:
             logger.warning(f"Confusion matrix has unexpected shape: {cm_result.shape}")
     plt.close('all')
+
+def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_variants=None, total_variants=None, confidence_level=None):
+    """
+    Plot hyperparameter convergence using skopt's plot_convergence and log it to MLflow.
+
+    Args:
+        search (BayesSearchCV): The fitted Bayesian search object.
+        model_name (str): Name of the model.
+        trackingConfig (TrackingConfig): Configuration for tracking.
+        num_variants (int, optional): Number of selected features. Defaults to None.
+        total_variants (int, optional): Total number of features before selection. Defaults to None.
+        confidence_level (float, optional): Confidence level used in feature selection. Defaults to None.
+    """
+    logger = logging.getLogger(__name__)
+    model_name = search.estimator.__class__.__name__
+
+    # Construct the subtitle with feature selection info if available
+    if num_variants is not None and total_variants is not None and confidence_level is not None:
+        subtitle = (f"{num_variants} of {total_variants} variants selected at "
+                    f"{confidence_level*100:.0f}% credible interval\n")
+    else:
+        subtitle = ""
+
+    # Existing subtitle information
+    num_cases = np.sum(y_true != 0)
+    num_controls = np.sum(y_true == 0)
+    subtitle += f"Cases: {num_cases}, Controls: {num_controls}\n"
+
+    # Set the title of the plot
+    title = f'Hyperparameter Convergence for {model_name} ({metric_name})\n{trackingConfig.name}\n\n{subtitle}'
+
+    try:
+        # Create a new figure for the convergence plot
+        fig, ax = plt.subplots(figsize=(10, 10), constrained_layout=True)
+        
+        # Plot the convergence using skopt's plot_convergence
+        plot_convergence(search.optimizer_results_, ax=ax)
+        
+        # Set the title of the plot
+        fig.suptitle(title, fontsize=14)
+
+        fig.tight_layout()
+        
+        # Log the figure to MLflow
+        mlflow.log_figure(fig, "plots/train/hyperparam_convergence.svg")
+        
+        # Close the figure to free up memory
+        plt.close(fig)
+        
+    except Exception as e:
+        logger.error(f"Failed to plot hyperparameter convergence for {model_name}: {e}")
+        raise e
