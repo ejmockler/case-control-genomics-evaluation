@@ -1,3 +1,4 @@
+import gc
 import logging
 from typing import Dict, Optional, List
 from functools import partial
@@ -9,8 +10,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import pyro
-from joblib import Parallel, delayed
+import ray
 from mlflow.models import infer_signature
 from skopt import BayesSearchCV
 from sklearn.metrics import (
@@ -36,23 +36,38 @@ from data.genotype_processor import GenotypeProcessor
 from data.sample_processor import SampleProcessor
 from eval.feature_selection import BayesianFeatureSelector, FeatureSelectionResult
 
+# Initialize Ray
+ray.init(ignore_reinit_error=True)
+
 def get_feature_importances(model, feature_labels):
     """Get feature importances from fitted model."""
     if hasattr(model, 'beta_loc_'):
         model_coefficient_df = pd.DataFrame()
-        model_coefficient_df['feature_importances'] = model.beta_loc_
         model_coefficient_df['feature_name'] = feature_labels
+        model_coefficient_df['feature_importances'] = model.beta_loc_
     elif hasattr(model, 'coef_'):
         model_coefficient_df = pd.DataFrame()
+        model_coefficient_df['feature_name'] = feature_labels
         if len(model.coef_.shape) > 1:
             model_coefficient_df['feature_importances'] = model.coef_[0]
         else:
             model_coefficient_df['feature_importances'] = model.coef_.flatten()
-        model_coefficient_df['feature_name'] = feature_labels
     elif hasattr(model, 'feature_importances_'):
         model_coefficient_df = pd.DataFrame()
         model_coefficient_df['feature_name'] = feature_labels
         model_coefficient_df['feature_importances'] = model.feature_importances_
+    elif hasattr(model, 'feature_log_prob_'):
+        # Convert log probabilities to probabilities and compute mean
+        prob = np.exp(model.feature_log_prob_)
+        feature_importances = prob.mean(axis=0)
+        # Create DataFrame with feature names and importances
+        model_coefficient_df = pd.DataFrame({
+            'feature_name': feature_labels,
+            'feature_importances': feature_importances
+        })
+        # Add individual class probabilities
+        for i in range(model.feature_log_prob_.shape[0]):
+            model_coefficient_df[f'class_{i}'] = prob[i]
     else:
         model_coefficient_df = None
     return model_coefficient_df
@@ -131,9 +146,22 @@ def log_mlflow_metrics(metrics, best_params, model, X_test, y_test, y_pred_test,
     if model_coefficient_df is not None:
         mlflow.log_table(data=model_coefficient_df, artifact_file=sanitize_mlflow_name("feature_importances.json"))
 
-def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sample_processor: SampleProcessor, trackingConfig: TrackingConfig, n_iter=15, is_worker=True, num_variants: int = None, total_variants: int = None, credible_interval: float = None, iteration: int = 0):
+def evaluate_model(
+        model, 
+        search_spaces, 
+        X_train, 
+        y_train, 
+        X_test, 
+        y_test, 
+        sample_processor: SampleProcessor, 
+        trackingConfig: TrackingConfig, 
+        samplingConfig: SamplingConfig, 
+        feature_selection_result: FeatureSelectionResult,
+        n_iter=10, 
+        is_worker=True, 
+        iteration: int = 0):
     """Perform Bayesian hyperparameter optimization for a model and evaluate on holdout samples."""
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)  # Use module-level logger
     
     # Retrieve model parameters
     params = model.get_params()
@@ -163,7 +191,7 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 pipeline,
                 search_spaces,
                 n_iter=n_iter,
-                cv=5,
+                cv=samplingConfig.crossval_folds,
                 n_jobs=-1 if not is_worker else 1,
                 n_points=10,
                 scoring='roc_auc'
@@ -172,8 +200,12 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
             search.fit(jnp.array(X_train.values), jnp.array(y_train.values))
                     
             # Use the fitted pipeline for predictions
-            y_pred_train = search.predict_proba(jnp.array(X_train.values))[:, 1]
-            y_pred_test = search.predict_proba(jnp.array(X_test.values))[:, 1]
+            if hasattr(search.best_estimator_['classifier'], "predict_proba"):
+                y_pred_train = search.predict_proba(jnp.array(X_train.values))[:, 1]
+                y_pred_test = search.predict_proba(jnp.array(X_test.values))[:, 1]
+            else:
+                y_pred_train = search.predict(jnp.array(X_train.values))
+                y_pred_test = search.predict(jnp.array(X_test.values))
 
             df_y_pred_train = y_train.to_frame(name='label').assign(y_pred=y_pred_train).reset_index()
             df_y_pred_test = y_test.to_frame(name='label').assign(y_pred=y_pred_test).reset_index()
@@ -198,9 +230,12 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
             feature_labels = X_train.columns.tolist()
 
             model_coefficient_df = get_feature_importances(search.best_estimator_['classifier'], feature_labels)
-
             
             mlflow.set_tag("model", model.__class__.__name__)
+
+            num_variants = feature_selection_result.num_variants
+            total_variants = feature_selection_result.total_variants
+            credible_interval = feature_selection_result.credible_interval
 
             plot_and_log_convergence('ROC AUC', search, y_train, trackingConfig, num_variants, total_variants, credible_interval)
             
@@ -279,7 +314,11 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
                 X_holdout_scaled = search.best_estimator_.named_steps['scaler'].transform(X_holdout)
 
                 # Make predictions using the classifier directly (as scaling is already done)
-                y_pred_holdout = search.best_estimator_.named_steps['classifier'].predict_proba(jnp.array(X_holdout_scaled))[:, 1]
+                classifier = search.best_estimator_.named_steps['classifier']
+                if hasattr(classifier, 'predict_proba'):
+                    y_pred_holdout = classifier.predict_proba(jnp.array(X_holdout_scaled))[:, 1]
+                else:
+                    y_pred_holdout = classifier.predict(jnp.array(X_holdout_scaled))
 
                 # Calculate metrics
                 holdout_metrics = calculate_metrics(y_holdout, y_pred_holdout)
@@ -319,7 +358,8 @@ def evaluate_model(model, search_spaces, X_train, y_train, X_test, y_test, sampl
 
         return metrics, y_pred_test, y_pred_train, best_params, run.info.run_id
     except Exception as e:
-        logger.exception("An error occurred during model evaluation.")
+        logger.error(f"An error occurred during model evaluation: {str(e)}")
+        logger.debug("Exception details:", exc_info=True)
         raise e
 
 def prepare_data(parquet_path: str, sample_processor, train_samples, test_samples, selected_features: Optional[List[str]] = None, dataset: str = 'crossval'):
@@ -355,24 +395,21 @@ def prepare_data(parquet_path: str, sample_processor, train_samples, test_sample
 
     return X_train, X_test, y_train, y_test
 
+@ray.remote(num_cpus=1)
 def process_iteration(
     iteration: int,
     parquet_path: str,
     sample_processor: SampleProcessor,
-    genotype_processor: GenotypeProcessor,
     samplingConfig: SamplingConfig,
     trackingConfig: TrackingConfig,
     stack: Dict,
-    selected_features: pd.Index,
-    num_variants: int,
-    total_variants: int,
-    credible_interval: float,
+    feature_selection_result: FeatureSelectionResult,
     random_state: int,
 ) -> Dict:
     """
     Process a single bootstrap iteration using the selected features and feature selection metrics.
     """
-    logger = logging.getLogger(f"bootstrap_iteration_{iteration}")
+    logger = logging.getLogger(__name__)  # Use module-level logger
     logger.info(f"Bootstrapping iteration {iteration + 1}/{samplingConfig.bootstrap_iterations}")
 
     # Set up MLflow tracking
@@ -386,6 +423,11 @@ def process_iteration(
 
     train_samples = list(train_test_sample_ids['train']['samples'].values())
     test_samples = list(train_test_sample_ids['test']['samples'].values())
+
+    selected_features = feature_selection_result.selected_features
+    num_variants = feature_selection_result.num_variants
+    total_variants = feature_selection_result.total_variants
+    credible_interval = feature_selection_result.credible_interval
     
     # Prepare data by reading from Parquet with selected features
     X_train, X_test, y_train, y_test = prepare_data(
@@ -403,11 +445,6 @@ def process_iteration(
         mlflow.log_param("total_features", total_variants)
         mlflow.log_param("credible_interval", credible_interval)
 
-        iteration_results = {
-            "iteration": iteration,
-            "models": []
-        }
-
         # Iterate over each model in the stack and evaluate
         for model, search_spaces in stack.items():
             model_name = model.__class__.__name__
@@ -421,28 +458,104 @@ def process_iteration(
                 X_test=X_test,
                 y_test=y_test,
                 trackingConfig=trackingConfig,
+                samplingConfig=samplingConfig,
                 sample_processor=sample_processor,
-                n_iter=20,
+                feature_selection_result=feature_selection_result,
+                n_iter=10,
                 is_worker=True,
-                num_variants=num_variants,
-                total_variants=total_variants,
-                credible_interval=credible_interval,
                 iteration=iteration
             )
 
             mlflow.log_metric(f"{model_name}_test_f1", metrics['aggregate']['test']['f1'])
             mlflow.log_param(f"{model_name}_run_id", child_run_id)
+    gc.collect()
+    return
 
-            iteration_results["models"].append({
-                "model_name": model_name,
-                "test_f1": metrics['aggregate']['test']['f1'],
-                "best_params": best_params,
-                "run_id": child_run_id
-            })
+def bootstrap_models(
+    sample_processor: SampleProcessor,
+    genotype_processor: GenotypeProcessor,
+    data: hl.MatrixTable,
+    samplingConfig: SamplingConfig,
+    trackingConfig: TrackingConfig,
+    stack: Dict,
+    random_state=42
+) -> pd.DataFrame:
+    """
+    Perform bootstrapping of models based on the configuration using Ray.
+    """
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Starting bootstrapping of models.")
 
-        pyro.clear_param_store()
+    # Set up MLflow tracking
+    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
+    client = MlflowClient()
+    
+    # Try to create the experiment, handle the case where it already exists
+    try:
+        experiment_id = client.create_experiment(trackingConfig.experiment_name)
+    except MlflowException as e:
+        if "RESOURCE_ALREADY_EXISTS" in str(e):
+            experiment = client.get_experiment_by_name(trackingConfig.experiment_name)
+            if experiment is not None:
+                experiment_id = experiment.experiment_id
+                logger.info(f"Experiment '{trackingConfig.experiment_name}' already exists. Using existing experiment.")
+            else:
+                raise e
+        else:
+            raise e
 
-    return iteration_results
+    mlflow.set_experiment(experiment_id=experiment_id)
+
+    # Pivot the Hail MatrixTable
+    spark_df = genotype_processor.to_spark_df(data)
+    spark_df.unpersist()
+    pivoted_df = genotype_processor.pivot_genotypes(spark_df)
+
+    # Persist pivoted_df as Parquet
+    parquet_path = f"/tmp/{trackingConfig.experiment_name}.parquet"
+    logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
+    pivoted_df.write.parquet(parquet_path, mode="overwrite")
+    pivoted_df.unpersist()
+
+    total_variant_count = len(pivoted_df.columns) - 1  # Subtract the sample ID column
+
+    # Force execution of Hail operations and close the Hail context
+    hl.stop()
+
+    # Feature Selection Step
+    feature_selection_result = parallel_feature_selection(
+        parquet_path=parquet_path,
+        sample_processor=sample_processor,
+        samplingConfig=samplingConfig,
+        num_iterations=10,  # Number of parallel feature selection iterations
+        total_variants=total_variant_count,
+        random_state=random_state,
+        trackingConfig=trackingConfig
+    )
+
+    # Prepare arguments for parallel processing of bootstrap iterations
+    iterations = range(samplingConfig.bootstrap_iterations)
+    tasks = [
+        process_iteration.remote(
+            i,
+            parquet_path,
+            sample_processor,
+            samplingConfig,
+            trackingConfig,
+            stack,
+            feature_selection_result,
+            random_state
+        )
+        for i in iterations
+    ]
+
+    # Execute tasks in parallel using Ray
+    ray.get(tasks)
+
+    logger.info("Completed bootstrapping of models.")
+
+    return
 
 def parallel_feature_selection(
     parquet_path: str,
@@ -455,47 +568,45 @@ def parallel_feature_selection(
 ) -> FeatureSelectionResult:
     """
     Run feature selection in parallel over multiple splits and collect overlapping features.
-
-    Returns:
-        FeatureSelectionResult: Encapsulates selected features and related metrics.
     """
     logger = logging.getLogger(__name__)
     logger.info("Starting parallel feature selection.")
 
-    # Perform feature selection iterations
-    selected_features_list = Parallel(n_jobs=-1, backend="loky", verbose=10)(
-        delayed(feature_selection_iteration)(
-            i, 
-            parquet_path, 
-            sample_processor, 
-            samplingConfig, 
-            random_state + i,  # Unique seed
+    # Launch feature selection tasks remotely
+    tasks = [
+        feature_selection_iteration.remote(
+            i,
+            parquet_path,
+            sample_processor,
+            samplingConfig,
+            random_state + i,
             trackingConfig
         )
         for i in range(num_iterations)
-    )
+    ]
 
+    # Collect results
+    selected_features_list = ray.get(tasks)
     logger.info("Completed parallel feature selection.")
 
-    # Combine selected features from all iterations
-    feature_counts = pd.Series(np.concatenate(selected_features_list)).value_counts()
+    # Concatenate selected features from all iterations
+    all_selected_features = np.concatenate(selected_features_list)
 
-    # Determine overlapping features using a statistical threshold
-    threshold = np.floor(num_iterations * 0.2)  # e.g., features selected in at least 20% of iterations
-    overlapping_features = feature_counts[feature_counts >= threshold].index
+    # Remove duplicates while preserving order
+    unique_selected_features = pd.unique(all_selected_features)
 
-    num_variants = len(overlapping_features)
-    credible_interval = samplingConfig.feature_credible_interval  # Assuming this is defined in your config
+    num_variants = len(unique_selected_features)
 
-    logger.info(f"{num_variants} of {total_variants} variants ({credible_interval*100:.2f}% credible interval).")
+    logger.info(f"{num_variants} of {total_variants} variants selected across all iterations.")
 
     return FeatureSelectionResult(
-        selected_features=overlapping_features,
+        selected_features=unique_selected_features,
         num_variants=num_variants,
         total_variants=total_variants,
         credible_interval=samplingConfig.feature_credible_interval
     )
 
+@ray.remote(num_cpus=1)
 def feature_selection_iteration(
     iteration: int,
     parquet_path: str,
@@ -507,7 +618,7 @@ def feature_selection_iteration(
     """
     Perform feature selection on a random split of the data.
     """
-    logger = logging.getLogger(f"feature_selection_iteration_{iteration}")
+    logger = logging.getLogger(__name__)  # Use module-level logger
     logger.info(f"Feature selection iteration {iteration + 1}")
 
     mlflow.set_tracking_uri(trackingConfig.tracking_uri)
@@ -540,18 +651,17 @@ def feature_selection_iteration(
             # Feature Selection Step
             logger.info("Performing feature selection using Bayesian Feature Selector.")
             mlflow.log_param("feature_selector", "BayesianFeatureSelector")
-            mlflow.log_table(sample_ids, artifact_file=f"sample_ids_{iteration}.json")
             max_attempts = 5
             attempt = 0
             selected_features = []
 
             while len(selected_features) == 0 and attempt < max_attempts:
                 feature_selector = BayesianFeatureSelector(
-                    num_iterations=100,
-                    lr=1e-2,
+                    num_iterations=1000,
+                    lr=1e-3,
                     credible_interval=samplingConfig.feature_credible_interval,
-                    num_samples=2000,
-                    patience=800,
+                    num_samples=1500,
+                    patience=100,
                     validation_split=0.2,
                     batch_size=512,
                     verbose=True,
@@ -568,18 +678,20 @@ def feature_selection_iteration(
                     mlflow.log_param(f"attempt_{attempt}_status", "no_features_selected")
 
             if len(selected_features) == 0:
-                logger.error("Failed to select features after maximum attempts. Proceeding with all features.")
-                selected_features = X_train.columns.tolist()
-                mlflow.set_tag("feature_selection_status", "fallback_to_all_features")
+                logger.error("Failed to select features after maximum attempts. No features found at the specified credible interval.")
+                mlflow.set_tag("feature_selection_status", "no_features_found")
             else:
                 mlflow.set_tag("feature_selection_status", "successful")
             
-            # If successful, log selected features
+            # Log selected features
             selected_features_df = pd.DataFrame(selected_features, columns=['feature'])
             mlflow.log_table(selected_features_df, artifact_file=f"selected_features_{iteration}.json")
 
-            # Update the feature selection status
-            mlflow.set_tag('feature_selection_status', 'successful')
+            # Update the feature selection status if successful
+            if len(selected_features) > 0:
+                mlflow.set_tag('feature_selection_status', 'successful')
+            else:
+                mlflow.set_tag('feature_selection_status', 'no_features_found')
 
             mlflow.log_param("number_of_selected_features", len(selected_features))
 
@@ -588,118 +700,13 @@ def feature_selection_iteration(
             return pd.Index(selected_features)
         except Exception as e:
             # Log the exception details
-            logger.exception("An error occurred during feature selection.")
+            logger.error(f"An error occurred during feature selection: {str(e)}")
+            logger.debug("Exception details:", exc_info=True)
             mlflow.set_tag('feature_selection_status', 'failed')
             # Optionally, log the exception message
             mlflow.log_text(str(e), artifact_file="errors/feature_selection_error.txt")
             # Re-raise the exception to be handled by the calling function
             raise e
-
-def bootstrap_models(
-    sample_processor: SampleProcessor,
-    genotype_processor: GenotypeProcessor,
-    data: hl.MatrixTable,
-    samplingConfig: SamplingConfig,
-    trackingConfig: TrackingConfig,
-    stack: Dict,
-    random_state=42
-) -> pd.DataFrame:
-    """
-    Perform bootstrapping of models based on the configuration using Joblib with Loky backend.
-    """
-    
-    logger = logging.getLogger(__name__)
-    logger.info("Starting bootstrapping of models.")
-
-    # Set up MLflow tracking
-    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
-    client = MlflowClient()
-    
-    # Try to create the experiment, handle the case where it already exists
-    try:
-        experiment_id = client.create_experiment(trackingConfig.experiment_name)
-    except MlflowException as e:
-        if "RESOURCE_ALREADY_EXISTS" in str(e):
-            experiment = client.get_experiment_by_name(trackingConfig.experiment_name)
-            if experiment is not None:
-                experiment_id = experiment.experiment_id
-                logger.info(f"Experiment '{trackingConfig.experiment_name}' already exists. Using existing experiment.")
-            else:
-                raise e
-        else:
-            raise e
-
-    mlflow.set_experiment(experiment_id=experiment_id)
-
-    # Pivot the Hail MatrixTable
-    spark_df = genotype_processor.to_spark_df(data)
-    pivoted_df = genotype_processor.pivot_genotypes(spark_df)
-
-    # Persist pivoted_df as Parquet
-    parquet_path = f"/tmp/{trackingConfig.experiment_name}.parquet"
-    logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
-    pivoted_df.write.parquet(parquet_path, mode="overwrite")
-
-    total_variant_count = len(pivoted_df.columns) - 1  # Subtract the sample ID column
-
-    # Force execution of Hail operations and close the Hail context
-    hl.stop()
-
-    # Feature Selection Step
-    feature_selection_result = parallel_feature_selection(
-        parquet_path=parquet_path,
-        sample_processor=sample_processor,
-        samplingConfig=samplingConfig,
-        num_iterations=10,  # Number of parallel feature selection iterations
-        total_variants=total_variant_count,
-        random_state=random_state,
-        trackingConfig=trackingConfig
-    )
-
-    selected_features = feature_selection_result.selected_features
-    num_variants = feature_selection_result.num_variants
-    total_variants = feature_selection_result.total_variants
-    credible_interval = feature_selection_result.credible_interval
-
-    # Prepare arguments for parallel processing of bootstrap iterations
-    iterations = range(samplingConfig.bootstrap_iterations)
-    process_func = partial(
-        process_iteration,
-        parquet_path=parquet_path,
-        sample_processor=sample_processor,
-        genotype_processor=genotype_processor,
-        samplingConfig=samplingConfig,
-        trackingConfig=trackingConfig,
-        stack=stack,
-        selected_features=selected_features,
-        num_variants=num_variants,
-        total_variants=total_variants,
-        credible_interval=credible_interval,
-        random_state=random_state
-    )
-
-    # Use Joblib with Loky backend for parallel processing
-    results = Parallel(n_jobs=-1, backend="loky", verbose=10)(
-        delayed(process_func)(i) for i in tqdm(iterations, desc="Bootstrapping Progress")
-    )
-
-    logger.info("Completed bootstrapping of models.")
-
-    # Convert results to DataFrame
-    records = []
-    for result in results:
-        iteration = result["iteration"]
-        for model in result["models"]:
-            records.append({
-                "iteration": iteration,
-                "model_name": model["model_name"],
-                "test_auc": model["test_auc"],
-                "test_f1": model["test_f1"],
-                "best_params": model["best_params"],
-                "run_id": model["run_id"]
-            })
-
-    return pd.DataFrame.from_records(records)
 
 def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, credible_interval=None):
     """
@@ -749,24 +756,25 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
 
         # Create figure and axes with constrained_layout to handle layout automatically
         fig, ax = plt.subplots(figsize=fig_size, constrained_layout=True)
-
-        result = plot_func(fig, ax)
-
-        if square:
-            # Maintain square aspect ratio where meaningful
-            ax.set_aspect('equal')
-
-        artifact_path = f"{base_plots_path}/{artifact_name}"
         try:
-            mlflow.log_figure(fig, artifact_path)
-        except np.linalg.LinAlgError as e:
-            logger.error(f"Failed to log figure {artifact_name} due to: {e}")
-        plt.close(fig)
-        return result
+            result = plot_func(fig, ax)
+
+            if square:
+                # Maintain square aspect ratio where meaningful
+                ax.set_aspect('equal')
+
+            artifact_path = f"{base_plots_path}/{artifact_name}"
+            try:
+                mlflow.log_figure(fig, artifact_path)
+            except np.linalg.LinAlgError as e:
+                logger.error(f"Failed to log figure {artifact_name} due to: {e}")
+            return result
+        finally:
+            plt.close(fig)
 
     # Construct the subtitle with feature selection info if available
     if num_variants is not None and total_variants is not None and credible_interval is not None:
-        subtitle = (f"{num_variants} of {total_variants} variants "
+        subtitle = (f"{num_variants} of {total_variants} variants selected "
                     f"({credible_interval*100:.0f}% credible interval)\n")
     else:
         subtitle = ""
@@ -926,7 +934,7 @@ def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_var
     # Construct the subtitle with feature selection info if available
     if num_variants is not None and total_variants is not None and credible_interval is not None:
         subtitle = (f"{num_variants} of {total_variants} variants "
-                    f"({credible_interval*100:.0f}% credible interval)\n")
+                    f"(selected by {credible_interval*100:.0f}% credible interval)\n")
     else:
         subtitle = ""
 
@@ -955,9 +963,9 @@ def plot_and_log_convergence(metric_name,search, y_true, trackingConfig, num_var
         # Log the figure to MLflow
         mlflow.log_figure(fig, "plots/train/hyperparam_convergence.svg")
         
-        # Close the figure to free up memory
-        plt.close(fig)
-        
     except Exception as e:
         logger.error(f"Failed to plot hyperparameter convergence for {model_name}: {e}")
         raise e
+    
+    finally:
+        plt.close(fig)

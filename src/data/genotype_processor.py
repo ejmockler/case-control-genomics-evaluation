@@ -16,7 +16,7 @@ class GenotypeProcessor:
     def __init__(self, config: VCFConfig, gtf_config: GTFConfig):
         self.config = config
         self.gtf_config = gtf_config
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(__name__)  # Use module-level logger
 
     def process(
         self, 
@@ -35,15 +35,19 @@ class GenotypeProcessor:
         Returns:
             hl.MatrixTable: Processed MatrixTable.
         """
+        self.logger.info("Starting genotype data processing.")
         mt = self._preprocess_and_filter(mt)
         
         # Filter GTF to include only genes present in GMT DataFrame
         if gmt_df is not None and gtf_ht is not None and not gmt_df.empty:
+            self.logger.info("Filtering GTF annotations based on GMT DataFrame.")
             gtf_ht = self._filter_gtf_by_gmt(gtf_ht, gmt_df)
         
         # Align to annotations using the filtered GTF
+        self.logger.info("Aligning genotype data to GTF annotations.")
         mt = self._align_to_annotations(mt, gtf_ht)
         
+        self.logger.info("Genotype data processing completed.")
         return mt
 
     def _preprocess_and_filter(self, mt: hl.MatrixTable) -> hl.MatrixTable:
@@ -174,11 +178,13 @@ class GenotypeProcessor:
         Returns:
             SparkDataFrame: Genotype data as Spark DataFrame.
         """
+        self.logger.info(f"Fetching genotypes for {len(sample_ids)} samples.")
         if isinstance(data, hl.MatrixTable):
             return self._fetch_from_matrix_table(data, sample_ids)
         elif isinstance(data, SparkDataFrame):
             return data.filter(data.sample_id.isin(sample_ids))
         else:
+            self.logger.error("Input data must be either a Hail MatrixTable or Spark DataFrame.")
             raise TypeError("Input data must be either a Hail MatrixTable or Spark DataFrame")
 
     def _fetch_from_matrix_table(self, mt: hl.MatrixTable, sample_ids: List[str]) -> SparkDataFrame:

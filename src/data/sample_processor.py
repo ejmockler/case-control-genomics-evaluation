@@ -17,6 +17,8 @@ class SampleProcessor:
         self.holdout_data = self._load_and_process_tables(self.config.holdout_tables.tables)
         self.id_mapping = self._create_id_mapping()
 
+        self.sample_draw_counts: Dict[str, int] = {sample_id: 0 for sample_id in self.id_mapping.keys()}
+
     def _create_id_mapping(self) -> Dict[str, str]:
         mapping = {}
         missing_samples = []
@@ -293,6 +295,7 @@ class SampleProcessor:
     def _balance_classes(self, sample_ids: List[str], dataset: str) -> List[str]:
         """
         Balances the classes by ensuring equal representation of cases and controls.
+        Prefers samples that have been drawn less frequently to ensure uniform sampling.
 
         Args:
             sample_ids (List[str]): List of sample IDs to balance.
@@ -304,10 +307,19 @@ class SampleProcessor:
         cases = [id_ for id_ in sample_ids if id_ in self.overlapping_case_ids[dataset]]
         controls = [id_ for id_ in sample_ids if id_ in self.overlapping_control_ids[dataset]]
 
-        min_count = min(len(cases), len(controls))
-        balanced_cases = cases[:min_count]
-        balanced_controls = controls[:min_count]
+        # Sort cases and controls by their draw counts (ascending)
+        cases_sorted = sorted(cases, key=lambda x: self.sample_draw_counts.get(x, 0))
+        controls_sorted = sorted(controls, key=lambda x: self.sample_draw_counts.get(x, 0))
+
+        min_count = min(len(cases_sorted), len(controls_sorted))
+        balanced_cases = cases_sorted[:min_count]
+        balanced_controls = controls_sorted[:min_count]
         balanced_sample_ids = balanced_cases + balanced_controls
+
+        # Update draw counts in bulk using a dictionary comprehension
+        self.sample_draw_counts.update({
+            sample_id: self.sample_draw_counts.get(sample_id, 0) + 1 
+            for sample_id in balanced_sample_ids})
 
         return balanced_sample_ids
 

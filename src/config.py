@@ -43,7 +43,7 @@ class SampleTableConfig(BaseModel):
 
 class SamplingConfig(BaseModel):
     bootstrap_iterations: int = 60
-    cross_val_iterations: int = 10
+    crossval_folds: int = 10
     test_size: float = 0.2
     sequestered_ids: List[str] = []
     shuffle_labels: bool = False
@@ -67,7 +67,7 @@ class Config(BaseModel):
 
 config = Config(
     vcf=VCFConfig(
-        path="../adhoc analysis/whole_genome_merged_no_vqsr_no_annotation_KarenRegions_MICROGLIAL_ANNOTATED.sorted.vcf.gz",
+        path="../adhoc analysis/mock.vcf.gz",
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.005,
@@ -79,16 +79,16 @@ config = Config(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
         filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
     ),
-    gmt=GMTConfig(
-        path="../adhoc analysis/microglial_associated_genes.gmt",
-        filter="",
-    ),
+    # gmt=GMTConfig(
+    #     path="../adhoc analysis/microglial_associated_genes.gmt",
+    #     filter="",
+    # ),
     tracking=TrackingConfig(
         name="Microglial & myeloid variants, MAF>=0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        experiment_name="microglial60-als-rareBinned-0.75CI-0.005MAF",
+        experiment_name="dbg",
         plot_all_sample_importances=False,
-        tracking_uri="http://127.0.0.1:5000/",
+        tracking_uri="http://127.0.0.1:5001/",
     ),
     crossval_tables=SampleTableConfig(
         tables=[
@@ -155,9 +155,9 @@ config = Config(
         ]
     ),
     sampling=SamplingConfig(
-        bootstrap_iterations=60,
-        cross_val_iterations=10,
-        feature_credible_interval=0.75,
+        bootstrap_iterations=2,
+        crossval_folds=10,
+        feature_credible_interval=0.5,
         test_size=0.2,
         sequestered_ids=[],
         shuffle_labels=False,

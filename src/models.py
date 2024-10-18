@@ -1,22 +1,21 @@
 import threading
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
 import torch
 import pyro
 import pyro.distributions as dist
-from pyro.infer import SVI, TraceMeanField_ELBO
+from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
 from pyro.contrib import autoname
 from pyro.infer.autoguide import AutoMultivariateNormal
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.svm import SVC
+from sklearn.svm import SVC, LinearSVC
 from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import MultinomialNB
-import lightgbm as lgb
-from skopt.space import Real, Integer
+from skopt.space import Real, Integer, Categorical
 
 from sklearn.exceptions import ConvergenceWarning
 import warnings
@@ -96,8 +95,8 @@ class SparseBayesianLogisticRegression(BaseEstimator, ClassifierMixin):
         with autoname.scope(prefix=self.unique_id):
             self.guide = AutoMultivariateNormal(self.model).to(self.device)
 
-            # Set up the SVI object with TraceMeanField_ELBO
-            svi = SVI(self.model, self.guide, optimizer, loss=TraceMeanField_ELBO())
+            # Set up the SVI object
+            svi = SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
 
         # Training loop
         progress_bar = tqdm(range(self.num_iterations), desc="Training", disable=not self.verbose)
@@ -181,11 +180,12 @@ stack = {
     LogisticRegression(
         penalty="elasticnet",
         solver="saga",
-    ): {"C": Real(1e-4, 1e4, prior="log-uniform"), "l1_ratio": Real(0, 1), "max_iter": Integer(100, 1000)},
-    MultinomialNB(): {"alpha": Real(1e-4, 1e4, prior="log-uniform")},
+    ): {"C": Real(1e-4, 1e2, prior="log-uniform"), "l1_ratio": Real(0, 1), "max_iter": Integer(100, 1000)},
+    MultinomialNB(): {"alpha": Real(1e-4, 1e2, prior="log-uniform")},
     # SparseBayesianLogisticRegression(verbose=False): {"num_iterations": Integer(100, 1000), "lr": Real(1e-6, 1e-1, prior="log-uniform")},
-    RadialBasisSVC(probability=True): {"C": Real(1e-4, 1e4, prior="log-uniform"), 'gamma': Real(1e-4, 1e-1, prior="log-uniform")},
-    lgb.LGBMClassifier(): {"learning_rate": Real(1e-6, 1e-1, prior="log-uniform"), "max_depth": Integer(3, 10), "n_estimators": Integer(100, 1000)},
+    LinearSVC(): {"C": Real(1e-4, 1e2, prior="log-uniform")},
+    RadialBasisSVC(probability=True): {"C": Real(1e-4, 1e2, prior="log-uniform"), 'gamma': Real(1e-4, 1e-1, prior="log-uniform")},
+    HistGradientBoostingClassifier(): {"learning_rate": Real(1e-6, 1e-1, prior="log-uniform"), "max_iter": Integer(50, 500), "max_depth": Integer(3, 10)},
     KNeighborsClassifier(): {"n_neighbors": Integer(1, 10)},
     MLPClassifier(): {"hidden_layer_sizes": Integer(10, 100), "alpha": Real(1e-4, 1e-1, prior="log-uniform")},
 }
