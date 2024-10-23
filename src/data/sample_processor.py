@@ -159,7 +159,6 @@ class SampleProcessor:
             if resolved_id is None:
                 self.logger.error(f"Sample ID '{sample_id}' not found in id_mapping.")
                 raise ValueError(f"Sample ID '{sample_id}' not found in id_mapping.")
-
             label = self._get_label(resolved_id, dataset)
             label_mapping[sample_id] = 1 if label.lower() == 'case' else 0
 
@@ -179,10 +178,13 @@ class SampleProcessor:
         data_source = self.crossval_data if dataset == 'crossval' else self.holdout_data
         for table_info in data_source.values():
             if sample_id in table_info['data'].index:
+                if isinstance(table_info['data'].loc[sample_id, 'label'], pd.Series):
+                    print(sample_id)
+                    print(table_info['data'].loc[sample_id, 'label'])
                 return table_info['data'].loc[sample_id, 'label']
         raise ValueError(f"Sample ID '{sample_id}' not found in any table.")
 
-    def draw_train_test_split(self, test_size: float = 0.15, random_state: int = 42) -> Dict[str, Dict[str, str]]:
+    def draw_train_test_split(self, test_size: float = 0.15, random_state: int = 42, subset: Optional[List[str]] = None) -> Dict[str, Dict[str, str]]:
         """
         Draws a stratified train-test split from the cross-validation dataset.
 
@@ -195,6 +197,8 @@ class SampleProcessor:
         """
         # Combine case and control IDs
         combined_ids = self.overlapping_case_ids['crossval'] + self.overlapping_control_ids['crossval']
+        if subset is not None:
+            combined_ids = [id for id in combined_ids if id in subset]
 
         # Initialize lists to collect strata and labels
         strata_list = []

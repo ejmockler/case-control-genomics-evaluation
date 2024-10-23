@@ -201,6 +201,12 @@ class SmallTableLoader(DataLoader):
             raise ValueError(f"Unsupported tabular file type: {file_path}")
         df = self._apply_filters(df)
         df.set_index(self.config.id_column, inplace=True)
+        # Drop duplicate index values, keeping the first occurrence
+        duplicates = df.index.duplicated(keep='first')
+        if duplicates.any():
+            num_duplicates = duplicates.sum()
+            self.logger.warning(f"Found {num_duplicates} duplicate index values. Dropping duplicates, keeping the first occurrence.")
+            df = df[~duplicates]
         return df
     
     def _apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:

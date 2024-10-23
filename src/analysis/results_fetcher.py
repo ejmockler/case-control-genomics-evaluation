@@ -24,7 +24,7 @@ class ResultFetcher(ABC):
     """
 
     @abstractmethod
-    def fetch_all_runs(
+    def fetch_all_run_metadata(
         self, run_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
@@ -39,7 +39,7 @@ class ResultFetcher(ABC):
         pass
 
     @abstractmethod
-    def fetch_run_metrics(self, run: Dict[str, Any]) -> Dict[str, Any]:
+    def get_run_metrics(self, run: Dict[str, Any]) -> Dict[str, Any]:
         """
         Fetch metrics for a specific run.
 
@@ -52,7 +52,7 @@ class ResultFetcher(ABC):
         pass
 
     @abstractmethod
-    def fetch_run_artifacts(self, run: Dict[str, Any], artifact_paths: List[str]) -> Dict[str, Any]:
+    def download_run_artifacts(self, run: Dict[str, Any], artifact_paths: List[str]) -> Dict[str, Any]:
         """
         Fetch artifacts for a specific run.
 
@@ -66,7 +66,7 @@ class ResultFetcher(ABC):
         pass
 
     @abstractmethod
-    def fetch_run_params(self, run: Dict[str, Any]) -> Dict[str, Any]:
+    def get_run_params(self, run: Dict[str, Any]) -> Dict[str, Any]:
         """
         Fetch parameters for a specific run.
 
@@ -132,7 +132,7 @@ class MLflowResultFetcher(ResultFetcher):
         else:
             return "model"
 
-    def fetch_all_runs(
+    def fetch_all_run_metadata(
         self, run_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
@@ -209,7 +209,7 @@ class MLflowResultFetcher(ResultFetcher):
         self.logger.info(f"Fetched {len(processed_runs)} runs.")
         return processed_runs
 
-    def fetch_run_metrics(self, run) -> Dict[str, Any]:
+    def get_run_metrics(self, run) -> Dict[str, Any]:
         if isinstance(run, dict):
             return run.get('metrics', {})
         return {key: value for key, value in run.data.metrics.items()}
@@ -237,7 +237,7 @@ class MLflowResultFetcher(ResultFetcher):
             self.logger.error(f"Error fetching artifact '{artifact_path}' for run '{run_id}': {e}")
             return None
 
-    def fetch_run_artifacts(self, run, artifact_paths: List[str]) -> Dict[str, Any]:
+    def download_run_artifacts(self, run, artifact_paths: List[str]) -> Dict[str, Any]:
         run_id = run['run_id'] if isinstance(run, dict) else run.info.run_id
         
         with ThreadPoolExecutor(max_workers=min(len(artifact_paths), 8)) as executor:
@@ -252,7 +252,7 @@ class MLflowResultFetcher(ResultFetcher):
                     artifacts[path] = None
         return artifacts
 
-    def fetch_run_params(self, run) -> Dict[str, Any]:
+    def get_run_params(self, run) -> Dict[str, Any]:
         if isinstance(run, dict):
             return run.get('params', {})
         return {key: value for key, value in run.data.params.items()}
@@ -283,9 +283,9 @@ class MLflowResultFetcher(ResultFetcher):
     ) -> Dict[str, Any]:
         run_id = run["run_id"]
         run_name = run["run_name"]
-        metrics = self.fetch_run_metrics(run)
-        artifacts = self.fetch_run_artifacts(run, artifact_paths)
-        params = self.fetch_run_params(run)
+        metrics = self.get_run_metrics(run)
+        artifacts = self.download_run_artifacts(run, artifact_paths)
+        params = self.get_run_params(run)
         return {
             "run_id": run_id,
             "run_name": run_name,

@@ -67,7 +67,7 @@ class Config(BaseModel):
 
 config = Config(
     vcf=VCFConfig(
-        path="../adhoc analysis/mock.vcf.gz",
+        path="../adhoc analysis/whole_genome_merged_no_vqsr_no_annotation_KarenRegions_MICROGLIAL_ANNOTATED.sorted.vcf.gz",
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.005,
@@ -79,22 +79,22 @@ config = Config(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
         filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
     ),
-    # gmt=GMTConfig(
-    #     path="../adhoc analysis/microglial_associated_genes.gmt",
-    #     filter="",
-    # ),
+    gmt=GMTConfig(
+        path="../adhoc analysis/kiaa1217_only.gmt",
+        filter="",
+    ),
     tracking=TrackingConfig(
-        name="Microglial & myeloid variants, MAF>=0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
+        name="KIAA1217 variants, MAF>=0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        experiment_name="dbg",
-        plot_all_sample_importances=False,
+        experiment_name="KIAA1217-als-zygosityBinned-0.5CI-0.005MAF-resampled",
+        plot_all_sample_importances=False,  
         tracking_uri="http://127.0.0.1:5001/",
     ),
     crossval_tables=SampleTableConfig(
         tables=[
             TableMetadata(
                 name="AnswerALS cases, EUR",
-                path="../adhoc analysis/ACWM.xlsx",
+                path="../adhoc analysis/ALS Consortium WGS Metadata 03112022.xlsx",
                 label="case",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`>=0.85",
@@ -105,7 +105,7 @@ config = Config(
             ),
             TableMetadata(
                 name="AnswerALS non-neurological controls, EUR",
-                path="../adhoc analysis/ACWM.xlsx",
+                path="../adhoc analysis/ALS Consortium WGS Metadata 03112022.xlsx",
                 label="control",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='Non-Neurological Control' & `pct_european`>=0.85",
@@ -143,7 +143,7 @@ config = Config(
             ),
             TableMetadata(
                 name="AnswerALS cases, ethnically-variable, non-EUR",
-                path="../adhoc analysis/ACWM.xlsx",
+                path="../adhoc analysis/ALS Consortium WGS Metadata 03112022.xlsx",
                 label="case",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
@@ -155,7 +155,7 @@ config = Config(
         ]
     ),
     sampling=SamplingConfig(
-        bootstrap_iterations=2,
+        bootstrap_iterations=600,
         crossval_folds=10,
         feature_credible_interval=0.5,
         test_size=0.2,

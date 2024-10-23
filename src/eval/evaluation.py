@@ -57,17 +57,23 @@ def get_feature_importances(model, feature_labels):
         model_coefficient_df['feature_name'] = feature_labels
         model_coefficient_df['feature_importances'] = model.feature_importances_
     elif hasattr(model, 'feature_log_prob_'):
-        # Convert log probabilities to probabilities and compute mean
-        prob = np.exp(model.feature_log_prob_)
-        feature_importances = prob.mean(axis=0)
-        # Create DataFrame with feature names and importances
+        if model.feature_log_prob_.shape[0] != 2:
+            raise ValueError("Log-odds ratio is only applicable for binary classification.")
+
+        # Compute log-odds ratio
+        log_odds = model.feature_log_prob_[1] - model.feature_log_prob_[0]
+
         model_coefficient_df = pd.DataFrame({
             'feature_name': feature_labels,
-            'feature_importances': feature_importances
+            'feature_importances': log_odds,
         })
-        # Add individual class probabilities
-        for i in range(model.feature_log_prob_.shape[0]):
-            model_coefficient_df[f'class_{i}'] = prob[i]
+
+        # Add individual class log probabilities
+        model_coefficient_df['class_0_log_prob'] = model.feature_log_prob_[0]
+        model_coefficient_df['class_1_log_prob'] = model.feature_log_prob_[1]
+
+        # Sort by importance
+        model_coefficient_df = model_coefficient_df.sort_values(by='feature_importances', ascending=False)
     else:
         model_coefficient_df = None
     return model_coefficient_df
@@ -362,7 +368,7 @@ def evaluate_model(
         logger.debug("Exception details:", exc_info=True)
         raise e
 
-def prepare_data(parquet_path: str, sample_processor, train_samples, test_samples, selected_features: Optional[List[str]] = None, dataset: str = 'crossval'):
+def prepare_data(parquet_path: str, sample_processor, train_samples, selected_features: Optional[List[str]] = None, dataset: str = 'crossval', test_samples: Optional[List[str]] = []):
     """
     Prepare data for a single bootstrap iteration by reading from Parquet.
     """
@@ -399,6 +405,7 @@ def prepare_data(parquet_path: str, sample_processor, train_samples, test_sample
 def process_iteration(
     iteration: int,
     parquet_path: str,
+    validation_samples: List[str],
     sample_processor: SampleProcessor,
     samplingConfig: SamplingConfig,
     trackingConfig: TrackingConfig,
@@ -418,14 +425,14 @@ def process_iteration(
     
     train_test_sample_ids = sample_processor.draw_train_test_split(
         test_size=samplingConfig.test_size,
-        random_state=random_state + iteration
+        random_state=random_state + iteration,
+        subset=validation_samples
     )
 
     train_samples = list(train_test_sample_ids['train']['samples'].values())
     test_samples = list(train_test_sample_ids['test']['samples'].values())
 
     selected_features = feature_selection_result.selected_features
-    num_variants = feature_selection_result.num_variants
     total_variants = feature_selection_result.total_variants
     credible_interval = feature_selection_result.credible_interval
     
@@ -523,11 +530,21 @@ def bootstrap_models(
     # Force execution of Hail operations and close the Hail context
     hl.stop()
 
+    train_test_sample_ids = sample_processor.draw_train_test_split(
+        test_size=samplingConfig.test_size,
+
+        random_state=random_state
+    )
+
+    train_samples = list(train_test_sample_ids['train']['samples'].values())
+    validation_samples = list(train_test_sample_ids['test']['samples'].values())
+
     # Feature Selection Step
     feature_selection_result = parallel_feature_selection(
         parquet_path=parquet_path,
         sample_processor=sample_processor,
         samplingConfig=samplingConfig,
+        train_samples=train_samples,
         num_iterations=10,  # Number of parallel feature selection iterations
         total_variants=total_variant_count,
         random_state=random_state,
@@ -540,6 +557,7 @@ def bootstrap_models(
         process_iteration.remote(
             i,
             parquet_path,
+            validation_samples,
             sample_processor,
             samplingConfig,
             trackingConfig,
@@ -560,6 +578,7 @@ def bootstrap_models(
 def parallel_feature_selection(
     parquet_path: str,
     sample_processor: SampleProcessor,
+    train_samples: List[str],
     samplingConfig: SamplingConfig,
     num_iterations: int = 10,
     total_variants: int = None,
@@ -577,6 +596,7 @@ def parallel_feature_selection(
         feature_selection_iteration.remote(
             i,
             parquet_path,
+            train_samples,
             sample_processor,
             samplingConfig,
             random_state + i,
@@ -610,6 +630,7 @@ def parallel_feature_selection(
 def feature_selection_iteration(
     iteration: int,
     parquet_path: str,
+    train_samples: List[str],
     sample_processor: SampleProcessor,
     samplingConfig: SamplingConfig,
     random_state: int,
@@ -631,22 +652,12 @@ def feature_selection_iteration(
         mlflow.set_tag('feature_selection_status', 'in_progress')
 
         try:
-            train_test_sample_ids = sample_processor.draw_train_test_split(
-                test_size=samplingConfig.test_size,
-                random_state=random_state + iteration
-            )
-    
-            train_samples = list(train_test_sample_ids['train']['samples'].values())
-            test_samples = list(train_test_sample_ids['test']['samples'].values())
-    
             # Prepare data by reading from Parquet
-            X_train, X_test, y_train, y_test = prepare_data(
+            X_train, _, y_train, _ = prepare_data(
                 parquet_path=parquet_path,
                 sample_processor=sample_processor,
                 train_samples=train_samples,
-                test_samples=test_samples
             )
-            sample_ids = pd.DataFrame.from_dict({"sample_id": X_train.index.tolist(), "label": y_train.tolist()})
     
             # Feature Selection Step
             logger.info("Performing feature selection using Bayesian Feature Selector.")
@@ -660,10 +671,10 @@ def feature_selection_iteration(
                     num_iterations=1000,
                     lr=1e-3,
                     credible_interval=samplingConfig.feature_credible_interval,
-                    num_samples=1500,
+                    num_samples=3000,
                     patience=100,
                     validation_split=0.2,
-                    batch_size=512,
+                    batch_size=int(np.floor(X_train.shape[0] * 0.1)),
                     verbose=True,
                     checkpoint_path=f"/tmp/feature_selection_checkpoint.params",
                     unique_id=f"{iteration}"
@@ -685,7 +696,7 @@ def feature_selection_iteration(
             
             # Log selected features
             selected_features_df = pd.DataFrame(selected_features, columns=['feature'])
-            mlflow.log_table(selected_features_df, artifact_file=f"selected_features_{iteration}.json")
+            mlflow.log_table(selected_features_df, artifact_file=f"selected_features.json")
 
             # Update the feature selection status if successful
             if len(selected_features) > 0:

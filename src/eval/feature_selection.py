@@ -17,7 +17,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.mixture import GaussianMixture
-from sklearn.neighbors import KernelDensity
+from sklearn.neighbors import KernelDensity, NearestNeighbors
 from scipy.signal import find_peaks, peak_prominences, peak_widths
 from joblib import Parallel, delayed
 import torch
@@ -25,7 +25,6 @@ import matplotlib.pyplot as plt
 import mlflow
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
-import pyro.contrib.autoname as autoname
 
 @dataclass
 class FeatureSelectionResult:
@@ -35,23 +34,23 @@ class FeatureSelectionResult:
     credible_interval: float
     selected_credible_interval: Optional[float] = None
 
-import torch
-import pyro
-import pyro.distributions as dist
-from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
-from sklearn.base import BaseEstimator, TransformerMixin
-from torch.utils.data import DataLoader, TensorDataset
-import pandas as pd
-import numpy as np
-import logging
-import mlflow
-from sklearn.metrics import accuracy_score, f1_score
-
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
-    def __init__(self, unique_id: str, num_iterations=1000, lr=1e-4, credible_interval=0.95, num_samples=1000,
-                 batch_size=512, verbose=False, patience=800, covariance_type='independent',
-                 validation_split=0.2, checkpoint_path="checkpoint.params", max_features=200):
+    def __init__(
+        self,
+        unique_id: str,
+        num_iterations=1000,
+        lr=1e-4,
+        credible_interval=0.95,
+        num_samples=1000,
+        batch_size=512,
+        verbose=False,
+        patience=800,
+        covariance_type='independent',
+        validation_split=0.2,
+        checkpoint_path="checkpoint.params",
+        max_features=200,
+        min_threshold=0.2  # Added min_threshold parameter
+    ):
         self.unique_id = unique_id
         self.logger = logging.getLogger(__name__)
         self.num_iterations = num_iterations
@@ -64,6 +63,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.patience = patience
         self.validation_split = validation_split
         self.max_features = max_features
+        self.min_threshold = min_threshold  # Store min_threshold
         self.checkpoint_path = f"{os.path.splitext(checkpoint_path)[0]}_{unique_id}.params"
         
         if torch.cuda.is_available():
@@ -79,32 +79,36 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y):
         scaler = MinMaxScaler()
-        X_tensor = torch.tensor(scaler.fit_transform(X.values) if isinstance(X, pd.DataFrame) 
-                                else scaler.fit_transform(X), 
-                                dtype=torch.float64, device=self.device)
-        y_tensor = torch.tensor(y.values if hasattr(y, 'values') else y, 
-                                dtype=torch.float64, device=self.device)
+        X_tensor = torch.tensor(
+            scaler.fit_transform(X.values) if isinstance(X, pd.DataFrame) else scaler.fit_transform(X),
+            dtype=torch.float64,
+            device=self.device
+        )
+        y_tensor = torch.tensor(
+            y.values if hasattr(y, 'values') else y,
+            dtype=torch.float64,
+            device=self.device
+        )
         
         split_idx = int(X_tensor.size(0) * (1 - self.validation_split))
         X_train, X_val = X_tensor[:split_idx], X_tensor[split_idx:]
         y_train, y_val = y_tensor[:split_idx], y_tensor[split_idx:]
 
-        train_loader = DataLoader(TensorDataset(X_train, y_train), 
-                                  batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(TensorDataset(X_val, y_val), 
-                                batch_size=self.batch_size, shuffle=False)
+        train_loader = DataLoader(
+            TensorDataset(X_train, y_train),
+            batch_size=self.batch_size,
+            shuffle=True
+        )
+        val_loader = DataLoader(
+            TensorDataset(X_val, y_val),
+            batch_size=self.batch_size,
+            shuffle=False
+        )
         
-        if isinstance(y, pd.Series):
-            sample_ids = y.index.values
-        elif isinstance(y, pd.DataFrame):
-            # If y is a DataFrame, assume it's a single column
-            sample_ids = y.index.values
-        else:
-            sample_ids = None
-        
+        # Initialize validation_results_ DataFrame if sample IDs are available
+        sample_ids = y.index.values if hasattr(y, 'index') else None
         if sample_ids is not None:
             val_sample_ids = sample_ids[split_idx:]
-            # Initialize validation_results_ DataFrame
             self.validation_results_ = pd.DataFrame(index=val_sample_ids)
             self.validation_results_['label'] = y_val.cpu().numpy()
             self.validation_results_['sum_correct'] = 0
@@ -114,23 +118,19 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
 
         def model(X, y=None):
             D = X.size(1)
-            tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=torch.tensor(1.0, dtype=torch.float64, device=self.device)))
-            lam = pyro.sample('lam', dist.HalfCauchy(scale=torch.tensor(1.0, dtype=torch.float64, device=self.device)).expand([D]).to_event(1))
-            c2 = pyro.sample('c2', dist.InverseGamma(concentration=torch.tensor(1.0, dtype=torch.float64, device=self.device), 
-                                                     rate=torch.tensor(1.0, dtype=torch.float64, device=self.device)).expand([D]).to_event(1))
+            tau_0 = pyro.sample('tau_0', dist.HalfCauchy(scale=1.0))
+            lam = pyro.sample('lam', dist.HalfCauchy(scale=1.0).expand([D]).to_event(1))
+            c2 = pyro.sample('c2', dist.InverseGamma(concentration=1.0, rate=1.0).expand([D]).to_event(1))
             sigma = tau_0 * lam * torch.sqrt(c2)
             
-            if self.covariance_type == 'independent':
-                beta = pyro.sample('beta', dist.Normal(torch.zeros(D, dtype=torch.float64, device=self.device), sigma).to_event(1))
-            elif self.covariance_type == 'multivariate':
-                cov_matrix = torch.diag(sigma ** 2)
-                beta = pyro.sample('beta', dist.MultivariateNormal(loc=torch.zeros(D, dtype=torch.float64, device=self.device), 
-                                                                   covariance_matrix=cov_matrix))
-            else:
-                raise ValueError(f"Unsupported covariance_type: {self.covariance_type}")
-            
-            intercept = pyro.sample('intercept', dist.Normal(torch.tensor(0., dtype=torch.float64, device=self.device), 
-                                                             torch.tensor(10., dtype=torch.float64, device=self.device)))
+            beta = pyro.sample(
+                'beta',
+                dist.Normal(torch.zeros(D, dtype=torch.float64, device=self.device), sigma).to_event(1)
+            )
+            intercept = pyro.sample(
+                'intercept',
+                dist.Normal(0., 10.)
+            )
             logits = intercept + X @ beta
 
             with pyro.plate('data', X.size(0)):
@@ -144,18 +144,10 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         best_val_loss = float("inf")
         patience_counter = 0
 
-        def compute_proba(current_params, X, covariance_type='independent'):
+        def compute_proba(current_params, X):
             beta = current_params['AutoNormal.locs.beta']
             intercept = current_params['AutoNormal.locs.intercept']
-            
-            if covariance_type == 'independent':
-                logits = intercept + torch.matmul(X, beta)
-            elif covariance_type == 'multivariate':
-                beta_mean = beta.mean(dim=0)
-                logits = intercept + torch.matmul(X, beta_mean)
-            else:
-                raise ValueError(f"Unsupported covariance_type: {covariance_type}")
-            
+            logits = intercept + torch.matmul(X, beta)
             proba = torch.sigmoid(logits)
             return proba.detach().cpu().numpy()
 
@@ -179,7 +171,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             avg_val_loss = val_loss / len(val_loader)
             
             current_params = {k: v.clone().detach() for k, v in pyro.get_param_store().items()}
-            y_val_pred_prob = compute_proba(current_params, X_val, covariance_type=self.covariance_type)
+            y_val_pred_prob = compute_proba(current_params, X_val)
             y_val_pred = (y_val_pred_prob >= 0.5).astype(int)
             
             accuracy = accuracy_score(y_val.cpu().numpy(), y_val_pred)
@@ -187,16 +179,14 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             
             self.log_metrics(epoch, avg_epoch_loss, avg_val_loss, accuracy, f1)
 
-            # Update per-sample validation results
             if self.validation_results_ is not None:
                 correct = (y_val_pred == y_val.cpu().numpy()).astype(int)
-                # Assuming validation set order is preserved
                 self.validation_results_.loc[val_sample_ids, 'sum_correct'] += correct
                 self.validation_results_.loc[val_sample_ids, 'count'] += 1
             
             if self.verbose:
                 print(f"Epoch {epoch}: Train Loss = {avg_epoch_loss:.4f}, Val Loss = {avg_val_loss:.4f}, "
-                    f"Val Accuracy = {accuracy:.4f}, Val F1 = {f1:.4f}")
+                      f"Val Accuracy = {accuracy:.4f}, Val F1 = {f1:.4f}")
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -241,47 +231,59 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
                 artifact_file="validation_aggregated_results.json"
             )
 
-        # **New Integration: Using detect_data_threshold**
-        # self.logger.info("Detecting data-driven threshold for feature selection.")
-        # try:
-        #     # Aggregate over posterior samples (e.g., compute the mean)
-        #     mean_beta = np.mean(beta_samples, axis=0)
+        self.logger.info("Detecting data-driven threshold for feature selection.")
+        try:
+            # Aggregate over posterior samples (e.g., compute the mean)
+            mean_beta = np.mean(beta_samples, axis=0)
 
-        #     # Pass the aggregated 1D array to detect_data_threshold
-        #     threshold = detect_data_threshold(mean_beta, bandwidth='silverman', plot=False, logger=self.logger)
-        #     self.selected_credible_interval = threshold  # Store the detected threshold
-        #     self.logger.info(f"Detected threshold: {threshold:.4f}")
-        #     mlflow.log_metric("selected_credible_interval", threshold)
+            # Pass the aggregated data to detect_data_threshold
+            threshold, fig = detect_data_threshold(
+                mean_beta,
+                plot=True,  # Enable plotting
+                logger=self.logger,
+                min_threshold=self.min_threshold  # Use the min_threshold parameter
+            )
+            self.selected_credible_interval = threshold  # Store the detected threshold
+            self.logger.info(f"Detected threshold: {threshold:.4f}")
+            mlflow.log_metric("selected_credible_interval", threshold)
 
-        #     # Select features where absolute mean_beta exceeds the threshold
-        #     selected = np.abs(mean_beta) >= threshold
+            # Log the KDE plot directly to MLflow
+            if fig is not None:
+                mlflow.log_figure(fig, artifact_file="beta_kde_plot.png")
+                plt.close(fig)  # Close the figure to free memory
 
-        #     # Check if the number of selected features exceeds the maximum allowed
-        #     if np.sum(selected) > self.max_features:
-        #         raise ValueError(f"Number of selected features ({np.sum(selected)}) exceeds max_features ({self.max_features})")
+            # Select features where absolute mean_beta exceeds the threshold
+            selected = np.abs(mean_beta) >= threshold
 
-        #     if isinstance(X, pd.DataFrame):
-        #         self.selected_features_ = X.columns[selected]
-        #     else:
-        #         self.selected_features_ = np.arange(X.shape[1])[selected]
-        # except Exception as e:
-            # self.logger.error(f"Threshold detection failed: {e}")
+            # Check if the number of selected features exceeds the maximum allowed
+            if np.sum(selected) > self.max_features:
+                # Select top features based on absolute mean_beta
+                top_indices = np.argsort(-np.abs(mean_beta))[:self.max_features]
+                selected = np.zeros_like(mean_beta, dtype=bool)
+                selected[top_indices] = True
+
+            if isinstance(X, pd.DataFrame):
+                self.selected_features_ = X.columns[selected]
+            else:
+                self.selected_features_ = np.arange(X.shape[1])[selected]
+        except Exception as e:
+            self.logger.error(f"Threshold detection failed: {e}")
             # Fallback to existing percentile-based selection
-            # self.logger.warning("Falling back to percentile-based credible interval selection.")
-        lower_bound = np.percentile(beta_samples, (1 - self.credible_interval) / 2 * 100, axis=0)
-        upper_bound = np.percentile(beta_samples, (1 + self.credible_interval) / 2 * 100, axis=0)
+            self.logger.warning("Falling back to percentile-based credible interval selection.")
+            lower_bound = np.percentile(beta_samples, (1 - self.credible_interval) / 2 * 100, axis=0)
+            upper_bound = np.percentile(beta_samples, (1 + self.credible_interval) / 2 * 100, axis=0)
 
-        self.lower_bound_ = lower_bound
-        self.upper_bound_ = upper_bound
+            self.lower_bound_ = lower_bound
+            self.upper_bound_ = upper_bound
 
-        non_zero = (lower_bound > 0) | (upper_bound < 0)
-        
-        if isinstance(X, pd.DataFrame):
-            self.selected_features_ = X.columns[non_zero]
-        else:
-            self.selected_features_ = np.arange(X.shape[1])[non_zero]
-        
-        self.selected_credible_interval = self.credible_interval  # Retain the original interval
+            non_zero = (lower_bound > 0) | (upper_bound < 0)
+            
+            if isinstance(X, pd.DataFrame):
+                self.selected_features_ = X.columns[non_zero]
+            else:
+                self.selected_features_ = np.arange(X.shape[1])[non_zero]
+            
+            self.selected_credible_interval = self.credible_interval  # Retain the original interval
 
         return self
 
@@ -310,26 +312,35 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             mlflow.log_param("patience", self.patience)
             mlflow.log_param("validation_split", self.validation_split)
             mlflow.log_param("checkpoint_path", self.checkpoint_path)
+            mlflow.log_param("min_threshold", self.min_threshold)  # Log min_threshold
 
+# Adaptive KDE and Threshold Detection Functions
 
-@lru_cache(maxsize=32)
-def estimate_kde_sklearn(data_tuple: Tuple[float, ...], bandwidth: str = 'silverman') -> Tuple[np.ndarray, np.ndarray]:
-    data = np.array(data_tuple)
-    if bandwidth == 'silverman':
-        bandwidth = 1.06 * np.std(data) * len(data) ** (-1 / 5.)
-    kde = KernelDensity(bandwidth=bandwidth, kernel='gaussian')
-    kde.fit(data[:, np.newaxis])
-    x_grid = np.linspace(min(data), max(data), 500)[:, np.newaxis]
-    log_density = kde.score_samples(x_grid)
-    kde_values = np.exp(log_density)
-    return x_grid.flatten(), kde_values
+def adaptive_bandwidth(data: np.ndarray, k: int = 10) -> np.ndarray:
+    """Calculate adaptive bandwidths using k-nearest neighbors."""
+    nbrs = NearestNeighbors(n_neighbors=k).fit(data.reshape(-1, 1))
+    distances, _ = nbrs.kneighbors(data.reshape(-1, 1))
+    bandwidths = distances[:, -1]  # Distance to k-th nearest neighbor
+    return bandwidths
+
+def estimate_kde_adaptive(data: np.ndarray, x_grid: np.ndarray, bandwidths: np.ndarray) -> np.ndarray:
+    """Estimate KDE using adaptive bandwidths."""
+    kde_values = np.zeros_like(x_grid)
+    n = len(data)
+    for xi, h_i in zip(data, bandwidths):
+        kernel = np.exp(-0.5 * ((x_grid - xi) / h_i) ** 2) / (h_i * np.sqrt(2 * np.pi))
+        kde_values += kernel
+    kde_values /= n
+    return kde_values
 
 def compute_bic(n_components: int, data: np.ndarray) -> float:
+    """Compute Bayesian Information Criterion for Gaussian Mixture Models."""
     gmm = GaussianMixture(n_components=n_components, covariance_type='full', random_state=0)
     gmm.fit(data)
     return gmm.bic(data)
 
-def estimate_number_of_modes_parallel(data: np.ndarray, max_components: int = 20) -> int:
+def estimate_number_of_modes_parallel(data: np.ndarray, max_components: int = 5) -> int:
+    """Estimate the number of modes using Gaussian Mixture Models and BIC."""
     data_reshaped = data.reshape(-1, 1)
     n_components_range = range(1, max_components + 1)
     bic_scores = Parallel(n_jobs=-1)(
@@ -343,6 +354,7 @@ def detect_peaks_adaptive(
     x_grid: np.ndarray,
     expected_num_peaks: int
 ) -> Tuple[np.ndarray, dict]:
+    """Detect significant peaks in the KDE."""
     peaks, _ = find_peaks(kde_values)
     if len(peaks) == 0:
         return peaks, {}
@@ -370,7 +382,12 @@ def detect_peaks_adaptive(
     
     return significant_peaks, significant_properties
 
-def determine_threshold_vectorized(x_grid: np.ndarray, kde_values: np.ndarray, peaks: np.ndarray) -> Optional[float]:
+def determine_threshold_vectorized(
+    x_grid: np.ndarray,
+    kde_values: np.ndarray,
+    peaks: np.ndarray
+) -> Optional[float]:
+    """Determine the threshold value between the top two peaks."""
     if len(peaks) >= 2:
         sorted_peaks = peaks[np.argsort(-kde_values[peaks])]
         first_peak, second_peak = sorted_peaks[:2]
@@ -382,32 +399,20 @@ def determine_threshold_vectorized(x_grid: np.ndarray, kde_values: np.ndarray, p
         return x_grid[valley_index]
     return None
 
-def plot_kde(
-    x_grid: np.ndarray,
-    kde_values: np.ndarray,
-    peaks: np.ndarray,
-    threshold: Optional[float],
-    data: np.ndarray
-):
-    plt.figure(figsize=(10, 6))
-    plt.plot(x_grid, kde_values, label='KDE')
-    plt.hist(data, bins=30, density=True, alpha=0.3, label='Histogram')
-    plt.plot(x_grid[peaks], kde_values[peaks], "x", label='Detected Peaks')
-    if threshold is not None:
-        plt.axvline(x=threshold, color='red', linestyle='--', label=f'Detected Threshold: {threshold:.4f}')
-    plt.xlabel('Data Values')
-    plt.ylabel('Density')
-    plt.title('Data Distribution with Detected Threshold')
-    plt.legend()
-    plt.show()
-
 def detect_data_threshold(
     data: np.ndarray,
-    bandwidth: str = 'silverman',
     plot: bool = False,
     logger: Optional[logging.Logger] = None,
-    max_modes: int = 5
-) -> float:
+    max_modes: int = 5,
+    min_threshold: float = 0.2  # Added min_threshold parameter
+) -> Tuple[float, Optional[plt.Figure]]:
+    """
+    Detect a data-driven threshold using adaptive KDE.
+
+    Returns:
+        threshold (float): The detected threshold.
+        fig (plt.Figure or None): The matplotlib figure if plotting is enabled.
+    """
     if logger is None:
         logger = logging.getLogger(__name__)
     logger.setLevel(logging.WARNING)
@@ -419,7 +424,11 @@ def detect_data_threshold(
         raise ValueError("Data values are nearly constant; threshold detection is not meaningful.")
 
     data = data.astype(np.float32)
-    x_grid, kde_values = estimate_kde_sklearn(tuple(data), bandwidth=bandwidth)
+    x_grid = np.linspace(data.min(), data.max(), 500)
+
+    # Adaptive bandwidth estimation
+    bandwidths = adaptive_bandwidth(data, k=10)
+    kde_values = estimate_kde_adaptive(data, x_grid, bandwidths)
 
     num_modes = estimate_number_of_modes_parallel(data, max_components=max_modes)
     logger.info(f"Estimated number of modes: {num_modes}")
@@ -437,7 +446,33 @@ def detect_data_threshold(
     else:
         raise ValueError("Unimodal distribution detected or insufficient modes; unable to determine threshold.")
 
-    if plot:
-        plot_kde(x_grid, kde_values, peaks, threshold, data)
+    # Ensure threshold is not below min_threshold
+    if threshold < min_threshold:
+        logger.info(f"Threshold {threshold:.4f} is below min_threshold {min_threshold:.4f}. Using min_threshold.")
+        threshold = min_threshold
 
-    return threshold
+    fig = None
+    if plot:
+        fig = plot_kde(x_grid, kde_values, peaks, threshold, data)
+
+    return threshold, fig
+
+def plot_kde(
+    x_grid: np.ndarray,
+    kde_values: np.ndarray,
+    peaks: np.ndarray,
+    threshold: Optional[float],
+    data: np.ndarray
+) -> plt.Figure:
+    """Plot the adaptive KDE along with detected peaks and threshold."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(x_grid, kde_values, label='Adaptive KDE')
+    ax.hist(data, bins=30, density=True, alpha=0.3, label='Histogram')
+    ax.plot(x_grid[peaks], kde_values[peaks], "x", label='Detected Peaks')
+    if threshold is not None:
+        ax.axvline(x=threshold, color='red', linestyle='--', label=f'Detected Threshold: {threshold:.4f}')
+    ax.set_xlabel('Data Values')
+    ax.set_ylabel('Density')
+    ax.set_title('Data Distribution with Detected Threshold')
+    ax.legend()
+    return fig
