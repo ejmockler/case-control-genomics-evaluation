@@ -165,7 +165,8 @@ def evaluate_model(
         feature_selection_result: FeatureSelectionResult,
         n_iter=10, 
         is_worker=True, 
-        iteration: int = 0):
+        iteration: int = 0,
+        outer_iteration: int = 1):
     """Perform Bayesian hyperparameter optimization for a model and evaluate on holdout samples."""
     logger = logging.getLogger(__name__)  # Use module-level logger
     
@@ -186,6 +187,9 @@ def evaluate_model(
 
         # Start a run for this model evaluation
         with mlflow.start_run(run_name=f"{model.__class__.__name__}", nested=True) as run:
+            if outer_iteration is not None:
+                mlflow.set_tag("outer_iteration", outer_iteration)
+            
             pipeline = Pipeline([
                 ('scaler', MinMaxScaler()),
                 ('classifier', process_safe_model)
@@ -268,9 +272,7 @@ def evaluate_model(
                 trackingConfig,
                 set_type="test",
                 table_name="crossval",  # Default table name for cross-validation
-                num_variants=num_variants,
-                total_variants=total_variants,
-                credible_interval=credible_interval
+                feature_selection_result=feature_selection_result
             )
             create_and_log_visualizations(
                 model.__class__.__name__,
@@ -279,9 +281,7 @@ def evaluate_model(
                 trackingConfig,
                 set_type="train",
                 table_name="crossval",  # Default table name for cross-validation
-                num_variants=num_variants,
-                total_variants=total_variants,
-                credible_interval=credible_interval
+                feature_selection_result=feature_selection_result
             )
 
             # --- Holdout Evaluation ---
@@ -355,9 +355,7 @@ def evaluate_model(
                     trackingConfig,
                     set_type="holdout",
                     table_name=table_name,  # Actual holdout table name
-                    num_variants=num_variants,
-                    total_variants=total_variants,
-                    credible_interval=credible_interval
+                    feature_selection_result=feature_selection_result
                 )
 
             logger.info("Completed holdout evaluation.")
@@ -412,6 +410,7 @@ def process_iteration(
     stack: Dict,
     feature_selection_result: FeatureSelectionResult,
     random_state: int,
+    outer_iteration: int = 1
 ) -> Dict:
     """
     Process a single bootstrap iteration using the selected features and feature selection metrics.
@@ -425,7 +424,7 @@ def process_iteration(
     
     train_test_sample_ids = sample_processor.draw_train_test_split(
         test_size=samplingConfig.test_size,
-        random_state=random_state + iteration,
+        random_state=random_state + iteration * outer_iteration + 1,
         subset=validation_samples
     )
 
@@ -451,6 +450,7 @@ def process_iteration(
         mlflow.log_param("num_selected_features", len(selected_features))
         mlflow.log_param("total_features", total_variants)
         mlflow.log_param("credible_interval", credible_interval)
+        mlflow.set_tag("outer_iteration", outer_iteration)
 
         # Iterate over each model in the stack and evaluate
         for model, search_spaces in stack.items():
@@ -470,7 +470,8 @@ def process_iteration(
                 feature_selection_result=feature_selection_result,
                 n_iter=10,
                 is_worker=True,
-                iteration=iteration
+                iteration=iteration,
+                outer_iteration=outer_iteration
             )
 
             mlflow.log_metric(f"{model_name}_test_f1", metrics['aggregate']['test']['f1'])
@@ -480,12 +481,13 @@ def process_iteration(
 
 def bootstrap_models(
     sample_processor: SampleProcessor,
-    genotype_processor: GenotypeProcessor,
-    data: hl.MatrixTable,
+    parquet_path: str,  # Changed parameter
     samplingConfig: SamplingConfig,
     trackingConfig: TrackingConfig,
     stack: Dict,
-    random_state=42
+    experiment_id: str,
+    random_state=42,
+    outer_iteration: int = 1
 ) -> pd.DataFrame:
     """
     Perform bootstrapping of models based on the configuration using Ray.
@@ -494,46 +496,14 @@ def bootstrap_models(
     logger = logging.getLogger(__name__)
     logger.info("Starting bootstrapping of models.")
 
-    # Set up MLflow tracking
-    mlflow.set_tracking_uri(trackingConfig.tracking_uri)
-    client = MlflowClient()
-    
-    # Try to create the experiment, handle the case where it already exists
-    try:
-        experiment_id = client.create_experiment(trackingConfig.experiment_name)
-    except MlflowException as e:
-        if "RESOURCE_ALREADY_EXISTS" in str(e):
-            experiment = client.get_experiment_by_name(trackingConfig.experiment_name)
-            if experiment is not None:
-                experiment_id = experiment.experiment_id
-                logger.info(f"Experiment '{trackingConfig.experiment_name}' already exists. Using existing experiment.")
-            else:
-                raise e
-        else:
-            raise e
-
     mlflow.set_experiment(experiment_id=experiment_id)
 
-    # Pivot the Hail MatrixTable
-    spark_df = genotype_processor.to_spark_df(data)
-    spark_df.unpersist()
-    pivoted_df = genotype_processor.pivot_genotypes(spark_df)
-
-    # Persist pivoted_df as Parquet
-    parquet_path = f"/tmp/{trackingConfig.experiment_name}.parquet"
-    logger.info(f"Saving pivoted DataFrame to Parquet at {parquet_path}")
-    pivoted_df.write.parquet(parquet_path, mode="overwrite")
-    pivoted_df.unpersist()
-
-    total_variant_count = len(pivoted_df.columns) - 1  # Subtract the sample ID column
-
-    # Force execution of Hail operations and close the Hail context
-    hl.stop()
+    # Read total variant count from Parquet metadata
+    total_variants = len(pd.read_parquet(parquet_path).columns) - 1  # Subtract sample_id column
 
     train_test_sample_ids = sample_processor.draw_train_test_split(
         test_size=samplingConfig.test_size,
-
-        random_state=random_state
+        random_state=random_state * outer_iteration + 1,
     )
 
     train_samples = list(train_test_sample_ids['train']['samples'].values())
@@ -546,9 +516,10 @@ def bootstrap_models(
         samplingConfig=samplingConfig,
         train_samples=train_samples,
         num_iterations=10,  # Number of parallel feature selection iterations
-        total_variants=total_variant_count,
+        total_variants=total_variants,
         random_state=random_state,
-        trackingConfig=trackingConfig
+        trackingConfig=trackingConfig,
+        outer_iteration=outer_iteration
     )
 
     # Prepare arguments for parallel processing of bootstrap iterations
@@ -563,7 +534,8 @@ def bootstrap_models(
             trackingConfig,
             stack,
             feature_selection_result,
-            random_state
+            random_state,
+            outer_iteration=outer_iteration
         )
         for i in iterations
     ]
@@ -583,7 +555,8 @@ def parallel_feature_selection(
     num_iterations: int = 10,
     total_variants: int = None,
     random_state: int = 42,
-    trackingConfig: TrackingConfig = None
+    trackingConfig: TrackingConfig = None,
+    outer_iteration: int = 1
 ) -> FeatureSelectionResult:
     """
     Run feature selection in parallel over multiple splits and collect overlapping features.
@@ -600,14 +573,56 @@ def parallel_feature_selection(
             sample_processor,
             samplingConfig,
             random_state + i,
-            trackingConfig
+            trackingConfig,
+            outer_iteration
         )
         for i in range(num_iterations)
     ]
 
     # Collect results
-    selected_features_list = ray.get(tasks)
-    logger.info("Completed parallel feature selection.")
+    results = ray.get(tasks)
+    selected_features_list = [r[0] for r in results]
+    fitted_feature_selectors = [r[1] for r in results]
+    
+    # Extract selected credible intervals from feature selectors
+    selected_intervals = [
+        fs.selected_credible_interval 
+        for fs in fitted_feature_selectors 
+        if hasattr(fs, 'selected_credible_interval') and fs.selected_credible_interval is not None
+    ]
+
+    # Calculate mean and std of selected intervals if available
+    if selected_intervals:
+        mean_interval = float(np.mean(selected_intervals))
+        std_interval = float(np.std(selected_intervals))
+        logger.info(f"Mean selected credible interval: {mean_interval:.4f} ± {std_interval:.4f}")
+        
+        # Log to MLflow
+        if trackingConfig:
+            with mlflow.start_run(run_name=f"Feature_Selection_Summary") as run:
+                mlflow.log_metric("mean_selected_credible_interval", mean_interval)
+                mlflow.log_metric("std_selected_credible_interval", std_interval)
+                mlflow.set_tag("outer_iteration", outer_iteration)
+                # Create a summary DataFrame with feature counts
+                all_features = np.concatenate(selected_features_list)
+                feature_counts = pd.DataFrame(
+                    all_features, 
+                    columns=['Feature']
+                ).value_counts().reset_index()
+                feature_counts.columns = ['Feature', 'Count']
+                
+                # Sort by count in descending order
+                feature_counts = feature_counts.sort_values('Count', ascending=False)
+                
+                # Log the summary DataFrame and intervals
+                mlflow.log_table(feature_counts, artifact_file="selected_features.json")
+                mlflow.log_table(pd.DataFrame({'Credible Interval': selected_intervals}), 
+                               artifact_file="selected_credible_intervals.json")
+                mlflow.set_tag("outer_iteration", outer_iteration)
+    else:
+        mean_interval = samplingConfig.feature_credible_interval
+        std_interval = None
+        logger.warning("No valid selected credible intervals found. Using default interval.")
 
     # Concatenate selected features from all iterations
     all_selected_features = np.concatenate(selected_features_list)
@@ -623,7 +638,9 @@ def parallel_feature_selection(
         selected_features=unique_selected_features,
         num_variants=num_variants,
         total_variants=total_variants,
-        credible_interval=samplingConfig.feature_credible_interval
+        credible_interval=samplingConfig.feature_credible_interval,
+        selected_credible_interval=mean_interval,
+        selected_credible_interval_deviation=std_interval
     )
 
 @ray.remote(num_cpus=1)
@@ -634,7 +651,8 @@ def feature_selection_iteration(
     sample_processor: SampleProcessor,
     samplingConfig: SamplingConfig,
     random_state: int,
-    trackingConfig: TrackingConfig = None
+    trackingConfig: TrackingConfig = None,
+    outer_iteration: int = 1
 ) -> pd.Index:
     """
     Perform feature selection on a random split of the data.
@@ -650,6 +668,7 @@ def feature_selection_iteration(
         mlflow.log_param("iteration", iteration)
         mlflow.log_param("random_state", random_state + iteration)
         mlflow.set_tag('feature_selection_status', 'in_progress')
+        mlflow.set_tag('outer_iteration', outer_iteration)
 
         try:
             # Prepare data by reading from Parquet
@@ -672,8 +691,8 @@ def feature_selection_iteration(
                     lr=1e-3,
                     credible_interval=samplingConfig.feature_credible_interval,
                     num_samples=3000,
-                    patience=100,
-                    validation_split=0.2,
+                    patience=10,
+                    validation_split=samplingConfig.test_size,
                     batch_size=int(np.floor(X_train.shape[0] * 0.1)),
                     verbose=True,
                     checkpoint_path=f"/tmp/feature_selection_checkpoint.params",
@@ -683,56 +702,50 @@ def feature_selection_iteration(
                 selected_features = feature_selector.selected_features_
 
                 if len(selected_features) == 0:
-                    logger.warning(f"No features selected on attempt {attempt + 1}. Retrying...")
-                    mlflow.log_metric(f"attempt_{attempt + 1}_selected_features", 0)
-                    attempt += 1
-                    mlflow.log_param(f"attempt_{attempt}_status", "no_features_selected")
+                        logger.warning(f"No features selected on attempt {attempt + 1}. Retrying...")
+                        mlflow.log_metric(f"attempt_{attempt + 1}_selected_features", 0)
+                        attempt += 1
+                        mlflow.log_param(f"attempt_{attempt}_status", "no_features_selected")
 
-            if len(selected_features) == 0:
-                logger.error("Failed to select features after maximum attempts. No features found at the specified credible interval.")
-                mlflow.set_tag("feature_selection_status", "no_features_found")
-            else:
-                mlflow.set_tag("feature_selection_status", "successful")
-            
-            # Log selected features
-            selected_features_df = pd.DataFrame(selected_features, columns=['feature'])
-            mlflow.log_table(selected_features_df, artifact_file=f"selected_features.json")
+                # Update final status and log results
+                if len(selected_features) == 0:
+                    mlflow.set_tag("feature_selection_status", "no_features_found")
+                else:
+                    mlflow.set_tag("feature_selection_status", "successful")
+                    selected_features_df = pd.DataFrame(selected_features, columns=['feature'])
+                    mlflow.log_table(selected_features_df, artifact_file=f"selected_features.json")
+                    mlflow.log_param("number_of_selected_features", len(selected_features))
 
-            # Update the feature selection status if successful
-            if len(selected_features) > 0:
-                mlflow.set_tag('feature_selection_status', 'successful')
-            else:
-                mlflow.set_tag('feature_selection_status', 'no_features_found')
+                logger.info(f"Number of selected features in iteration {iteration}: {len(selected_features)}")
+                return pd.Index(selected_features), feature_selector
 
-            mlflow.log_param("number_of_selected_features", len(selected_features))
-
-            logger.info(f"Number of selected features in iteration {iteration}: {len(selected_features)}")
-    
-            return pd.Index(selected_features)
         except Exception as e:
-            # Log the exception details
             logger.error(f"An error occurred during feature selection: {str(e)}")
-            logger.debug("Exception details:", exc_info=True)
             mlflow.set_tag('feature_selection_status', 'failed')
-            # Optionally, log the exception message
             mlflow.log_text(str(e), artifact_file="errors/feature_selection_error.txt")
-            # Re-raise the exception to be handled by the calling function
             raise e
 
-def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, set_type="test", table_name="crossval", num_variants=None, total_variants=None, credible_interval=None):
+def create_and_log_visualizations(
+    model_name: str,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    trackingConfig: TrackingConfig,
+    set_type: str = "test",
+    table_name: str = "crossval",
+    feature_selection_result: Optional[FeatureSelectionResult] = None
+) -> None:
     """
     Create and log visualizations directly to MLflow.
     
     Args:
         model_name (str): Name of the model.
-        y_true (array-like): True labels.
-        y_pred (array-like): Predicted probabilities.
+        y_true (np.ndarray): True labels.
+        y_pred (np.ndarray): Predicted probabilities.
         trackingConfig (TrackingConfig): Configuration for tracking.
         set_type (str, optional): Type of dataset ('test', 'train', 'holdout'). Defaults to "test".
         table_name (str, optional): Name of the table. Defaults to "crossval".
-        num_variants (int, optional): Number of selected features. Defaults to None.
-        total_variants (int, optional): Total number of features before selection. Defaults to None.
-        credible_interval (float, optional): Confidence level used in feature selection. Defaults to None.
+        feature_selection_result (FeatureSelectionResult, optional): Results from feature selection,
+            including selected features, credible intervals, and their uncertainties. Defaults to None.
     """
     logger = logging.getLogger(__name__)
     
@@ -761,11 +774,10 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
             Any: Result returned by the plot_func.
         """
         if square:
-            fig_size = (8, 8)  # Smaller figure size for square plots
+            fig_size = (8, 8)
         else:
-            fig_size = (10, 6)  # Default size for non-square plots
+            fig_size = (10, 6)
 
-        # Create figure and axes with constrained_layout to handle layout automatically
         fig, ax = plt.subplots(figsize=fig_size, constrained_layout=True)
         try:
             result = plot_func(fig, ax)
@@ -783,14 +795,26 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         finally:
             plt.close(fig)
 
-    # Construct the subtitle with feature selection info if available
-    if num_variants is not None and total_variants is not None and credible_interval is not None:
-        subtitle = (f"{num_variants} of {total_variants} variants selected "
-                    f"({credible_interval*100:.0f}% credible interval)\n")
+    # Construct the subtitle with feature selection info
+    if feature_selection_result is not None:
+        num_variants = feature_selection_result.num_variants
+        total_variants = feature_selection_result.total_variants
+        
+        # Format the credible interval with standard deviation if available
+        if feature_selection_result.selected_credible_interval is not None:
+            interval_str = f"{feature_selection_result.selected_credible_interval:.3f}"
+            if feature_selection_result.selected_credible_interval_deviation is not None:
+                interval_str += f" ± {feature_selection_result.selected_credible_interval_deviation:.3f}"
+            feature_info = (f"{num_variants} of {total_variants} variants selected\n"
+                          f"Selected credible interval: {interval_str}")
+        else:
+            feature_info = f"{num_variants} of {total_variants} variants selected"
+        
+        subtitle = f"\n{feature_info}\n"
     else:
         subtitle = ""
-    
-    # Existing subtitle information
+
+    # Add dataset information
     num_cases = np.sum(y_true != 0)
     num_controls = np.sum(y_true == 0)
     metrics = {
@@ -799,13 +823,11 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
     }
     mlflow.log_metrics(metrics)
 
-    # Append to the subtitle
-    subtitle += f"Cases: {num_cases}, Controls: {num_controls}"
     if table_name != "crossval":
-        subtitle = f"Evaluated on: {table_name}\n{subtitle}"
+        subtitle += f"Evaluated on: {table_name}\n"
     else:
-        subtitle = f"Evaluated on: {set_type} split\n{subtitle}"
-    subtitle = f"\n{subtitle}"
+        subtitle += f"Evaluated on: {set_type} split\n"
+    subtitle += f"Cases: {num_cases}, Controls: {num_controls}"
 
     # ROC Curve
     def plot_roc(fig, ax):
@@ -816,11 +838,9 @@ def create_and_log_visualizations(model_name, y_true, y_pred, trackingConfig, se
         ax.set_xlabel('False Positive Rate')
         ax.set_ylabel('True Positive Rate')
         ax.legend()
-
-        # Set the title at the figure level
         fig.suptitle(f'ROC Curve for {model_name}\n{trackingConfig.name}\n{subtitle}')
         return fpr, tpr, thresholds, auc_score
-    
+
     # Precision-Recall Curve
     def plot_pr(fig, ax):
         display = PrecisionRecallDisplay.from_predictions(y_true, y_pred, ax=ax, name=f'Precision-Recall')

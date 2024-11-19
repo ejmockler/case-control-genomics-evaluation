@@ -10,8 +10,6 @@ from pyspark.sql import SparkSession
 import pandas as pd
 import numpy as np
 
-from eval.feature_selection import detect_data_threshold
-
 class GenotypeProcessor:
     def __init__(self, config: VCFConfig, gtf_config: GTFConfig):
         self.config = config

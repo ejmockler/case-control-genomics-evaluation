@@ -16,10 +16,9 @@ from pyro.infer.autoguide import AutoNormal
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.mixture import GaussianMixture
-from sklearn.neighbors import KernelDensity, NearestNeighbors
-from scipy.signal import find_peaks, peak_prominences, peak_widths
-from joblib import Parallel, delayed
+from sklearn.neighbors import NearestNeighbors
+from scipy.ndimage import gaussian_filter1d  
+from scipy.stats import norm
 import torch
 import matplotlib.pyplot as plt
 import mlflow
@@ -33,6 +32,7 @@ class FeatureSelectionResult:
     total_variants: int
     credible_interval: float
     selected_credible_interval: Optional[float] = None
+    selected_credible_interval_deviation: Optional[float] = None
 
 class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
     def __init__(
@@ -65,6 +65,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.max_features = max_features
         self.min_threshold = min_threshold  # Store min_threshold
         self.checkpoint_path = f"{os.path.splitext(checkpoint_path)[0]}_{unique_id}.params"
+        self.num_draws = num_iterations  # Total number of validation predictions we'll store
         
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -78,6 +79,18 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         self.logger.info(f"Using device: {self.device}")
 
     def fit(self, X, y):
+        # Shuffle input data while maintaining index alignment
+        rng = np.random.RandomState(int(self.unique_id))
+        shuffle_idx = rng.permutation(len(X))
+        
+        if isinstance(X, pd.DataFrame):
+            X = X.iloc[shuffle_idx]
+            y = y.iloc[shuffle_idx]
+        else:
+            X = X[shuffle_idx]
+            y = y[shuffle_idx]
+        
+        # Convert to tensors
         scaler = MinMaxScaler()
         X_tensor = torch.tensor(
             scaler.fit_transform(X.values) if isinstance(X, pd.DataFrame) else scaler.fit_transform(X),
@@ -105,7 +118,8 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             shuffle=False
         )
         
-        # Initialize validation_results_ DataFrame if sample IDs are available
+        # Initialize validation_results_ with numpy arrays instead of lists
+        # Approach 1: Store predictions as a 2D array (samples × draws)
         sample_ids = y.index.values if hasattr(y, 'index') else None
         if sample_ids is not None:
             val_sample_ids = sample_ids[split_idx:]
@@ -113,8 +127,9 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             self.validation_results_['label'] = y_val.cpu().numpy()
             self.validation_results_['sum_correct'] = 0
             self.validation_results_['count'] = 0
-        else:
-            self.validation_results_ = None
+            # Initialize predictions array
+            self.val_predictions_ = np.zeros((len(val_sample_ids), self.num_draws), dtype=np.int8)
+            self.current_draw_ = 0
 
         def model(X, y=None):
             D = X.size(1)
@@ -183,7 +198,10 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
                 correct = (y_val_pred == y_val.cpu().numpy()).astype(int)
                 self.validation_results_.loc[val_sample_ids, 'sum_correct'] += correct
                 self.validation_results_.loc[val_sample_ids, 'count'] += 1
-            
+                # Store predictions in the array
+                if self.current_draw_ < self.num_draws:
+                    self.val_predictions_[:, self.current_draw_] = y_val_pred
+                    self.current_draw_ += 1
             if self.verbose:
                 print(f"Epoch {epoch}: Train Loss = {avg_epoch_loss:.4f}, Val Loss = {avg_val_loss:.4f}, "
                       f"Val Accuracy = {accuracy:.4f}, Val F1 = {f1:.4f}")
@@ -214,76 +232,78 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
 
         # Aggregate per-sample metrics and log to MLflow
         if self.validation_results_ is not None:
-            self.validation_results_['mean_accuracy'] = self.validation_results_['sum_correct'] / self.validation_results_['count']
-            self.validation_results_['std_accuracy'] = np.sqrt(
-                self.validation_results_['mean_accuracy'] * (1 - self.validation_results_['mean_accuracy']) / self.validation_results_['count']
+            # Use only the draws we actually completed
+            actual_predictions = self.val_predictions_[:, :self.current_draw_]
+            
+            # Calculate metrics
+            self.validation_results_['accuracy'] = self.validation_results_['sum_correct'] / self.validation_results_['count']
+            self.validation_results_['accuracy_std'] = np.sqrt(
+                self.validation_results_['accuracy'] * (1 - self.validation_results_['accuracy']) / self.validation_results_['count']
             )
             self.validation_results_['draw_count'] = self.validation_results_['count']
             
-            # Select relevant columns
-            aggregated_results = self.validation_results_[['label', 'mean_accuracy', 'std_accuracy', 'draw_count']]
-            aggregated_results.reset_index(inplace=True)
-            aggregated_results.rename(columns={'index': 'sample_id'}, inplace=True)
+            # Calculate average and std dev of predictions for each sample
+            self.validation_results_['avg_prediction'] = np.mean(actual_predictions, axis=1)
+            self.validation_results_['prediction_std'] = np.std(actual_predictions, axis=1)
             
-            # Log the validation results
+            validation_results_table = self.validation_results_.reset_index(names='sample_id')
+            validation_results_table = validation_results_table[['sample_id', 'label', 'accuracy', 'accuracy_std', 'avg_prediction', 'prediction_std', 'draw_count']]
+            # Log validation results to MLflow  
             mlflow.log_table(
-                data=aggregated_results, 
+                validation_results_table,
                 artifact_file="validation_aggregated_results.json"
             )
 
         self.logger.info("Detecting data-driven threshold for feature selection.")
         try:
-            # Aggregate over posterior samples (e.g., compute the mean)
-            mean_beta = np.mean(beta_samples, axis=0)
+            # Compute posterior mean and standard deviation
+            posterior_mean = np.mean(beta_samples, axis=0)
+            posterior_std = np.std(beta_samples, axis=0)
+            # Handle zero standard deviation to avoid division by zero
+            posterior_std = np.where(posterior_std == 0, np.finfo(float).eps, posterior_std)
+            # Compute standardized effect sizes
+            standardized_effect_sizes = np.abs(posterior_mean / posterior_std)
 
-            # Pass the aggregated data to detect_data_threshold
-            threshold, fig = detect_data_threshold(
-                mean_beta,
-                plot=True,  # Enable plotting
-                logger=self.logger,
-                min_threshold=self.min_threshold  # Use the min_threshold parameter
+            selected_features, threshold, fig = select_features_by_tail(
+                standardized_effect_sizes,
+                feature_names=X.columns if isinstance(X, pd.DataFrame) else None,
+                max_features=self.max_features,
+                k_neighbors=10,
             )
-            self.selected_credible_interval = threshold  # Store the detected threshold
-            self.logger.info(f"Detected threshold: {threshold:.4f}")
-            mlflow.log_metric("selected_credible_interval", threshold)
+            
+            self.selected_credible_interval = threshold
+            self.selected_features_ = selected_features
+                
+            # Log the figure to MLflow
+            if self.verbose:
+                mlflow.log_figure(fig, f"standardized_effect_sizes_tail.png")
+                plt.close(fig)
 
-            # Log the KDE plot directly to MLflow
-            if fig is not None:
-                mlflow.log_figure(fig, artifact_file="beta_kde_plot.png")
-                plt.close(fig)  # Close the figure to free memory
-
-            # Select features where absolute mean_beta exceeds the threshold
-            selected = np.abs(mean_beta) >= threshold
-
-            # Check if the number of selected features exceeds the maximum allowed
-            if np.sum(selected) > self.max_features:
-                # Select top features based on absolute mean_beta
-                top_indices = np.argsort(-np.abs(mean_beta))[:self.max_features]
-                selected = np.zeros_like(mean_beta, dtype=bool)
-                selected[top_indices] = True
-
-            if isinstance(X, pd.DataFrame):
-                self.selected_features_ = X.columns[selected]
-            else:
-                self.selected_features_ = np.arange(X.shape[1])[selected]
+            # Create and log feature statistics table
+            # Compute standardized effect sizes once
+            beta_mean = np.mean(beta_samples, axis=0)
+            beta_std = np.std(beta_samples, axis=0)
+            beta_std = np.where(beta_std == 0, np.finfo(float).eps, beta_std)
+            feature_stats = pd.DataFrame({
+                'feature_name': X.columns if isinstance(X, pd.DataFrame) else [f'feature_{i}' for i in range(len(beta_mean))],
+                'beta_mean': beta_mean,
+                'beta_std': beta_std,
+                'effect_size': standardized_effect_sizes,
+                'is_selected': [name in selected_features for name in (X.columns if isinstance(X, pd.DataFrame) else [f'feature_{i}' for i in range(len(beta_mean))])]
+            })
+            
+            # Sort by absolute effect size for better readability
+            feature_stats = feature_stats.sort_values('effect_size', ascending=False)
+            
+            # Log to MLflow
+            mlflow.log_table(
+                data=feature_stats,
+                artifact_file="feature_statistics.json"
+            )
+                
         except Exception as e:
-            self.logger.error(f"Threshold detection failed: {e}")
-            # Fallback to existing percentile-based selection
-            self.logger.warning("Falling back to percentile-based credible interval selection.")
-            lower_bound = np.percentile(beta_samples, (1 - self.credible_interval) / 2 * 100, axis=0)
-            upper_bound = np.percentile(beta_samples, (1 + self.credible_interval) / 2 * 100, axis=0)
-
-            self.lower_bound_ = lower_bound
-            self.upper_bound_ = upper_bound
-
-            non_zero = (lower_bound > 0) | (upper_bound < 0)
-            
-            if isinstance(X, pd.DataFrame):
-                self.selected_features_ = X.columns[non_zero]
-            else:
-                self.selected_features_ = np.arange(X.shape[1])[non_zero]
-            
-            self.selected_credible_interval = self.credible_interval  # Retain the original interval
+            self.logger.error(f"Tail detection failed: {e}")
+            raise ValueError("Feature selection using the tail approach failed.")
 
         return self
 
@@ -296,183 +316,194 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             return X[:, self.selected_features_]
 
     def log_metrics(self, epoch: int, train_loss: float, val_loss: float, accuracy: float, f1: float):
+        """Log metrics with proper nesting under the feature selection run."""
+        # Get the current run context
+        current_run = mlflow.active_run()
+        if current_run is None:
+            self.logger.warning("No active MLflow run found for logging metrics")
+            return
+
+        # Log metrics directly without creating a new run
         mlflow.log_metric("train_loss", train_loss, step=epoch)
         mlflow.log_metric("val_loss", val_loss, step=epoch)
         mlflow.log_metric("val_accuracy", accuracy, step=epoch)
         mlflow.log_metric("val_f1_score", f1, step=epoch)
         
         if epoch == 1:
-            mlflow.log_param("unique_id", self.unique_id)
-            mlflow.log_param("covariance_type", self.covariance_type)
-            mlflow.log_param("num_iterations", self.num_iterations)
-            mlflow.log_param("learning_rate", self.lr)
-            mlflow.log_param("credible_interval", self.credible_interval)
-            mlflow.log_param("num_samples", self.num_samples)
-            mlflow.log_param("batch_size", self.batch_size)
-            mlflow.log_param("patience", self.patience)
-            mlflow.log_param("validation_split", self.validation_split)
-            mlflow.log_param("checkpoint_path", self.checkpoint_path)
-            mlflow.log_param("min_threshold", self.min_threshold)  # Log min_threshold
+            mlflow.log_params({
+                "unique_id": self.unique_id,
+                "covariance_type": self.covariance_type,
+                "num_iterations": self.num_iterations,
+                "learning_rate": self.lr,
+                "credible_interval": self.credible_interval,
+                "num_samples": self.num_samples,
+                "batch_size": self.batch_size,
+                "patience": self.patience,
+                "validation_split": self.validation_split,
+                "checkpoint_path": self.checkpoint_path
+            })
 
-# Adaptive KDE and Threshold Detection Functions
-
-def adaptive_bandwidth(data: np.ndarray, k: int = 10) -> np.ndarray:
-    """Calculate adaptive bandwidths using k-nearest neighbors."""
-    nbrs = NearestNeighbors(n_neighbors=k).fit(data.reshape(-1, 1))
-    distances, _ = nbrs.kneighbors(data.reshape(-1, 1))
-    bandwidths = distances[:, -1]  # Distance to k-th nearest neighbor
-    return bandwidths
-
-def estimate_kde_adaptive(data: np.ndarray, x_grid: np.ndarray, bandwidths: np.ndarray) -> np.ndarray:
-    """Estimate KDE using adaptive bandwidths."""
-    kde_values = np.zeros_like(x_grid)
-    n = len(data)
-    for xi, h_i in zip(data, bandwidths):
-        kernel = np.exp(-0.5 * ((x_grid - xi) / h_i) ** 2) / (h_i * np.sqrt(2 * np.pi))
-        kde_values += kernel
-    kde_values /= n
-    return kde_values
-
-def compute_bic(n_components: int, data: np.ndarray) -> float:
-    """Compute Bayesian Information Criterion for Gaussian Mixture Models."""
-    gmm = GaussianMixture(n_components=n_components, covariance_type='full', random_state=0)
-    gmm.fit(data)
-    return gmm.bic(data)
-
-def estimate_number_of_modes_parallel(data: np.ndarray, max_components: int = 5) -> int:
-    """Estimate the number of modes using Gaussian Mixture Models and BIC."""
-    data_reshaped = data.reshape(-1, 1)
-    n_components_range = range(1, max_components + 1)
-    bic_scores = Parallel(n_jobs=-1)(
-        delayed(compute_bic)(n, data_reshaped) for n in n_components_range
-    )
-    best_n_components = n_components_range[np.argmin(bic_scores)]
-    return best_n_components
-
-def detect_peaks_adaptive(
-    kde_values: np.ndarray,
-    x_grid: np.ndarray,
-    expected_num_peaks: int
-) -> Tuple[np.ndarray, dict]:
-    """Detect significant peaks in the KDE."""
-    peaks, _ = find_peaks(kde_values)
-    if len(peaks) == 0:
-        return peaks, {}
-    
-    prominences = peak_prominences(kde_values, peaks)[0]
-    widths = peak_widths(kde_values, peaks)[0]
-    
-    properties = {
-        'prominences': prominences,
-        'widths': widths
-    }
-    
-    prominence_threshold = np.median(prominences)
-    width_threshold = np.median(widths)
-    
-    significant_indices = (prominences >= prominence_threshold) & (widths >= width_threshold)
-    significant_peaks = peaks[significant_indices]
-    significant_properties = {key: val[significant_indices] for key, val in properties.items()}
-    
-    if len(significant_peaks) > expected_num_peaks:
-        sorted_indices = np.argsort(-significant_properties['prominences'])
-        significant_peaks = significant_peaks[sorted_indices[:expected_num_peaks]]
-        for key in significant_properties:
-            significant_properties[key] = significant_properties[key][sorted_indices[:expected_num_peaks]]
-    
-    return significant_peaks, significant_properties
-
-def determine_threshold_vectorized(
-    x_grid: np.ndarray,
-    kde_values: np.ndarray,
-    peaks: np.ndarray
-) -> Optional[float]:
-    """Determine the threshold value between the top two peaks."""
-    if len(peaks) >= 2:
-        sorted_peaks = peaks[np.argsort(-kde_values[peaks])]
-        first_peak, second_peak = sorted_peaks[:2]
-        start, end = sorted([first_peak, second_peak])
-        valley_region = kde_values[start:end]
-        if valley_region.size == 0:
-            return None
-        valley_index = np.argmin(valley_region) + start
-        return x_grid[valley_index]
-    return None
-
-def detect_data_threshold(
-    data: np.ndarray,
-    plot: bool = False,
-    logger: Optional[logging.Logger] = None,
-    max_modes: int = 5,
-    min_threshold: float = 0.2  # Added min_threshold parameter
-) -> Tuple[float, Optional[plt.Figure]]:
+def detect_beta_tail_threshold(effect_sizes: np.ndarray, 
+                             k_neighbors: int = 10,
+                             smooth_window: int = 1,
+                             base_cumulative_density_threshold: float = 0.01,
+                             base_sensitivity: float = 0.005) -> tuple:
     """
-    Detect a data-driven threshold using adaptive KDE.
+    Detect a threshold in the KDE using global density normalization to dynamically
+    adjust the cumulative density threshold based on the density distribution.
+
+    Parameters:
+    -----------
+    effect_sizes : np.ndarray
+        Array of pre-computed standardized effect sizes
+    k_neighbors : int
+        Number of neighbors for adaptive bandwidth calculation
+    smooth_window : int
+        Window size for smoothing the KDE curve
+    base_cumulative_density_threshold : float
+        Base cumulative density threshold (adjusted dynamically based on global density)
+    base_sensitivity : float
+        Base gradient sensitivity (adjusted dynamically based on global density)
 
     Returns:
-        threshold (float): The detected threshold.
-        fig (plt.Figure or None): The matplotlib figure if plotting is enabled.
+    --------
+    tuple
+        (threshold value, Figure object with plot)
     """
-    if logger is None:
-        logger = logging.getLogger(__name__)
-    logger.setLevel(logging.WARNING)
-
-    if len(data) < 2:
-        raise ValueError("At least two data points are required.")
-
-    if np.isclose(data.min(), data.max()):
-        raise ValueError("Data values are nearly constant; threshold detection is not meaningful.")
-
-    data = data.astype(np.float32)
-    x_grid = np.linspace(data.min(), data.max(), 500)
-
-    # Adaptive bandwidth estimation
-    bandwidths = adaptive_bandwidth(data, k=10)
-    kde_values = estimate_kde_adaptive(data, x_grid, bandwidths)
-
-    num_modes = estimate_number_of_modes_parallel(data, max_components=max_modes)
-    logger.info(f"Estimated number of modes: {num_modes}")
-
-    if num_modes >= 2:
-        logger.info("Multimodal distribution detected; proceeding with adaptive peak detection.")
-        peaks, properties = detect_peaks_adaptive(kde_values, x_grid, expected_num_peaks=num_modes)
-        logger.info(f"Number of significant peaks detected: {len(peaks)}")
-
-        threshold = determine_threshold_vectorized(x_grid, kde_values, peaks)
-        if threshold is not None:
-            logger.info(f"Detected threshold at value: {threshold:.4f}")
-        else:
-            raise ValueError("Unable to determine threshold from peaks.")
+    # Create evaluation grid
+    x_grid = np.linspace(effect_sizes.min(), effect_sizes.max(), 1000)
+    
+    # Calculate adaptive bandwidths
+    nbrs = NearestNeighbors(n_neighbors=k_neighbors)
+    nbrs.fit(effect_sizes.reshape(-1, 1))
+    distances, _ = nbrs.kneighbors(effect_sizes.reshape(-1, 1))
+    bandwidths = distances[:, -1]
+    
+    # Estimate KDE with adaptive bandwidths
+    kde_values = np.zeros_like(x_grid)
+    for i, point in enumerate(effect_sizes):
+        kde_values += norm.pdf(x_grid, loc=point, scale=bandwidths[i])
+    kde_values /= len(effect_sizes)  # Average the contributions
+    
+    # Normalize the KDE values
+    normalized_kde_values = kde_values / np.sum(kde_values)
+    
+    # Apply smoothing
+    kde_smooth = gaussian_filter1d(normalized_kde_values, sigma=smooth_window)
+    
+    # Calculate normalized cumulative density
+    cumulative_density = np.cumsum(kde_smooth[::-1])[::-1]
+    
+    # Find start of tail region using cumulative density
+    tail_indices = np.where(cumulative_density <= base_cumulative_density_threshold)[0]
+    if len(tail_indices) > 0:
+        tail_start_idx = tail_indices[0]
     else:
-        raise ValueError("Unimodal distribution detected or insufficient modes; unable to determine threshold.")
-
-    # Ensure threshold is not below min_threshold
-    if threshold < min_threshold:
-        logger.info(f"Threshold {threshold:.4f} is below min_threshold {min_threshold:.4f}. Using min_threshold.")
-        threshold = min_threshold
-
-    fig = None
-    if plot:
-        fig = plot_kde(x_grid, kde_values, peaks, threshold, data)
-
+        # Fallback: use the smallest cumulative density point
+        tail_start_idx = len(cumulative_density) - 1  # Last index
+    
+    # Calculate gradient and its smoothed version
+    gradient = np.gradient(kde_smooth)
+    gradient_smooth = gaussian_filter1d(gradient, sigma=smooth_window)
+    
+    # Find inflection point in tail region
+    threshold_idx = None
+    window_points = 5  # Window for checking gradient stability
+    
+    # Search only in tail region
+    for i in range(tail_start_idx, len(gradient_smooth) - window_points):
+        window = gradient_smooth[i:i + window_points]
+        
+        # Check for sustained negative gradient
+        if (np.mean(window) < -base_sensitivity and 
+            np.all(window < 0)):
+            threshold_idx = i
+            break
+    
+    if threshold_idx is None:
+        # Fallback: use tail start point
+        threshold_idx = tail_start_idx
+    
+    threshold = x_grid[threshold_idx]
+    
+    # Visualization
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), height_ratios=[2, 1])
+    
+    # Plot histogram and rescale KDE to match histogram density
+    hist_values, bin_edges = np.histogram(effect_sizes, bins=50, density=True)
+    scaling_factor = np.max(hist_values) / np.max(kde_smooth)
+    scaled_kde = kde_smooth * scaling_factor
+    
+    ax1.hist(effect_sizes, bins=50, density=True, alpha=0.3, color='gray', label='Histogram')
+    ax1.plot(x_grid, scaled_kde, 'b-', label='Smoothed KDE')
+    ax1.axvline(x=threshold, color='r', linestyle='--', 
+                label=f'Inflection Threshold: {threshold:.3f}')
+    
+    # Mark tail region and inflection point
+    ax1.axvline(x=x_grid[tail_start_idx], color='g', linestyle=':', 
+                label=f'Tail Start ({base_cumulative_density_threshold:.1%} density)')
+    ax1.plot(x_grid[threshold_idx], scaled_kde[threshold_idx], 'ko', 
+             markersize=10, label='Inflection Point')
+    
+    ax1.set_title('Distribution of Standardized Effect Sizes')
+    ax1.set_xlabel('|Standardized Effect Size|')
+    ax1.set_ylabel('Density')
+    ax1.legend()
+    
+    # Plot gradient analysis
+    ax2.plot(x_grid, gradient_smooth, 'b-', label='Smoothed Gradient')
+    ax2.axhline(y=0, color='gray', linestyle=':')
+    ax2.axvline(x=threshold, color='r', linestyle='--', label='Selected Threshold')
+    ax2.axvline(x=x_grid[tail_start_idx], color='g', linestyle=':', label='Tail Start')
+    ax2.plot(x_grid[threshold_idx], gradient_smooth[threshold_idx], 'ko',
+             markersize=10, label='Inflection Point')
+    ax2.set_title('Gradient Analysis')
+    ax2.set_xlabel('|Standardized Effect Size|')
+    ax2.set_ylabel('Gradient')
+    ax2.legend()
+    
+    plt.tight_layout()
+    
     return threshold, fig
 
-def plot_kde(
-    x_grid: np.ndarray,
-    kde_values: np.ndarray,
-    peaks: np.ndarray,
-    threshold: Optional[float],
-    data: np.ndarray
-) -> plt.Figure:
-    """Plot the adaptive KDE along with detected peaks and threshold."""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(x_grid, kde_values, label='Adaptive KDE')
-    ax.hist(data, bins=30, density=True, alpha=0.3, label='Histogram')
-    ax.plot(x_grid[peaks], kde_values[peaks], "x", label='Detected Peaks')
-    if threshold is not None:
-        ax.axvline(x=threshold, color='red', linestyle='--', label=f'Detected Threshold: {threshold:.4f}')
-    ax.set_xlabel('Data Values')
-    ax.set_ylabel('Density')
-    ax.set_title('Data Distribution with Detected Threshold')
-    ax.legend()
-    return fig
+def select_features_by_tail(effect_sizes: np.ndarray,
+                          feature_names=None, 
+                          max_features=None, 
+                          **kwargs) -> tuple:
+    """
+    Select features based on pre-computed standardized effect sizes.
+    
+    Parameters:
+    -----------
+    effect_sizes : np.ndarray
+        Pre-computed standardized effect sizes
+    feature_names : array-like, optional
+        Names of features corresponding to effect sizes
+    max_features : int, optional
+        Maximum number of features to select
+    **kwargs : dict
+        Additional arguments passed to detect_beta_tail_threshold
+    
+    Returns:
+    --------
+    tuple
+        (selected features, threshold value, Figure object)
+    """
+    threshold, fig = detect_beta_tail_threshold(effect_sizes, **kwargs)
+    
+    # Select features above threshold
+    selected = effect_sizes >= threshold
+    
+    # Apply max_features constraint if specified
+    if max_features is not None and np.sum(selected) > max_features:
+        top_indices = np.argsort(-effect_sizes)[:max_features]
+        selected = np.zeros_like(effect_sizes, dtype=bool)
+        selected[top_indices] = True
+    
+    # Return feature names if provided, otherwise indices
+    if feature_names is not None:
+        selected_features = feature_names[selected]
+    else:
+        selected_features = np.where(selected)[0]
+    
+    return selected_features, threshold, fig

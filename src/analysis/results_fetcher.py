@@ -129,6 +129,10 @@ class MLflowResultFetcher(ResultFetcher):
             return "bootstrap"
         elif run_name.startswith("Feature_Selection_"):
             return "feature_selection"
+        elif run_name.startswith("Outer_Bootstrap_"):
+            return "outer_bootstrap"
+        elif run_name.startswith("summary"):
+            return "summary"
         else:
             return "model"
 
@@ -139,7 +143,7 @@ class MLflowResultFetcher(ResultFetcher):
         Fetch all runs from the experiment, optionally filtering by run type.
 
         Args:
-            run_type (str, optional): Type of runs to fetch ('model', 'bootstrap', or 'feature_selection').
+            run_type (str, optional): Type of runs to fetch ('model', 'bootstrap', 'feature_selection', 'outer_bootstrap').
 
         Returns:
             List of runs with their details.
@@ -152,19 +156,23 @@ class MLflowResultFetcher(ResultFetcher):
         run_type_map = {
             'model': 'model',
             'bootstrap': 'Bootstrap_',
-            'feature_selection': 'Feature_Selection_'
+            'feature_selection': 'Feature_Selection_',
+            'outer_bootstrap': 'outer_bootstrap_',
+            'summary': 'summary'
         }
 
         if run_type:
             if run_type not in run_type_map:
-                raise ValueError(f"Invalid run_type: {run_type}. Must be 'model', 'bootstrap', or 'feature_selection'.")
+                raise ValueError(f"Invalid run_type: {run_type}. Must be 'model', 'bootstrap', 'feature_selection', 'outer_bootstrap', or 'summary'.")
 
-            if run_type in ['bootstrap', 'feature_selection']:
+            if run_type == 'summary':
+                filter_string = "tags.mlflow.runName = 'summary'"
+            elif run_type in ['bootstrap', 'feature_selection', 'outer_bootstrap']:
                 prefix = run_type_map[run_type]
                 filter_string = f"tags.mlflow.runName LIKE '{prefix}%'"
             elif run_type == 'model':
                 # For 'model' runs, exclude bootstrap and feature selection runs
-                filter_string = "tags.mlflow.runName != 'Bootstrap_%' AND tags.mlflow.runName != 'Feature_Selection_%' AND tags.mlflow.runName != 'summary'"
+                filter_string = "tags.mlflow.runName != 'Bootstrap_%' AND tags.mlflow.runName != 'Feature_Selection_%' AND tags.mlflow.runName != 'outer_bootstrap_%' AND tags.mlflow.runName != 'summary'"
 
         self.logger.info(f"Fetching runs for experiment {self.experiment.name} with filter: {filter_string}")
 
@@ -194,7 +202,7 @@ class MLflowResultFetcher(ResultFetcher):
             extracted_run_type = self._extract_run_type(run_name)
             
             # If run_type is 'model', exclude if it's 'bootstrap' or 'feature_selection'
-            if run_type == 'model' and extracted_run_type in ['bootstrap', 'feature_selection']:
+            if run_type == 'model' and extracted_run_type in ['bootstrap', 'feature_selection', 'outer_bootstrap']:
                 continue  # Skip non-model runs
 
             run_dict = {
@@ -220,7 +228,6 @@ class MLflowResultFetcher(ResultFetcher):
 
         try:
             if is_local and self.mlartifacts_base_path:
-                # Adjusted the path construction
                 local_path = os.path.join(self.mlartifacts_base_path, self.experiment_id, run_id, 'artifacts', sanitize_mlflow_name(artifact_path))
             else:
                 local_path = self.client.download_artifacts(run_id, sanitize_mlflow_name(artifact_path), "/tmp")
@@ -228,6 +235,8 @@ class MLflowResultFetcher(ResultFetcher):
             if os.path.exists(local_path):
                 if artifact_path.endswith(".json"):
                     return pd.read_json(local_path, orient="split")
+                elif artifact_path.endswith(".csv"):
+                    return pd.read_csv(local_path)
                 else:
                     return local_path
             else:
@@ -246,10 +255,10 @@ class MLflowResultFetcher(ResultFetcher):
             for future, path in zip(futures, artifact_paths):
                 try:
                     result = future.result()
-                    artifacts[path] = result
+                    artifacts[sanitize_mlflow_name(path)] = result
                 except Exception as e:
-                    self.logger.error(f"Failed to retrieve artifact '{path}' for run '{run_id}': {e}")
-                    artifacts[path] = None
+                    self.logger.error(f"Failed to retrieve artifact '{sanitize_mlflow_name(path)}' for run '{run_id}': {e}")
+                    artifacts[sanitize_mlflow_name(path)] = None
         return artifacts
 
     def get_run_params(self, run) -> Dict[str, Any]:
@@ -266,7 +275,7 @@ class MLflowResultFetcher(ResultFetcher):
         run_data = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(self._fetch_single_run, run, artifact_paths)
+                executor.submit(self._fetch_single_run, run, [sanitize_mlflow_name(artifact) for artifact in artifact_paths])
                 for run in runs
             ]
             for future in tqdm(futures, desc="Fetching runs"):
@@ -310,7 +319,7 @@ class MLflowResultFetcher(ResultFetcher):
         
         return (
             bool(run['metrics']) and 
-            all(run['artifacts'].get(artifact) is not None for artifact in required_artifacts)
+            all(run['artifacts'].get(sanitize_mlflow_name(artifact)) is not None for artifact in required_artifacts)
         )
 
     def sanitize_run_data(self, run_data):

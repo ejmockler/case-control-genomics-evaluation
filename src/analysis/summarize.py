@@ -1,22 +1,36 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from typing import Dict, List, Optional, Tuple, Any, Generator
+import gc
+import logging
+import os
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Any, Optional
-import os
-
-os.environ['MLFLOW_HTTP_REQUEST_TIMEOUT'] = '1200'
-
 import requests
-from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests.exceptions
 
-import mlflow
-import logging
+from backoff import expo, on_exception
+from ratelimit import limits, sleep_and_retry
 from config import TrackingConfig
 
+os.environ['MLFLOW_HTTP_REQUEST_TIMEOUT'] = '1200'
+import mlflow
+
+# Slightly over the limit to account for timing variations
+CALLS = 16
+RATE_LIMIT = 1  # 1 second
+
 @lru_cache(maxsize=8096)
+@sleep_and_retry
+@limits(calls=CALLS, period=RATE_LIMIT)
+@on_exception(expo, 
+             requests.exceptions.RequestException, 
+             max_tries=10,
+             max_time=30)
 def query_ensembl(chrom: str, pos: int) -> Optional[List[Dict[str, Any]]]:
     """
     Query the Ensembl REST API for genes overlapping a specific genomic position.
+    Rate limited to 16 requests per second with aggressive retry strategy.
 
     Args:
         chrom (str): Chromosome (e.g., '1', 'X').
@@ -26,18 +40,17 @@ def query_ensembl(chrom: str, pos: int) -> Optional[List[Dict[str, Any]]]:
         Optional[List[Dict[str, Any]]]: List of gene data or None if the query fails.
     """
     server = "https://rest.ensembl.org"
-    ext = f"/overlap/region/human/{chrom}:{pos}-{pos}?feature=gene"
+    ext = f"/overlap/region/human/{chrom}:{pos}-{pos+1}?feature=gene"
     
     headers = {"Content-Type": "application/json"}
-    try:
-        response = requests.get(server + ext, headers=headers, timeout=10)
-        if response.ok:
-            return response.json()
-        else:
-            logging.getLogger(__name__).warning(f"Ensembl query failed for {chrom}:{pos} with status code {response.status_code}")
-            return None
-    except requests.RequestException as e:
-        logging.getLogger(__name__).error(f"Ensembl query exception for {chrom}:{pos}: {e}")
+    response = requests.get(server + ext, headers=headers, timeout=10)
+    
+    if response.ok:
+        return response.json()
+    elif response.status_code == 429:
+        raise requests.exceptions.RequestException(f"Rate limit exceeded: {response.status_code}")
+    else:
+        logging.getLogger(__name__).warning(f"Ensembl query failed for {chrom}:{pos} with status code {response.status_code}")
         return None
 
 @lru_cache(maxsize=8096)
@@ -90,7 +103,7 @@ def fetch_gene_symbols_threaded(feature_names: List[str]) -> List[str]:
     
     return gene_symbols
 
-def save_summary(summaries: Dict[str, Any], tracking_config: TrackingConfig):
+def save_summary(summaries: Dict[str, Any], tracking_config: TrackingConfig, outer_iteration: int = None, run_name: str = "summary"):
     """
     Save the summarized DataFrames to MLflow as a new run.
     Handles multiple summary DataFrames, including dictionaries of DataFrames.
@@ -99,17 +112,21 @@ def save_summary(summaries: Dict[str, Any], tracking_config: TrackingConfig):
     Args:
         summaries: Dictionary containing summarized DataFrames.
         tracking_config: Configuration for MLflow tracking.
+        outer_iteration: The outer bootstrap iteration number.
     """
     mlflow.set_tracking_uri(tracking_config.tracking_uri)
     mlflow.set_experiment(tracking_config.experiment_name)
 
-    with mlflow.start_run(run_name='summary'):
+    with mlflow.start_run(run_name=run_name, nested=True):
+        if outer_iteration is not None:
+            mlflow.set_tag("outer_iteration", outer_iteration)
         for name, df in summaries.items():
             if isinstance(df, dict):
                 # Handle dictionaries of DataFrames (e.g., feature_importances_summary)
                 for sub_name, sub_df in df.items():
                     if sub_df.empty:
-                        mlflow.log_text(f"{name}_{sub_name} summary is empty.", artifact_file=f"summaries/{name}_{sub_name}_empty.txt")
+                        mlflow.log_text(f"{name}_{sub_name} summary is empty.", 
+                                      artifact_file=f"summaries/{name}_{sub_name}_empty.txt")
                         continue
 
                     # Add 'gene_symbol' column if 'feature_name' exists using threading
@@ -123,15 +140,12 @@ def save_summary(summaries: Dict[str, Any], tracking_config: TrackingConfig):
                     # Save DataFrame as a CSV artifact
                     temp_path = f"{name}_{sub_name}_summary.csv" if 'summary' not in sub_name and 'summary' not in name else f"{name}_{sub_name}.csv"
                     sub_df.to_csv(temp_path, index=False)
-                    mlflow.log_artifact(temp_path, f"summaries/{name}/{sub_name}")
-                    os.remove(temp_path)  # Clean up temporary file
-
-                    # Log some basic metrics about the summary
-                    mlflow.log_metric(f"{name}_{sub_name}_row_count", len(sub_df))
-                    mlflow.log_metric(f"{name}_{sub_name}_column_count", len(sub_df.columns))
+                    mlflow.log_artifact(temp_path)
+                    os.remove(temp_path)
             else:
                 if df.empty:
-                    mlflow.log_text(f"{name} summary is empty.", artifact_file=f"summaries/{name}_empty.txt")
+                    mlflow.log_text(f"{name} summary is empty.", 
+                                  artifact_file=f"summaries/{name}_empty.txt")
                     continue
 
                 # Add 'gene_symbol' column if 'feature_name' exists using threading
@@ -139,13 +153,18 @@ def save_summary(summaries: Dict[str, Any], tracking_config: TrackingConfig):
                     logging.getLogger(__name__).info(f"Adding 'gene_symbol' to {name}_summary using threading")
                     feature_names = df['feature_name'].tolist()
                     gene_symbols = fetch_gene_symbols_threaded(feature_names)
-                    df['gene_symbol'] = gene_symbols
+                    feature_idx = df.columns.get_loc('feature_name') + 1
+                    df.insert(feature_idx, 'gene_symbol', gene_symbols)
 
                 # Save DataFrame as a CSV artifact
-                temp_path = f"{name}_summary.csv" if 'summary' not in name else f"{name}.csv"
+                if name.startswith('outer_bootstrap_'):
+                    temp_path = f"{name}.csv"  # Only change: don't append _summary for outer bootstrap files
+                else:
+                    temp_path = f"{name}_summary.csv" if 'summary' not in name else f"{name}.csv"
+                
                 df.to_csv(temp_path, index=False)
-                mlflow.log_artifact(temp_path, f"summaries/{name}")
-                os.remove(temp_path)  # Clean up temporary file
+                mlflow.log_artifact(temp_path)
+                os.remove(temp_path)
 
                 # Log some basic metrics about the summary
                 mlflow.log_metric(f"{name}_row_count", len(df))
@@ -183,31 +202,27 @@ class BootstrapSummarizer:
         return metrics_df
 
     def _construct_feature_importances_df(self) -> pd.DataFrame:
+        """
+        Constructs a DataFrame containing feature importances from all runs.
+        Preserves class-specific probabilities if they exist in the original data.
+
+        Returns:
+            A DataFrame containing feature importances and optionally class probabilities.
+        """
+        logger = logging.getLogger(__name__)
         fi_records = []
+        
         for run in self.run_data:
             fi_df = run['artifacts'].get('feature_importances.json')
             if fi_df is not None and not fi_df.empty:
                 fi_df = fi_df.copy()
                 fi_df['run_id'] = run['run_id']
-                
-                # Check if this is a multinomial naive bayes model with logprobs
-                if 'class_0' in fi_df.columns and 'class_1' in fi_df.columns:
-                    # Convert logprobs to probabilities
-                    fi_df['class_0'] = np.exp(fi_df['class_0'])
-                    fi_df['class_1'] = np.exp(fi_df['class_1'])
-                    
-                    # Compute mean probability across classes
-                    fi_df['feature_importances'] = fi_df[['class_0', 'class_1']].mean(axis=1)
-                    
-                    # Drop the original class columns
-                    fi_df = fi_df.drop(columns=['class_0', 'class_1'])
-                
                 fi_records.append(fi_df)
         
         if fi_records:
             feature_importances_df = pd.concat(fi_records, ignore_index=True)
-            logging.getLogger(__name__).debug(f"Feature Importances DataFrame Columns: {feature_importances_df.columns.tolist()}")
-            logging.getLogger(__name__).debug(f"Feature Importances DataFrame Head:\n{feature_importances_df.head()}")
+            logger.debug(f"Feature Importances DataFrame Columns: {feature_importances_df.columns.tolist()}")
+            logger.debug(f"Feature Importances DataFrame Head:\n{feature_importances_df.head()}")
             return feature_importances_df
         else:
             return pd.DataFrame()
@@ -391,81 +406,107 @@ class BootstrapSummarizer:
     def summarize_sample_metrics(self, sample_type: str) -> pd.DataFrame:
         """
         Summarize sample metrics separated by model and indexed by sample_id.
+        Maintains consistent column ordering by keeping metrics paired with their standard deviations.
 
         Args:
-            sample_type: Either 'crossval' or 'holdout'
+            sample_type (str): Either 'crossval' or 'holdout'
 
         Returns:
-            A DataFrame containing sample metrics per model, indexed by sample_id.
+            pd.DataFrame: DataFrame containing summarized metrics with consistent ordering:
+                - ID columns (sample_id, label, [table])
+                - Model-specific metric columns in pairs (metric_model, metric_model_std)
         """
         logger = logging.getLogger(__name__)
-        sample_metrics_df = self.crossval_sample_metrics_df if sample_type == 'crossval' else self.holdout_sample_metrics_df
+        
+        # Get appropriate metrics DataFrame based on sample type
+        sample_metrics_df = (self.crossval_sample_metrics_df if sample_type == 'crossval' 
+                            else self.holdout_sample_metrics_df)
 
         if sample_metrics_df.empty:
             logger.warning(f"{sample_type.capitalize()} sample metrics DataFrame is empty. Skipping summarization.")
             return pd.DataFrame()
 
-        # Identify metric columns (excluding run_id, dataset, sample_id, label, y_pred)
-        exclude_cols = ['run_id', 'dataset', 'sample_id', 'label', 'y_pred']
-        metric_cols = [col for col in sample_metrics_df.columns if col not in exclude_cols]
+        try:
+            # Reset index if it exists to ensure sample_id is a column
+            if sample_metrics_df.index.name:
+                sample_metrics_df = sample_metrics_df.reset_index()
+            
+            # Identify the sample ID column
+            sample_id_col = next((col for col in ['sample_id', 'index'] if col in sample_metrics_df.columns), None)
+            if sample_id_col is None:
+                logger.error("Could not find sample ID column")
+                return pd.DataFrame()
+            
+            if sample_id_col != 'sample_id':
+                sample_metrics_df = sample_metrics_df.rename(columns={sample_id_col: 'sample_id'})
 
-        if not metric_cols:
-            logger.warning(f"No metric columns found in {sample_type} sample_metrics_df. Skipping summarization.")
-            return pd.DataFrame()
+            # Define ID columns including table for holdout metrics
+            id_vars = ['run_id', 'sample_id', 'label']
+            if sample_type == 'holdout' and 'table' in sample_metrics_df.columns:
+                id_vars.append('table')
+            
+            # Get metric columns by excluding non-metric columns
+            exclude_cols = ['run_id', 'dataset', 'sample_id', 'label', 'y_pred', 'table']
+            metric_cols = [col for col in sample_metrics_df.columns if col not in exclude_cols]
 
-        id_cols = ['run_id', 'dataset', 'sample_id', 'label']
-        if sample_type == 'holdout':
-            id_cols.append('table')
+            if not metric_cols:
+                logger.warning(f"No metric columns found in {sample_type} sample_metrics_df")
+                return pd.DataFrame()
 
-        # Melt the DataFrame to long format
-        melted_df = sample_metrics_df.melt(
-            id_vars=id_cols,
-            value_vars=metric_cols,
-            var_name='metric_name',
-            value_name='value'
-        )
+            # Melt metrics into long format
+            melted_df = sample_metrics_df.melt(
+                id_vars=id_vars,
+                value_vars=metric_cols,
+                var_name='metric_name',
+                value_name='value'
+            )
 
-        # Define the sample metrics to retain
-        sample_metrics_to_retain = ['brier', 'log_loss', 'accuracy']  # Adjust based on actual metrics
+            # Merge with metrics_df to get model_name
+            merged_df = pd.merge(
+                melted_df,
+                self.metrics_df[['run_id', 'model_name']],
+                on='run_id',
+                how='left'
+            )
 
-        # Filter for relevant sample metrics
-        filtered_sample_metrics = melted_df[
-            melted_df['metric_name'].isin(sample_metrics_to_retain)
-        ].copy()
+            # Define grouping columns including table if present
+            group_cols = ['sample_id', 'label', 'model_name', 'metric_name']
+            if 'table' in merged_df.columns:
+                group_cols.append('table')
 
-        if filtered_sample_metrics.empty:
-            logger.warning(f"No relevant {sample_type} sample metrics found after filtering. Skipping summarization.")
-            return pd.DataFrame()
+            # Group and aggregate
+            agg_df = merged_df.groupby(group_cols)['value'].agg([
+                'mean',
+                'std'
+            ]).reset_index()
 
-        # Merge with metrics_df to get model_name
-        merged_df = pd.merge(
-            filtered_sample_metrics,
-            self.metrics_df[['run_id', 'model_name']],
-            on='run_id',
-            how='left'
-        )
+            # Create model-specific metric names
+            agg_df['metric_model'] = agg_df['metric_name'] + '_' + agg_df['model_name']
 
-        # Define preserved index columns
-        preserved_index_cols = ['sample_id', 'label']
-        if sample_type == 'holdout':
-            preserved_index_cols.append('table')
+            # Get the sample_id to label mapping from the original data
+            sample_label_map = merged_df[['sample_id', 'label']].drop_duplicates()
+            
+            # Create result DataFrame starting with sample_id and label
+            result_df = sample_label_map.copy()
 
-        # Pivot the DataFrame to have sample_id as index and metrics per model as separate columns
-        pivot_df = merged_df.pivot_table(
-            index=preserved_index_cols,
-            columns=['model_name', 'metric_name'],
-            values='value',
-            aggfunc='mean'  # Use appropriate aggregation function if needed
-        )
+            # Add table column if present
+            if 'table' in group_cols:
+                table_info = merged_df.groupby('sample_id')['table'].first()
+                result_df = result_df.merge(table_info.to_frame(), left_on='sample_id', right_index=True)
 
-        # Flatten the MultiIndex columns for pivoted columns only
-        pivoted_columns = [f"{metric}_{model}" for model, metric in pivot_df.columns]
-        pivot_df.columns = pivoted_columns
+            # Add model-specific metrics and their standard deviations as pairs
+            for metric_model in sorted(agg_df['metric_model'].unique()):
+                mask = agg_df['metric_model'] == metric_model
+                metric_data = agg_df[mask].set_index('sample_id')
+                result_df[metric_model] = result_df['sample_id'].map(metric_data['mean'])
+                result_df[f"{metric_model}_std"] = result_df['sample_id'].map(metric_data['std'])
 
-        # Reset index to convert preserved index columns back to DataFrame columns
-        pivot_df = pivot_df.reset_index()
+            return result_df
 
-        return pivot_df
+        except Exception as e:
+            logger.error(f"Error in summarize_sample_metrics: {str(e)}")
+            logger.debug("DataFrame info:", exc_info=True)
+            raise
 
     def summarize_feature_importances(self) -> Dict[str, pd.DataFrame]:
         """
@@ -477,18 +518,17 @@ class BootstrapSummarizer:
         Includes an 'all_models' summary with normalized feature importances.
     
         Returns:
-            A dictionary where keys are model names and values are corresponding
-            feature importance DataFrames with 'feature_importances_mean' and 
-            'feature_importances_std' columns. Additionally, includes an 'all_models'
-            key containing a normalized combined summary of feature importances across all models.
+            Dict[str, pd.DataFrame]: Dictionary containing:
+                - One DataFrame per model with feature importance summaries
+                - An 'all_models' entry with normalized overall feature importances
         """
         logger = logging.getLogger(__name__)
         feature_importance_summaries = {}
-    
+
         if self.feature_importances_df.empty:
             logger.warning("Feature importances DataFrame is empty. Skipping summarization.")
             return feature_importance_summaries
-    
+
         # Merge with metrics_df to get model_name
         merged_fi_df = pd.merge(
             self.feature_importances_df,
@@ -496,92 +536,62 @@ class BootstrapSummarizer:
             on='run_id',
             how='left'
         )
-    
-        # Identify unique models
-        models = merged_fi_df['model_name'].unique()
 
-        for model in models:
-            model_fi_df = merged_fi_df[merged_fi_df['model_name'] == model]
-
+        # Process each model separately
+        for model in merged_fi_df['model_name'].unique():
+            model_fi_df = merged_fi_df[merged_fi_df['model_name'] == model].copy()
+            
             if model_fi_df.empty:
-                logger.warning(f"No feature importances found for model {model}. Skipping.")
                 continue
 
-            aggregation = pd.DataFrame({'feature_name': model_fi_df['feature_name'].unique()})
+            # Initialize aggregation dictionary with feature_importances
+            agg_dict = {
+                'feature_importances': ['mean', 'std']
+            }
+            
+            # Add class columns to aggregation only if they contain non-null values
+            class_cols = [col for col in model_fi_df.columns if col.startswith('class_')]
+            for col in class_cols:
+                if not model_fi_df[col].isna().all():  # Only include if column has non-null values
+                    agg_dict[col] = ['mean', 'std']
+            
+            # Perform aggregation
+            fi_agg = model_fi_df.groupby('feature_name').agg(agg_dict)
+            
+            # Flatten column names
+            if isinstance(fi_agg.columns, pd.MultiIndex):
+                fi_agg.columns = [
+                    f"{col[0]}_mean" if col[1] == 'mean' else f"{col[0]}_std"
+                    for col in fi_agg.columns
+                ]
+            
+            feature_importance_summaries[model] = fi_agg.reset_index()
 
-            if 'feature_importances' in model_fi_df.columns:
-                # Single-class feature importances
-                fi_agg = model_fi_df.groupby('feature_name')['feature_importances'].agg(['mean', 'std']).reset_index()
-                fi_agg.rename(columns={
-                    'mean': 'feature_importances_mean',
-                    'std': 'feature_importances_std'
-                }, inplace=True)
-                aggregation = aggregation.merge(fi_agg, on='feature_name', how='left')
-
-            class_columns = [col for col in model_fi_df.columns if col.startswith('class_')]
-            if class_columns:
-                # Multi-class feature importances (e.g., MultinomialNB with logprob)
-                # Assuming feature_log_prob_ columns are named 'class_0', 'class_1', etc.
-                if 'feature_importances' in model_fi_df.columns:
-                    logger.info(f"Both 'feature_importances' and class-specific columns found for model {model}. Aggregating both.")
-                else:
-                    # Compute log odds ratio
-                    log_odds_df = model_fi_df[class_columns[0]] - model_fi_df[class_columns[1]]
-
-                    aggregation['feature_importances_mean'] = log_odds_df.mean(axis=1)
-                    aggregation['feature_importances_std'] = log_odds_df.std(axis=1)
-
-                # Aggregate class-specific importances
-                for col in class_columns:
-                    class_agg = model_fi_df.groupby('feature_name')[col].agg(['mean', 'std']).reset_index()
-                    class_agg.rename(columns={
-                        'mean': f'{col}_mean',
-                        'std': f'{col}_std'
-                    }, inplace=True)
-                    aggregation = aggregation.merge(class_agg, on='feature_name', how='left')
-
-            if aggregation[['feature_importances_mean', 'feature_importances_std']].isnull().all().all():
-                logger.warning(f"Unexpected feature importances structure for model {model}. Skipping summarization.")
-                continue
-
-            feature_importance_summaries[model] = aggregation
-
-        # Combine all model summaries into a single DataFrame for overall analysis
-        combined_feature_importances = []
-        for model, df in feature_importance_summaries.items():
-            df_copy = df.copy()
-            df_copy['model_name'] = model
-            combined_feature_importances.append(df_copy)
-    
-        if combined_feature_importances:
-            combined_df = pd.concat(combined_feature_importances, ignore_index=True)
-    
-            # Aggregate feature importances across all models
-            # Compute the mean of feature_importances_mean and aggregate variance
-            all_models_aggregation = combined_df.groupby('feature_name').agg({
-                'feature_importances_mean': 'mean',  # Mean of mean importances
-                'feature_importances_std': lambda x: np.sqrt(np.mean(np.square(x)))  # Aggregated std using RMS
+        # Create all_models summary using only feature_importances
+        if feature_importance_summaries:
+            all_models_dfs = []
+            for model, df in feature_importance_summaries.items():
+                df_subset = df[['feature_name', 'feature_importances_mean', 'feature_importances_std']].copy()
+                df_subset['model'] = model
+                all_models_dfs.append(df_subset)
+            
+            all_models_df = pd.concat(all_models_dfs, ignore_index=True)
+            
+            # Aggregate across models
+            all_models_summary = all_models_df.groupby('feature_name').agg({
+                'feature_importances_mean': 'mean',
+                'feature_importances_std': lambda x: np.sqrt(np.mean(np.square(x)))  # RMS of stds
             }).reset_index()
-    
-            # Rename columns appropriately
-            all_models_aggregation.rename(columns={
-                'feature_importances_mean': 'feature_importances_mean',
-                'feature_importances_std': 'feature_importances_std'
-            }, inplace=True)
-    
-            # Normalize feature_importances_mean so that they sum to 1
-            total_importance = all_models_aggregation['feature_importances_mean'].sum()
+            
+            # Normalize feature importances
+            total_importance = all_models_summary['feature_importances_mean'].sum()
             if total_importance > 0:
-                all_models_aggregation['feature_importances_mean'] /= total_importance
-                # Normalize the standard deviation proportionally
-                all_models_aggregation['feature_importances_std'] /= total_importance
-                # Optional: Validate normalization
-                assert np.isclose(all_models_aggregation['feature_importances_mean'].sum(), 1.0), "Normalization error: Sum of feature importances is not 1."
+                all_models_summary['feature_importances_mean'] /= total_importance
+                all_models_summary['feature_importances_std'] /= total_importance
+                feature_importance_summaries['all_models'] = all_models_summary
             else:
-                logger.warning("Total feature importances across all models sum to zero. Skipping normalization for 'all_models' summary.")
-    
-            feature_importance_summaries['all_models'] = all_models_aggregation[['feature_name', 'feature_importances_mean', 'feature_importances_std']]
-    
+                logger.warning("Total feature importances sum to zero. Skipping all_models summary.")
+
         return feature_importance_summaries
 
     def summarize_all(self) -> Dict[str, Any]:
@@ -632,12 +642,17 @@ class FeatureSelectionSummarizer:
             if validation_df is not None and not validation_df.empty:
                 validation_df = validation_df.copy()
                 validation_df['run_id'] = run['run_id']
+                
+                # Convert accuracy_std to variance for aggregation
+                validation_df['variance_accuracy'] = validation_df['accuracy_std'] ** 2
+                # Convert prediction_std to variance for aggregation
+                if 'prediction_std' in validation_df.columns:
+                    validation_df['variance_prediction'] = validation_df['prediction_std'] ** 2
+                
                 validation_records.append(validation_df)
 
         if validation_records:
             validation_metrics_df = pd.concat(validation_records, ignore_index=True)
-            # Convert std_accuracy to variance for aggregation purposes
-            validation_metrics_df['variance_accuracy'] = validation_metrics_df['std_accuracy'] ** 2
             logger.debug(f"Validation Metrics DataFrame Columns: {validation_metrics_df.columns.tolist()}")
             logger.debug(f"Validation Metrics DataFrame Head:\n{validation_metrics_df.head()}")
             return validation_metrics_df
@@ -660,14 +675,13 @@ class FeatureSelectionSummarizer:
         # Melt the DataFrame to long format
         melted_df = self.validation_metrics_df.melt(
             id_vars=['run_id', 'sample_id', 'label', 'draw_count'],
-            value_vars=['mean_accuracy', 'std_accuracy'],
+            value_vars=[
+                'accuracy', 'accuracy_std',
+                'avg_prediction', 'prediction_std'
+            ],
             var_name='metric_name',
             value_name='value'
         )
-
-        # Log the structure of the melted DataFrame
-        logger.debug(f"Long Validation Metrics DataFrame Columns: {melted_df.columns.tolist()}")
-        logger.debug(f"Long Validation Metrics DataFrame Head:\n{melted_df.head()}")
 
         return melted_df
 
@@ -685,16 +699,16 @@ class FeatureSelectionSummarizer:
 
         # Calculate total number of draws
         total_draws = self.validation_metrics_df['draw_count'].sum()
-
+        
         # Calculate weighted mean_accuracy using draw_count as weights
         weighted_mean_accuracy = np.average(
-            self.validation_metrics_df['mean_accuracy'],
+            self.validation_metrics_df['accuracy'],
             weights=self.validation_metrics_df['draw_count']
         )
 
         # Calculate overall variance using the formula:
         # Var_total = (sum(n_i * (Var_i + (mu_i - mu_total)^2))) / N_total
-        mean_diff_sq = (self.validation_metrics_df['mean_accuracy'] - weighted_mean_accuracy) ** 2
+        mean_diff_sq = (self.validation_metrics_df['accuracy'] - weighted_mean_accuracy) ** 2  # Changed from mean_accuracy
         total_variance = (
             (self.validation_metrics_df['draw_count'] * (self.validation_metrics_df['variance_accuracy'] + mean_diff_sq))
             .sum()
@@ -706,7 +720,7 @@ class FeatureSelectionSummarizer:
         # Prepare the summary DataFrame
         summary = pd.DataFrame({
             'weighted_mean_accuracy': [weighted_mean_accuracy],
-            'overall_std_accuracy': [overall_std_accuracy],
+            'accuracy_std': [overall_std_accuracy],
             'total_draw_count': [total_draws]
         })
 
@@ -728,7 +742,7 @@ class FeatureSelectionSummarizer:
 
         melted_df = self.validation_metrics_df.melt(
             id_vars=['run_id', 'sample_id', 'label', 'draw_count'],
-            value_vars=['mean_accuracy', 'std_accuracy'],
+            value_vars=['accuracy', 'accuracy_std'],
             var_name='metric',
             value_name='value'
         )
@@ -741,50 +755,57 @@ class FeatureSelectionSummarizer:
     def summarize_sample_validation_metrics(self) -> pd.DataFrame:
         """
         Summarize sample validation metrics by aggregating mean and standard deviation.
+        Also includes the total draw count for each sample.
 
         Returns:
-            A DataFrame where each sample_id has aggregated metrics with their respective means and standard deviations.
+            A DataFrame where each sample_id has aggregated metrics with their respective 
+            means, standard deviations, total draw count, and label.
         """
         logger = logging.getLogger(__name__)
         if self.validation_metrics_df.empty:
             logger.warning("Validation metrics DataFrame is empty. Skipping sample validation metrics summarization.")
             return pd.DataFrame()
 
-        # Define the metrics to aggregate
-        metrics_to_aggregate = ['mean_accuracy', 'std_accuracy']
-
         # Melt the DataFrame to long format if not already done
         melted_df = self.long_validation_metrics_df
 
         # Pivot to have metrics as columns
         pivot_df = melted_df.pivot_table(
-            index=['sample_id'],
+            index=['sample_id', 'label'],
             columns='metric_name',
             values='value',
-            aggfunc='mean'  # Initial aggregation; adjust if necessary
+            aggfunc='mean'  # Initial aggregation
         ).reset_index()
 
-        # Calculate aggregated variance for each metric
-        variance_df = self.validation_metrics_df.groupby('sample_id')['variance_accuracy'].sum().reset_index()
-        variance_df.rename(columns={'variance_accuracy': 'aggregated_variance_accuracy'}, inplace=True)
+        # Calculate aggregated variance and total draw count for each sample_id
+        agg_df = self.validation_metrics_df.groupby('sample_id').agg({
+            'variance_accuracy': 'sum',
+            'variance_prediction': 'sum',
+            'draw_count': 'sum'
+        }).reset_index()
+        agg_df.rename(columns={
+            'draw_count': 'total_draw_count'
+        }, inplace=True)
 
-        # Merge pivoted metrics with aggregated variance
-        summary_df = pd.merge(pivot_df, variance_df, on='sample_id', how='left')
+        # Merge pivoted metrics with aggregated variance and draw count
+        summary_df = pd.merge(pivot_df, agg_df, on='sample_id', how='left')
 
-        # Calculate standard deviation from aggregated variance
-        summary_df['aggregated_std_accuracy'] = np.sqrt(summary_df['aggregated_variance_accuracy'])
+        # Calculate standard deviations from aggregated variances
+        summary_df['accuracy_std'] = np.sqrt(summary_df['variance_accuracy'])
+        summary_df['prediction_std'] = np.sqrt(summary_df['variance_prediction'])
 
         # Select and rename relevant columns
-        summary_df = summary_df.rename(columns={
-            'mean_accuracy': 'accuracy_mean',
-            'aggregated_std_accuracy': 'accuracy_std'
-        })
-
-        # Retain only sample_id, accuracy_mean, and accuracy_std
-        summary_df = summary_df[['sample_id', 'accuracy_mean', 'accuracy_std']]
+        summary_df = summary_df[[
+            'sample_id', 
+            'label', 
+            'accuracy', 
+            'accuracy_std',
+            'avg_prediction',
+            'prediction_std', 
+            'total_draw_count'
+        ]]
 
         logger.debug(f"Sample Validation Metrics Summary:\n{summary_df.head()}")
-
         return summary_df
 
     def summarize_all(self) -> Dict[str, Any]:
@@ -804,3 +825,324 @@ class FeatureSelectionSummarizer:
 
         return summaries
 
+class OuterBootstrapSummarizer:
+    """
+    Summarizes results across multiple outer bootstrap iterations.
+    """
+    def __init__(self, outer_bootstrap_summaries: List[Dict[str, Any]]):
+        """
+        Initialize summarizer with dynamic artifact mapping.
+        
+        Args:
+            outer_bootstrap_summaries: List of summary runs containing artifacts with metrics:
+                - crossval/holdout: f1, accuracy, mcc, roc_auc, pr_auc (with _mean/_std)
+                - feature selection: brier, log_loss (with _mean/_std)
+        """
+        self.bootstrap_summaries = outer_bootstrap_summaries
+        self.logger = logging.getLogger(__name__)
+        
+        # First scan available artifacts across all summaries
+        available_artifacts = set()
+        for summary in self.bootstrap_summaries:
+            # Only add artifacts that aren't None
+            available_artifacts.update(
+                key for key, value in summary['artifacts'].items() 
+                if value is not None
+            )
+        
+        # Map artifact paths to DataFrame collections
+        self.model_metrics_dfs = []
+        self.holdout_metrics_dfs = []
+        self.sample_metrics_dfs = []
+        self.holdout_sample_metrics_dfs = []
+        self.feature_selection_validation_dfs = []
+        self.feature_selection_sample_validation_dfs = []
+        
+        # Feature importance DataFrames by model
+        self.feature_importances_by_model = {}
+        
+        # Process each summary
+        for summary in self.bootstrap_summaries:
+            artifacts = summary['artifacts']
+            
+            # Core metrics - only append if not None
+            if 'crossval_model_metrics_summary.csv' in artifacts and artifacts['crossval_model_metrics_summary.csv'] is not None:
+                self.model_metrics_dfs.append(artifacts['crossval_model_metrics_summary.csv'])
+                
+            if 'holdout_model_metrics_summary.csv' in artifacts and artifacts['holdout_model_metrics_summary.csv'] is not None:
+                self.holdout_metrics_dfs.append(artifacts['holdout_model_metrics_summary.csv'])
+                
+            if 'crossval_sample_metrics_summary.csv' in artifacts and artifacts['crossval_sample_metrics_summary.csv'] is not None:
+                self.sample_metrics_dfs.append(artifacts['crossval_sample_metrics_summary.csv'])
+                
+            if 'holdout_sample_metrics_summary.csv' in artifacts and artifacts['holdout_sample_metrics_summary.csv'] is not None:
+                self.holdout_sample_metrics_dfs.append(artifacts['holdout_sample_metrics_summary.csv'])
+                
+            # Feature selection metrics - only append if not None
+            if 'feature_selection_validation_summary.csv' in artifacts and artifacts['feature_selection_validation_summary.csv'] is not None:
+                self.feature_selection_validation_dfs.append(artifacts['feature_selection_validation_summary.csv'])
+                
+            if 'feature_selection_sample_validation_metrics_summary.csv' in artifacts and artifacts['feature_selection_sample_validation_metrics_summary.csv'] is not None:
+                self.feature_selection_sample_validation_dfs.append(
+                    artifacts['feature_selection_sample_validation_metrics_summary.csv']
+                )
+            
+            # Feature importances by model - only process if not None
+            for artifact_name in artifacts:
+                if (artifact_name.startswith('feature_importances_summary_') and 
+                    artifact_name.endswith('.csv') and 
+                    artifacts[artifact_name] is not None):
+                    model_name = artifact_name.replace('feature_importances_summary_', '').replace('.csv', '')
+                    if model_name not in self.feature_importances_by_model:
+                        self.feature_importances_by_model[model_name] = []
+                    self.feature_importances_by_model[model_name].append(artifacts[artifact_name])
+        
+        # Remove empty model entries
+        self.feature_importances_by_model = {
+            model: dfs for model, dfs in self.feature_importances_by_model.items() 
+            if dfs  # Only keep models with non-empty DataFrame lists
+        }
+        
+        # Log available artifacts
+        self.logger.info(f"Found {len(available_artifacts)} unique artifact types")
+        self.logger.info(f"Loaded feature importances for models: {list(self.feature_importances_by_model.keys())}")
+
+    def summarize_model_metrics(self) -> pd.DataFrame:
+        """Memory-efficient model metrics aggregation"""
+        metrics = ['f1', 'case_accuracy', 'control_accuracy', 'mcc', 'roc_auc', 'pr_auc']
+        aggregated_metrics = []
+        
+        # Process one DataFrame at a time
+        for df in self.model_metrics_dfs:
+            for model in df['model_name'].unique():
+                for dataset in df['dataset'].unique():
+                    model_data = df[
+                        (df['model_name'] == model) & 
+                        (df['dataset'] == dataset)
+                    ]
+                    
+                    record = {'model_name': model, 'dataset': dataset}
+                    
+                    for metric in metrics:
+                        if f'{metric}_mean' in model_data.columns:
+                            record[f'{metric}_mean'] = model_data[f'{metric}_mean'].mean()
+                            if f'{metric}_std' in model_data.columns:
+                                variances = model_data[f'{metric}_std'].pow(2)
+                                record[f'{metric}_std'] = np.sqrt(variances.mean())
+                    
+                    aggregated_metrics.append(record)
+            
+            # Clear DataFrame reference
+            del df
+            gc.collect()
+        
+        return pd.DataFrame(aggregated_metrics)
+
+    def summarize_feature_importances(self) -> Dict[str, pd.DataFrame]:
+        """
+        Aggregate feature importances across outer bootstraps, separated by model.
+        
+        Returns:
+            Dict mapping model names to their aggregated feature importance DataFrames,
+            plus an 'all_models' key with normalized combined importances.
+        """
+        if not self.feature_importances_by_model:
+            self.logger.warning("No feature importance data available")
+            return {}
+        
+        aggregated_importances = {}
+        all_models_data = []
+        
+        # Process each model's feature importances
+        for model_name, importance_dfs in self.feature_importances_by_model.items():
+            if not importance_dfs:
+                continue
+                
+            # Combine all iterations for this model
+            combined_fi = pd.concat(importance_dfs, ignore_index=True)
+            
+            # Build aggregation dictionary
+            agg_dict = {
+                'feature_importances_mean': 'mean',
+                'feature_importances_std': lambda x: np.sqrt(np.mean(x.pow(2)))  # RMS of stds
+            }
+            
+            # Add class log probability columns if they exist
+            class_mean_cols = [col for col in combined_fi.columns if col.endswith('_log_prob_mean')]
+            for mean_col in class_mean_cols:
+                base_name = mean_col[:-5]  # Remove '_mean' suffix
+                std_col = f"{base_name}_std"
+                if std_col in combined_fi.columns:
+                    agg_dict[mean_col] = 'mean'
+                    agg_dict[std_col] = lambda x: np.sqrt(np.mean(x.pow(2)))  # RMS of stds
+            
+            # Group by feature name and aggregate
+            model_fi = combined_fi.groupby('feature_name').agg(agg_dict).reset_index()
+            
+            # Store model-specific results
+            aggregated_importances[model_name] = model_fi
+            
+            # Add to all-models collection (only using feature importances, not class probs)
+            model_fi_copy = model_fi[['feature_name', 'feature_importances_mean', 'feature_importances_std']].copy()
+            model_fi_copy['model'] = model_name
+            all_models_data.append(model_fi_copy)
+        
+        # Create all-models summary if we have data
+        if all_models_data:
+            all_models_df = pd.concat(all_models_data, ignore_index=True)
+            
+            # Aggregate across models
+            all_models_summary = all_models_df.groupby('feature_name').agg({
+                'feature_importances_mean': 'mean',
+                'feature_importances_std': lambda x: np.sqrt(np.mean(np.square(x)))
+            }).reset_index()
+            
+            # Normalize feature importances
+            total_importance = all_models_summary['feature_importances_mean'].sum()
+            if total_importance > 0:
+                all_models_summary['feature_importances_mean'] /= total_importance
+                all_models_summary['feature_importances_std'] /= total_importance
+                aggregated_importances['all_models'] = all_models_summary
+        
+        return aggregated_importances
+
+    def summarize_sample_metrics(self, metrics_type: str = 'sample') -> pd.DataFrame:
+        """
+        Aggregate sample metrics across outer bootstraps.
+        """
+        dfs = {
+            'sample': self.sample_metrics_dfs,
+            'holdout': self.holdout_sample_metrics_dfs,
+            'feature_selection': self.feature_selection_sample_validation_dfs
+        }[metrics_type]
+
+        if not dfs:
+            return pd.DataFrame()
+
+        # Combine all sample metrics DataFrames with their run_ids
+        dfs_with_run_ids = []
+        for summary, df in zip(self.bootstrap_summaries, dfs):
+            df_copy = df.copy()
+            df_copy['run_id'] = summary['run_id']
+            dfs_with_run_ids.append(df_copy)
+
+        combined_metrics = pd.concat(dfs_with_run_ids, ignore_index=True)
+        
+        # Identify column types
+        count_metrics = ['total_draw_count']
+        std_suffix = '_std'
+        preserved_cols = ['sample_id', 'label']
+        if metrics_type == 'holdout' and 'table' in combined_metrics.columns:
+            preserved_cols.append('table')
+        
+        # Get base metric names (without _std or model suffixes)
+        base_metrics = {
+            col.split('_')[0] for col in combined_metrics.columns 
+            if col not in preserved_cols + ['run_id'] and col not in count_metrics
+        }
+        
+        # Group by sample_id and aggregate
+        aggregated_metrics = []
+        ordered_columns = preserved_cols.copy()
+        first_sample = combined_metrics.iloc[0]
+        
+        # Add total_draw_count if it exists
+        if 'total_draw_count' in first_sample:
+            ordered_columns.append('total_draw_count')
+        
+        # Process each base metric to build ordered column list
+        for base_metric in base_metrics:
+            metric_cols = [col for col in combined_metrics.columns if col.startswith(f"{base_metric}_") or col == base_metric]
+            
+            # Case 1: Direct mean/std pair
+            if base_metric in combined_metrics.columns:
+                ordered_columns.append(base_metric)
+                std_col = f"{base_metric}_std"
+                if std_col in combined_metrics.columns:
+                    ordered_columns.append(std_col)
+                continue
+            
+            # Case 2: Model-specific metrics
+            model_cols = [col for col in metric_cols if not col.endswith(std_suffix)]
+            if model_cols:
+                # Add each model-specific column and its std
+                for col in model_cols:
+                    ordered_columns.append(col)
+                    std_col = f"{col}_std"
+                    if std_col in combined_metrics.columns or len(combined_metrics['run_id'].unique()) > 1:
+                        ordered_columns.append(std_col)
+                
+                # Add overall metric if multiple models
+                if len(model_cols) > 1:
+                    ordered_columns.append(base_metric)
+                    ordered_columns.append(f"{base_metric}_std")
+        
+        # Now process each sample using the ordered columns
+        for sample_id in combined_metrics['sample_id'].unique():
+            sample_data = combined_metrics[combined_metrics['sample_id'] == sample_id]
+            record = {}
+            
+            # Process columns in order
+            for col in ordered_columns:
+                if col in preserved_cols:
+                    record[col] = sample_data[col].iloc[0]
+                elif col == 'total_draw_count':
+                    record[col] = sample_data[col].astype(int).sum()
+                elif col.endswith(std_suffix):
+                    base_col = col[:-4]  # Remove _std suffix
+                    if col in sample_data.columns:
+                        # Use RMS for existing std columns
+                        record[col] = np.sqrt(sample_data[col].pow(2).mean())
+                    else:
+                        # For model-specific metrics, find the relevant columns
+                        base_cols = [c for c in sample_data.columns if c.startswith(f"{base_col}_") and not c.endswith(std_suffix)]
+                        if base_cols:
+                            values = sample_data[base_cols].mean(axis=1)
+                            if len(values) > 1:
+                                record[col] = values.std(ddof=1)
+                            else:
+                                record[col] = np.nan
+                        elif base_col in sample_data.columns and len(sample_data[base_col]) > 1:
+                            # Direct metric case
+                            record[col] = sample_data[base_col].std(ddof=1)
+                        else:
+                            record[col] = np.nan
+                else:
+                    # Handle means for both direct and model-specific metrics
+                    if col in sample_data.columns:
+                        record[col] = sample_data[col].mean()
+                    else:
+                        # For overall metrics with multiple models
+                        model_cols = [c for c in sample_data.columns if c.startswith(f"{col}_") and not c.endswith(std_suffix)]
+                        if model_cols:
+                            record[col] = sample_data[model_cols].mean(axis=1).mean()
+            
+            aggregated_metrics.append(record)
+        
+        return pd.DataFrame(aggregated_metrics, columns=ordered_columns)
+
+    def summarize_all(self) -> Dict[str, Any]:
+        """
+        Generate all summaries across outer bootstrap iterations.
+        
+        Returns:
+            Dictionary containing all available summary DataFrames.
+        """
+        summaries = {
+            'outer_bootstrap_model_metrics': self.summarize_model_metrics(),
+            'outer_bootstrap_feature_importances': self.summarize_feature_importances(),
+            'outer_bootstrap_sample_metrics': self.summarize_sample_metrics('sample'),
+            'outer_bootstrap_holdout_sample_metrics': self.summarize_sample_metrics('holdout'),
+            'outer_bootstrap_feature_selection_sample_metrics': self.summarize_sample_metrics('feature_selection')
+        }
+        
+        # Filter out empty DataFrames and handle feature importances specially
+        filtered_summaries = {}
+        for key, value in summaries.items():
+            if isinstance(value, dict):  # Feature importances case
+                if value:  # Only include if there are any model results
+                    filtered_summaries[key] = value
+            elif not value.empty:  # Regular DataFrame case
+                filtered_summaries[key] = value
+        
+        return filtered_summaries
