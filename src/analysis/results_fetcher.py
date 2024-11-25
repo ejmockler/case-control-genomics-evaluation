@@ -271,33 +271,17 @@ class MLflowResultFetcher(ResultFetcher):
     def download_run_artifacts(self, run, artifact_paths: List[str]) -> Dict[str, Any]:
         run_id = run['run_id'] if isinstance(run, dict) else run.info.run_id
         
-        # Limit concurrent threads based on system resources
-        max_workers = min(
-            len(artifact_paths),
-            (os.cpu_count() or 1) * 2,  # CPU-based limit
-            32,  # Hard maximum
-        )
-        
-        # Add delay between batch processing
-        batch_size = 10
+        # Sequential processing of artifacts instead of nested ThreadPoolExecutor
         artifacts = {}
-        
-        for i in range(0, len(artifact_paths), batch_size):
-            batch_paths = artifact_paths[i:i + batch_size]
+        for path in artifact_paths:
+            try:
+                result = self._fetch_single_artifact(run_id, path)
+                artifacts[sanitize_mlflow_name(path)] = result
+            except Exception as e:
+                self.logger.error(f"Failed to retrieve artifact '{sanitize_mlflow_name(path)}' for run '{run_id}': {e}")
+                artifacts[sanitize_mlflow_name(path)] = None
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(self._fetch_single_artifact, run_id, path) 
-                          for path in batch_paths]
-                
-                for future, path in zip(futures, batch_paths):
-                    try:
-                        result = future.result()
-                        artifacts[sanitize_mlflow_name(path)] = result
-                    except Exception as e:
-                        self.logger.error(f"Failed to retrieve artifact '{sanitize_mlflow_name(path)}' for run '{run_id}': {e}")
-                        artifacts[sanitize_mlflow_name(path)] = None
-            
-            # Add small delay between batches to allow resource cleanup
+            # Add small delay between artifacts to prevent overwhelming the system
             time.sleep(0.1)
         
         return artifacts
@@ -322,7 +306,7 @@ class MLflowResultFetcher(ResultFetcher):
         )
         
         # Process runs in batches to prevent resource exhaustion
-        batch_size = 10
+        batch_size = min(700, len(runs))
         run_data = []
         
         for i in range(0, len(runs), batch_size):
@@ -334,7 +318,7 @@ class MLflowResultFetcher(ResultFetcher):
                     for run in batch_runs
                 ]
                 
-                for future in tqdm(futures, desc=f"Fetching runs batch {i//batch_size + 1}/{(len(runs) + batch_size - 1)//batch_size}"):
+                for future in tqdm(futures, desc=f"Fetching artifacts; batch {i//batch_size + 1}/{(len(runs) + batch_size - 1)//batch_size}"):
                     try:
                         data = future.result()
                         run_data.append(data)
