@@ -1,6 +1,8 @@
 import os
+import ray
 from pathlib import Path
 import shutil
+
 os.environ['MLFLOW_HTTP_REQUEST_TIMEOUT'] = '1200'
 import hail as hl
 from analysis.results_fetcher import MLflowResultFetcher
@@ -94,69 +96,104 @@ def setup_mlflow_experiment(trackingConfig):
 
 def summarize_inner_bootstrap_results(outer_iteration: int):
     logger = logging.getLogger(__name__)
-    logger.info("Starting summarization of run data.")
+    logger.info(f"Starting summarization of run data for iteration {outer_iteration}")
 
-    # Construct the mlartifacts base path (for local runs)
-    mlartifacts_base_path = os.path.join(os.path.dirname(os.getcwd()), 'src', 'mlartifacts')
+    try:
+        # Construct the mlartifacts base path (for local runs)
+        mlartifacts_base_path = os.path.join(os.path.dirname(os.getcwd()), 'src', 'mlartifacts')
 
-    # Initialize the ResultFetcher with the mlartifacts base path
-    result_fetcher = MLflowResultFetcher(
-        experiment_name=config.tracking.experiment_name,
-        tracking_uri=config.tracking.tracking_uri,
-        mlartifacts_base_path=mlartifacts_base_path
-    )
+        # Initialize the ResultFetcher with the mlartifacts base path
+        result_fetcher = MLflowResultFetcher(
+            experiment_name=config.tracking.experiment_name,
+            tracking_uri=config.tracking.tracking_uri,
+            mlartifacts_base_path=mlartifacts_base_path
+        )
 
-    # Fetch all runs
-    bootstrap_runs = result_fetcher.fetch_all_run_metadata(run_type='model')
-    feature_selection_runs = result_fetcher.fetch_all_run_metadata(run_type='feature_selection')
+        # Fetch runs metadata
+        bootstrap_runs = result_fetcher.fetch_all_run_metadata(
+            run_type='model', 
+            outer_iteration=outer_iteration
+        )
+        feature_selection_runs = result_fetcher.fetch_all_run_metadata(
+            run_type='feature_selection', 
+            outer_iteration=outer_iteration
+        )
+        # Define artifact paths for different run types
+        bootstrap_artifact_paths = [
+            'feature_importances.json', 
+            'train/confusion_matrix.json',
+            'train/roc_curve.json',
+            'train/pr_curve.json',
+            'test/confusion_matrix.json',
+            'test/roc_curve.json',
+            'test/pr_curve.json',
+            'test_sample_metrics.json',
+            'train_sample_metrics.json',
+        ] + [
+            f"holdout/{tableMetadata.name}_sample_metrics.json" 
+            for tableMetadata in config.holdout_tables.tables
+        ]
+        feature_selection_artifact_paths = [
+            'validation_aggregated_results.json',
+        ]
+        # Fetch run data in parallel
+        bootstrap_run_data = result_fetcher.fetch_runs_parallel(bootstrap_runs, bootstrap_artifact_paths)
+        feature_selection_run_data = result_fetcher.fetch_runs_parallel(feature_selection_runs, feature_selection_artifact_paths)
 
-    # Define artifact paths to fetch
-    # Define artifact paths for different run types
-    bootstrap_artifact_paths = [
-        'feature_importances.json', 
-        'train/confusion_matrix.json',
-        'train/roc_curve.json',
-        'train/pr_curve.json',
-        'test/confusion_matrix.json',
-        'test/roc_curve.json',
-        'test/pr_curve.json',
-        'test_sample_metrics.json',
-        'train_sample_metrics.json',
-    ] + [
-        f"holdout/{tableMetadata.name}_sample_metrics.json" 
-        for tableMetadata in config.holdout_tables.tables
-    ]
+        # Sanitize the bootstrap run data
+        sanitized_bootstrap_data = result_fetcher.sanitize_run_data(bootstrap_run_data)
 
-    feature_selection_artifact_paths = [
-        'validation_aggregated_results.json',
-    ]
+        logger.info("Summarizing run data.")
+        
+        # Initialize BootstrapSummarizer
+        bootstrap_summarizer = BootstrapSummarizer(sanitized_bootstrap_data)
+        # Generate bootstrap summaries
+        bootstrap_summaries = bootstrap_summarizer.summarize_all()
+        
+        # Initialize FeatureSelectionSummarizer
+        feature_selection_summarizer = FeatureSelectionSummarizer(feature_selection_run_data)
+        # Generate feature selection summaries
+        feature_selection_summaries = feature_selection_summarizer.summarize_all()
+        
+        # Combine all summaries
+        all_summaries = {**bootstrap_summaries, **feature_selection_summaries}
+        
+        # Save all summaries to output directory
+        save_summary(all_summaries, config.tracking, outer_iteration=outer_iteration)
 
-    # Fetch run data in parallel
-    bootstrap_run_data = result_fetcher.fetch_runs_parallel(bootstrap_runs, bootstrap_artifact_paths)
-    feature_selection_run_data = result_fetcher.fetch_runs_parallel(feature_selection_runs, feature_selection_artifact_paths)
+        logger.info("Summarization completed and summaries saved.")
+        # Fetch run data in parallel
+        bootstrap_run_data = result_fetcher.fetch_runs_parallel(bootstrap_runs, bootstrap_artifact_paths)
+        feature_selection_run_data = result_fetcher.fetch_runs_parallel(feature_selection_runs, feature_selection_artifact_paths)
 
-    # Sanitize the bootstrap run data
-    sanitized_bootstrap_data = result_fetcher.sanitize_run_data(bootstrap_run_data)
+        # Sanitize the bootstrap run data
+        sanitized_bootstrap_data = result_fetcher.sanitize_run_data(bootstrap_run_data)
 
-    logger.info("Summarizing run data.")
-    
-    # Initialize BootstrapSummarizer
-    bootstrap_summarizer = BootstrapSummarizer(sanitized_bootstrap_data)
-    # Generate bootstrap summaries
-    bootstrap_summaries = bootstrap_summarizer.summarize_all()
-    
-    # Initialize FeatureSelectionSummarizer
-    feature_selection_summarizer = FeatureSelectionSummarizer(feature_selection_run_data)
-    # Generate feature selection summaries
-    feature_selection_summaries = feature_selection_summarizer.summarize_all()
-    
-    # Combine all summaries
-    all_summaries = {**bootstrap_summaries, **feature_selection_summaries}
-    
-    # Save all summaries to output directory
-    save_summary(all_summaries, config.tracking, outer_iteration=outer_iteration)
+        logger.info("Summarizing run data.")
+        
+        # Initialize BootstrapSummarizer
+        bootstrap_summarizer = BootstrapSummarizer(sanitized_bootstrap_data)
+        # Generate bootstrap summaries
+        bootstrap_summaries = bootstrap_summarizer.summarize_all()
+        
+        # Initialize FeatureSelectionSummarizer
+        feature_selection_summarizer = FeatureSelectionSummarizer(feature_selection_run_data)
+        # Generate feature selection summaries
+        feature_selection_summaries = feature_selection_summarizer.summarize_all()
+        
+        # Combine all summaries
+        all_summaries = {**bootstrap_summaries, **feature_selection_summaries}
+        
+        # Save all summaries to output directory
+        save_summary(all_summaries, config.tracking, outer_iteration=outer_iteration)
 
-    logger.info("Summarization completed and summaries saved.")
+        logger.info("Summarization completed and summaries saved.")
+    finally:
+        # Clean up
+        bootstrap_summaries = None
+        feature_selection_summaries = None
+        
+    logger.info(f"Completed summarization for iteration {outer_iteration}")
 
 
 def summarize_outer_bootstrap_results():
@@ -208,91 +245,131 @@ def summarize_outer_bootstrap_results():
 
     logger.info("Completed outer bootstrap summarization.")
 
+def cleanup_iteration_resources(logger: logging.Logger):
+    """Clean up resources after each iteration"""
+    logger.info("Cleaning up iteration resources...")
+    
+    # Clear MLflow cache
+    mlflow.end_run()
+    
+    logger.info("Iteration cleanup completed")
+
+
 def main():
     setup_logging()
     logger = logging.getLogger(__name__)
     tmp_dir = Path(tempfile.gettempdir())
 
+    try:
+        # Initialize Hail with more conservative memory settings
+        hl.init(
+            default_reference='GRCh38',
+            spark_conf={
+                'spark.driver.memory': '12g',
+                'spark.executor.memory': '12g',
+                'spark.executor.cores': '4',
+                'spark.cleaner.periodicGC.interval': '1min',  # More frequent GC
+            }
+        )
 
-    # Initialize Hail
-    hl.init(
-        default_reference='GRCh38',
-        spark_conf={
-            'spark.driver.memory': '12g',
-            'spark.executor.memory': '12g',
-            'spark.executor.cores': '4',
-        }
-    )
-
-    # Load VCF Data
-    logger.info("Loading VCF data.")
-    vcf_loader = create_loader(config.vcf)
-    vcf_mt = vcf_loader.load_data()
-    logger.info("VCF data loaded successfully.")
-
-    # Load GTF Data
-    logger.info("Loading GTF data.")
-    gtf_loader = create_loader(config.gtf)
-    gtf_ht = gtf_loader.load_data()
-    logger.info("GTF data loaded successfully.")
-
-    # Load GMT Data
-    if config.gmt:
-        logger.info("Loading GMT data.")
-        gmt_loader = create_loader(config.gmt)
-        gmt_df = gmt_loader.load_data()
-        logger.info("GMT data loaded successfully.")
-    else:
-        logger.warning("No GMT configuration found. Skipping gene set filtering.")
-        gmt_df = None
-
-    # Initialize GenotypeProcessor
-    genotype_processor = GenotypeProcessor(config.vcf, config.gtf)
-
-    # Process Genotype Data with GTF and GMT
-    logger.info("Processing genotype data.")
-    mt_processed = genotype_processor.process(vcf_mt, gtf_ht, gmt_df)
-    sample_ids = mt_processed.s.collect()
-    logger.info("Genotype data processed successfully.")
-
-    # Save processed data as Parquet for downstream analysis
-    logger.info("Converting processed data to Parquet format.")
-    with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
-        parquet_path = tmp.name
-        spark_df = genotype_processor.to_spark_df(mt_processed)
-        pivoted_df = genotype_processor.pivot_genotypes(spark_df)
-        pivoted_df.write.parquet(parquet_path, mode="overwrite")
-        logger.info(f"Processed data saved to {parquet_path}")
-
-        try:
-            # Clean up Spark/Hail resources
-            spark_df.unpersist()
-            pivoted_df.unpersist()
-            hl.stop()
-            cleanup_hail_files(tmp_dir, logger)
-            logger.info("Completed Hail cleanup")
-
+        # Use context manager for initial data processing
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
+            parquet_path = tmp.name
+            
+            # Load and process data in blocks
+            logger.info("Loading and processing data...")
+            vcf_mt = None
+            gtf_ht = None
+            mt_processed = None
+            
+            try:
+                # Load VCF Data
+                vcf_loader = create_loader(config.vcf)
+                vcf_mt = vcf_loader.load_data()
+                
+                # Load GTF Data
+                gtf_loader = create_loader(config.gtf)
+                gtf_ht = gtf_loader.load_data()
+                
+                # Load GMT Data conditionally
+                gmt_df = None
+                if config.gmt:
+                    gmt_loader = create_loader(config.gmt)
+                    gmt_df = gmt_loader.load_data()
+                
+                # Process data
+                genotype_processor = GenotypeProcessor(config.vcf, config.gtf)
+                mt_processed = genotype_processor.process(vcf_mt, gtf_ht, gmt_df)
+                sample_ids = mt_processed.s.collect()
+                
+                # Convert to Parquet
+                logger.info("Converting to Parquet format...")
+                spark_df = genotype_processor.to_spark_df(mt_processed)
+                pivoted_df = genotype_processor.pivot_genotypes(spark_df)
+                pivoted_df.write.parquet(parquet_path, mode="overwrite")
+                
+            finally:
+                # Clean up initial processing resources
+                if spark_df is not None:
+                    spark_df.unpersist()
+                if pivoted_df is not None:
+                    pivoted_df.unpersist()
+                    
+                # Clear references to large objects
+                vcf_mt = None
+                gtf_ht = None
+                mt_processed = None
+                spark_df = None
+                pivoted_df = None
+                
+                # Force cleanup
+                cleanup_hail_files(tmp_dir, logger)
+            
+            # Set up MLflow experiment
             experiment_id = setup_mlflow_experiment(config.tracking)
-            # Initialize SampleProcessor with config
+            
+            # Initialize sample processor
             sample_processor = SampleProcessor(config, sample_ids)
 
-            for i in range(config.sampling.outer_bootstrap_iterations):
-                bootstrap_models(
-                    sample_processor=sample_processor,
-                    parquet_path=parquet_path,
-                    samplingConfig=config.sampling,
-                    trackingConfig=config.tracking,
-                    experiment_id=experiment_id,
-                    stack=stack,
-                    outer_iteration=i+1
-                )
-                summarize_inner_bootstrap_results(outer_iteration=i+1)
+            
+            # Outer bootstrap iterations
+            for i in range(config.sampling.resume_outer_iteration_from, config.sampling.outer_bootstrap_iterations):
+                logger.info(f"Starting outer bootstrap iteration {i+1}")
+                
+                try:
+                    # Initialize Ray for this iteration
+                    ray.init(ignore_reinit_error=True)
+                    
+                    # Run bootstrap models
+                    bootstrap_models(
+                        sample_processor=sample_processor,
+                        parquet_path=parquet_path,
+                        samplingConfig=config.sampling,
+                        trackingConfig=config.tracking,
+                        experiment_id=experiment_id,
+                        stack=stack,
+                        outer_iteration=i+1
+                    )
+                    
+                    # Summarize results
+                    summarize_inner_bootstrap_results(outer_iteration=i+1)
+                    
+                finally:
+                    # Clean up iteration resources
+                    cleanup_iteration_resources(logger)
+                    logger.info(f"Completed outer bootstrap iteration {i+1}")
+            
+            # Final summary
             summarize_outer_bootstrap_results()
-        finally:
-            # Clean up temporary parquet file
-            os.unlink(parquet_path)
-            logger.info(f"Cleaned up temporary file: {parquet_path}")
-
+            
+    except Exception as e:
+        logger.error(f"Error in main execution: {e}", exc_info=True)
+        raise
     
+    finally:
+        # Final cleanup
+        cleanup_hail_files(tmp_dir, logger)
+        logger.info("Main execution completed")
+
 if __name__ == "__main__":
     main()

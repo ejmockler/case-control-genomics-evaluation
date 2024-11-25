@@ -171,7 +171,7 @@ class VCFLoader(DataLoader, BgzipMixin):
             mt = hl.read_matrix_table(mt_path)
         else:
             self.logger.info(f"Importing VCF and writing MatrixTable to disk: {mt_path}")
-            mt = hl.import_vcf(file_path, reference_genome='GRCh38', force_bgz=True, min_partitions=100)
+            mt = hl.import_vcf(file_path, reference_genome='GRCh38', force_bgz=True, min_partitions=10, array_elements_required=False)
             mt.write(mt_path, overwrite=True)
         
         # Apply filters if specified in the config

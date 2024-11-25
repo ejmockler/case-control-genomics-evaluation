@@ -159,6 +159,7 @@ def evaluate_model(
         y_train, 
         X_test, 
         y_test, 
+        parquet_path: str,
         sample_processor: SampleProcessor, 
         trackingConfig: TrackingConfig, 
         samplingConfig: SamplingConfig, 
@@ -304,7 +305,7 @@ def evaluate_model(
 
                 # Fetch genotypes for these samples
                 _, X_holdout, _, y_holdout = prepare_data(
-                    parquet_path=f"/tmp/{trackingConfig.experiment_name}.parquet",
+                    parquet_path=parquet_path,
                     sample_processor=sample_processor,
                     train_samples=[],
                     test_samples=holdout_sample_ids,
@@ -464,6 +465,7 @@ def process_iteration(
                 y_train=y_train,
                 X_test=X_test,
                 y_test=y_test,
+                parquet_path=parquet_path,
                 trackingConfig=trackingConfig,
                 samplingConfig=samplingConfig,
                 sample_processor=sample_processor,
@@ -596,43 +598,48 @@ def parallel_feature_selection(
         mean_interval = float(np.mean(selected_intervals))
         std_interval = float(np.std(selected_intervals))
         logger.info(f"Mean selected credible interval: {mean_interval:.4f} ± {std_interval:.4f}")
-        
-        # Log to MLflow
-        if trackingConfig:
-            with mlflow.start_run(run_name=f"Feature_Selection_Summary") as run:
-                mlflow.log_metric("mean_selected_credible_interval", mean_interval)
-                mlflow.log_metric("std_selected_credible_interval", std_interval)
-                mlflow.set_tag("outer_iteration", outer_iteration)
-                # Create a summary DataFrame with feature counts
-                all_features = np.concatenate(selected_features_list)
-                feature_counts = pd.DataFrame(
-                    all_features, 
-                    columns=['Feature']
-                ).value_counts().reset_index()
-                feature_counts.columns = ['Feature', 'Count']
-                
-                # Sort by count in descending order
-                feature_counts = feature_counts.sort_values('Count', ascending=False)
-                
-                # Log the summary DataFrame and intervals
-                mlflow.log_table(feature_counts, artifact_file="selected_features.json")
-                mlflow.log_table(pd.DataFrame({'Credible Interval': selected_intervals}), 
-                               artifact_file="selected_credible_intervals.json")
-                mlflow.set_tag("outer_iteration", outer_iteration)
     else:
         mean_interval = samplingConfig.feature_credible_interval
         std_interval = None
         logger.warning("No valid selected credible intervals found. Using default interval.")
 
-    # Concatenate selected features from all iterations
+    # Count occurrences of each feature and keep only those appearing multiple times
     all_selected_features = np.concatenate(selected_features_list)
-
-    # Remove duplicates while preserving order
-    unique_selected_features = pd.unique(all_selected_features)
-
+    feature_counts = pd.Series(all_selected_features).value_counts()
+    features_to_keep = feature_counts[feature_counts > 1].index
+    unique_selected_features = pd.Series(all_selected_features).drop_duplicates()
+    unique_selected_features = unique_selected_features[unique_selected_features.isin(features_to_keep)]
+    
     num_variants = len(unique_selected_features)
-
-    logger.info(f"{num_variants} of {total_variants} variants selected across all iterations.")
+    logger.info(f"{num_variants} of {total_variants} variants selected across all iterations (after removing single occurrences).")
+    
+    # Log results to MLflow if tracking is enabled
+    if trackingConfig:
+        with mlflow.start_run(run_name=f"Feature_Selection_Summary") as run:
+            mlflow.set_tag("outer_iteration", outer_iteration)
+            
+            if len(selected_intervals) > 0:
+                mlflow.log_metric("mean_selected_credible_interval", mean_interval)
+                mlflow.log_metric("std_selected_credible_interval", std_interval)
+                mlflow.log_table(
+                    pd.DataFrame({'Credible Interval': selected_intervals}), 
+                    artifact_file="selected_credible_intervals.json"
+                )
+            
+            # Log feature selection metrics
+            feature_counts_df = feature_counts.reset_index()
+            feature_counts_df.columns = ['Feature', 'Count']
+            mlflow.log_table(feature_counts_df, artifact_file="all_feature_counts.json")
+            
+            kept_features_df = feature_counts[features_to_keep].reset_index()
+            kept_features_df.columns = ['Feature', 'Count']
+            mlflow.log_table(kept_features_df, artifact_file="selected_features.json")
+            
+            mlflow.log_metrics({
+                "total_unique_features": len(feature_counts),
+                "features_kept": len(features_to_keep),
+                "features_filtered": len(feature_counts) - len(features_to_keep)
+            })
 
     return FeatureSelectionResult(
         selected_features=unique_selected_features,

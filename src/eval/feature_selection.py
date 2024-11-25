@@ -171,7 +171,6 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         else:
             progress_bar = range(1, self.num_iterations + 1)
 
-        start_time = time.time()
         for epoch in progress_bar:
             epoch_loss = 0.0
             for X_batch, y_batch in train_loader:
@@ -183,7 +182,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
             val_loss = 0.0
             for X_val_batch, y_val_batch in val_loader:
                 val_loss += svi.evaluate_loss(X_val_batch, y_val_batch)
-            avg_val_loss = val_loss / len(val_loader)
+            avg_val_loss = val_loss / len(val_loader.dataset)
             
             current_params = {k: v.clone().detach() for k, v in pyro.get_param_store().items()}
             y_val_pred_prob = compute_proba(current_params, X_val)
@@ -304,6 +303,8 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
         except Exception as e:
             self.logger.error(f"Tail detection failed: {e}")
             raise ValueError("Feature selection using the tail approach failed.")
+        finally:
+            pyro.clear_param_store()
 
         return self
 
@@ -346,7 +347,7 @@ class BayesianFeatureSelector(BaseEstimator, TransformerMixin):
 def detect_beta_tail_threshold(effect_sizes: np.ndarray, 
                              k_neighbors: int = 10,
                              smooth_window: int = 1,
-                             base_cumulative_density_threshold: float = 0.01,
+                             base_cumulative_density_threshold: float = 0.005,
                              base_sensitivity: float = 0.005) -> tuple:
     """
     Detect a threshold in the KDE using global density normalization to dynamically
@@ -385,14 +386,12 @@ def detect_beta_tail_threshold(effect_sizes: np.ndarray,
         kde_values += norm.pdf(x_grid, loc=point, scale=bandwidths[i])
     kde_values /= len(effect_sizes)  # Average the contributions
     
-    # Normalize the KDE values
-    normalized_kde_values = kde_values / np.sum(kde_values)
+    # Apply smoothing directly to kde_values
+    kde_smooth = gaussian_filter1d(kde_values, sigma=smooth_window)
     
-    # Apply smoothing
-    kde_smooth = gaussian_filter1d(normalized_kde_values, sigma=smooth_window)
-    
-    # Calculate normalized cumulative density
-    cumulative_density = np.cumsum(kde_smooth[::-1])[::-1]
+    # Calculate cumulative density (using proper integration)
+    dx = x_grid[1] - x_grid[0]  # grid spacing
+    cumulative_density = np.cumsum(kde_smooth[::-1] * dx)[::-1]
     
     # Find start of tail region using cumulative density
     tail_indices = np.where(cumulative_density <= base_cumulative_density_threshold)[0]

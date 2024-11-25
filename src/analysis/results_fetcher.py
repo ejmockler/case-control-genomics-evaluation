@@ -9,6 +9,8 @@ from tqdm import tqdm
 import os
 from urllib.parse import urlparse
 from mlflow.exceptions import MlflowException
+import time
+import gc
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
@@ -137,13 +139,16 @@ class MLflowResultFetcher(ResultFetcher):
             return "model"
 
     def fetch_all_run_metadata(
-        self, run_type: Optional[str] = None
+        self, 
+        run_type: Optional[str] = None,
+        outer_iteration: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Fetch all runs from the experiment, optionally filtering by run type.
+        Fetch all runs from the experiment, optionally filtering by run type and outer bootstrap iteration.
 
         Args:
             run_type (str, optional): Type of runs to fetch ('model', 'bootstrap', 'feature_selection', 'outer_bootstrap').
+            outer_iteration (int, optional): Specific outer bootstrap iteration to fetch runs for.
 
         Returns:
             List of runs with their details.
@@ -161,18 +166,34 @@ class MLflowResultFetcher(ResultFetcher):
             'summary': 'summary'
         }
 
+        filter_conditions = []
+
+        # Add run type filter
         if run_type:
             if run_type not in run_type_map:
                 raise ValueError(f"Invalid run_type: {run_type}. Must be 'model', 'bootstrap', 'feature_selection', 'outer_bootstrap', or 'summary'.")
 
             if run_type == 'summary':
-                filter_string = "tags.mlflow.runName = 'summary'"
+                filter_conditions.append("tags.mlflow.runName = 'summary'")
             elif run_type in ['bootstrap', 'feature_selection', 'outer_bootstrap']:
                 prefix = run_type_map[run_type]
-                filter_string = f"tags.mlflow.runName LIKE '{prefix}%'"
+                filter_conditions.append(f"tags.mlflow.runName LIKE '{prefix}%'")
             elif run_type == 'model':
                 # For 'model' runs, exclude bootstrap and feature selection runs
-                filter_string = "tags.mlflow.runName != 'Bootstrap_%' AND tags.mlflow.runName != 'Feature_Selection_%' AND tags.mlflow.runName != 'outer_bootstrap_%' AND tags.mlflow.runName != 'summary'"
+                filter_conditions.append(
+                    "tags.mlflow.runName != 'Bootstrap_%' AND "
+                    "tags.mlflow.runName != 'Feature_Selection_%' AND "
+                    "tags.mlflow.runName != 'outer_bootstrap_%' AND "
+                    "tags.mlflow.runName != 'summary'"
+                )
+
+        # Add outer iteration filter
+        if outer_iteration is not None:
+            filter_conditions.append(f"tags.outer_iteration = '{outer_iteration}'")
+
+        # Combine filter conditions
+        if filter_conditions:
+            filter_string = " AND ".join(filter_conditions)
 
         self.logger.info(f"Fetching runs for experiment {self.experiment.name} with filter: {filter_string}")
 
@@ -181,7 +202,7 @@ class MLflowResultFetcher(ResultFetcher):
                 runs_page = self.client.search_runs(
                     experiment_ids=[self.experiment_id],
                     filter_string=filter_string,
-                    max_results=10000,     # Use a safe value below the server threshold
+                    max_results=10000,
                     page_token=page_token
                 )
                 
@@ -211,6 +232,7 @@ class MLflowResultFetcher(ResultFetcher):
                 "run_type": extracted_run_type,
                 "metrics": run.data.metrics,
                 "params": run.data.params,
+                "outer_iteration": run.data.tags.get("outer_iteration")
             }
             processed_runs.append(run_dict)
 
@@ -249,16 +271,35 @@ class MLflowResultFetcher(ResultFetcher):
     def download_run_artifacts(self, run, artifact_paths: List[str]) -> Dict[str, Any]:
         run_id = run['run_id'] if isinstance(run, dict) else run.info.run_id
         
-        with ThreadPoolExecutor(max_workers=min(len(artifact_paths), 8)) as executor:
-            futures = [executor.submit(self._fetch_single_artifact, run_id, path) for path in artifact_paths]
-            artifacts = {}
-            for future, path in zip(futures, artifact_paths):
-                try:
-                    result = future.result()
-                    artifacts[sanitize_mlflow_name(path)] = result
-                except Exception as e:
-                    self.logger.error(f"Failed to retrieve artifact '{sanitize_mlflow_name(path)}' for run '{run_id}': {e}")
-                    artifacts[sanitize_mlflow_name(path)] = None
+        # Limit concurrent threads based on system resources
+        max_workers = min(
+            len(artifact_paths),
+            (os.cpu_count() or 1) * 2,  # CPU-based limit
+            32,  # Hard maximum
+        )
+        
+        # Add delay between batch processing
+        batch_size = 10
+        artifacts = {}
+        
+        for i in range(0, len(artifact_paths), batch_size):
+            batch_paths = artifact_paths[i:i + batch_size]
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(self._fetch_single_artifact, run_id, path) 
+                          for path in batch_paths]
+                
+                for future, path in zip(futures, batch_paths):
+                    try:
+                        result = future.result()
+                        artifacts[sanitize_mlflow_name(path)] = result
+                    except Exception as e:
+                        self.logger.error(f"Failed to retrieve artifact '{sanitize_mlflow_name(path)}' for run '{run_id}': {e}")
+                        artifacts[sanitize_mlflow_name(path)] = None
+            
+            # Add small delay between batches to allow resource cleanup
+            time.sleep(0.1)
+        
         return artifacts
 
     def get_run_params(self, run) -> Dict[str, Any]:
@@ -272,19 +313,39 @@ class MLflowResultFetcher(ResultFetcher):
         artifact_paths: List[str],
         max_workers: int = 8,
     ) -> List[Dict[str, Any]]:
+        # Calculate optimal number of workers based on system resources
+        max_workers = min(
+            max_workers,
+            (os.cpu_count() or 1) * 2,  # CPU-based limit
+            32,  # Hard maximum
+            len(runs)  # Don't create more workers than necessary
+        )
+        
+        # Process runs in batches to prevent resource exhaustion
+        batch_size = 10
         run_data = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(self._fetch_single_run, run, [sanitize_mlflow_name(artifact) for artifact in artifact_paths])
-                for run in runs
-            ]
-            for future in tqdm(futures, desc="Fetching runs"):
-                try:
-                    data = future.result()
-                    run_data.append(data)
-                except Exception as e:
-                    self.logger.error(f"Error fetching run data: {e}")
-                    raise e
+        
+        for i in range(0, len(runs), batch_size):
+            batch_runs = runs[i:i + batch_size]
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(self._fetch_single_run, run, [sanitize_mlflow_name(artifact) for artifact in artifact_paths])
+                    for run in batch_runs
+                ]
+                
+                for future in tqdm(futures, desc=f"Fetching runs batch {i//batch_size + 1}/{(len(runs) + batch_size - 1)//batch_size}"):
+                    try:
+                        data = future.result()
+                        run_data.append(data)
+                    except Exception as e:
+                        self.logger.error(f"Error fetching run data: {e}")
+                        raise e
+            
+            # Add delay between batches to allow resource cleanup
+            time.sleep(0.2)
+            gc.collect()  # Force garbage collection between batches
+        
         return run_data
 
     def _fetch_single_run(
